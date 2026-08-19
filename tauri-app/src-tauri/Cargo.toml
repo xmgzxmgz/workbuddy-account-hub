@@ -1,0 +1,25 @@
+[package]
+name = "workbuddy-account-hub"
+version = "0.1.0"
+edition = "2021"
+description = "WorkBuddy 账户中枢：多账号切换 + 跨设备同步 + 积分/签到"
+authors = ["you"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+account_ops = { path = "crates/account_ops" }
+wb_api = { path = "crates/wb_api" }
+
+[profile.release]
+panic = "abort"
+strip = true
+opt-level = "s"
+
+# account_ops: 纯文件/进程逻辑（无网络）；wb_api: 官方接口网络层
+[workspace]
+members = ["crates/account_ops", "crates/wb_api"]
