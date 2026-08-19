@@ -1,0 +1,36 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "WorkBuddy Account Hub",
+  "version": "0.1.0",
+  "identifier": "com.workbuddy.accounthub",
+  "build": {
+    "frontendDist": "../src",
+    "devUrl": "http://localhost:5173",
+    "beforeDevCommand": "node dev-server.mjs",
+    "beforeBuildCommand": "echo noop"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "WorkBuddy 账户中枢",
+        "width": 1080,
+        "height": 720,
+        "resizable": true,
+        "fullscreen": false
+      }
+    ],
+    "security": {
+      "csp": null
+    },
+    "withGlobalTauri": true
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["app", "dmg"],
+    "icon": ["icons/icon.png"],
+    "macOS": {
+      "signingIdentity": null,
+      "minimumSystemVersion": "10.13"
+    }
+  }
+}
