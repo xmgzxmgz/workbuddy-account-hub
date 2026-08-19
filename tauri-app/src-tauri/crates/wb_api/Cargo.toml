@@ -1,0 +1,10 @@
+[package]
+name = "wb_api"
+version = "0.1.0"
+edition = "2021"
+description = "WorkBuddy 官方接口网络层（读数本机登录态 + 额度/签到/记忆/JWT/环境）"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+reqwest = { version = "0.12", features = ["json", "blocking", "rustls-tls"] }
