@@ -1,0 +1,814 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>WorkBuddy 账户全景仪表盘</title>
+  <style>
+    :root{
+      --bg:#0f1115; --panel:#161a21; --line:#2a2f3a; --fg:#e6e6e6; --muted:#8a93a6;
+      --blue:#2b6cff; --green:#27c08a; --red:#ff5c5c; --amber:#ffb454; --purple:#a779ff;
+      --card:#1b212b; --sidebar:#12161d;
+    }
+    *{box-sizing:border-box;}
+    html,body{margin:0;height:100vh;width:100vw;overflow:hidden;}
+    ::-webkit-scrollbar{width:0;height:0;background:transparent;}
+    html{scrollbar-width:none;}
+    body{font-family:system-ui,-apple-system,"PingFang SC",sans-serif;background:var(--bg);color:var(--fg);display:flex;width:100vw;height:100vh;font-size:14px;}
+    /* 侧边栏 */
+    .sidebar{width:260px;min-width:260px;max-width:260px;background:var(--sidebar);border-right:1px solid var(--line);height:100vh;overflow-y:auto;padding:14px 10px;display:flex;flex-direction:column;gap:5px;overscroll-behavior:contain;}
+    .sidebar h3{font-size:10px;letter-spacing:.08em;color:var(--muted);margin:12px 7px 5px;text-transform:uppercase;}
+    .me{background:linear-gradient(135deg,#23314d,#1a2233);border:1px solid var(--line);border-radius:10px;padding:10px;margin-bottom:4px;}
+    .me .av{width:34px;height:34px;border-radius:8px;background:var(--blue);display:flex;align-items:center;justify-content:center;font-weight:700;font-size:16px;color:#fff;float:left;margin-right:9px;}
+    .me .nm{font-weight:700;font-size:13px;}
+    .me .id{color:var(--muted);font-size:10px;margin-top:1px;word-break:break-all;}
+    .me .badge{display:inline-block;margin-top:6px;font-size:9px;padding:2px 7px;border-radius:20px;background:rgba(39,192,138,.18);color:var(--green);}
+    .acc{display:flex;align-items:center;gap:8px;padding:7px 9px;border-radius:8px;cursor:pointer;border:1px solid transparent;transition:.12s;}
+    .acc:hover{background:#1c2330;}
+    .acc.active{background:#1d2a44;border-color:var(--blue);}
+    .acc .dot{width:26px;height:26px;border-radius:7px;background:#222a38;display:flex;align-items:center;justify-content:center;font-weight:700;color:#7ea6ff;font-size:11px;flex-shrink:0;}
+    .acc .info{overflow:hidden;}
+    .acc .info .n{font-size:12px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+    .acc .info .s{font-size:10px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+    .acc .cur{font-size:9px;color:var(--green);border:1px solid var(--green);border-radius:4px;padding:0 4px;margin-left:auto;}
+    .dir{display:flex;align-items:center;gap:7px;padding:6px 9px;border-radius:7px;cursor:pointer;font-size:11.5px;color:var(--muted);}
+    .dir:hover{background:#1c2330;color:var(--fg);}
+    .dir.active{color:var(--fg);background:#1d2a44;}
+    .dir .sz{margin-left:auto;font-size:10px;}
+    .dir.has{color:#7ea6ff;}
+    /* 主区 */
+    .main{flex:1;min-width:0;width:100%;height:100vh;overflow-y:auto;overflow-x:hidden;padding:18px 22px;overscroll-behavior:contain;}
+    .topbar{display:flex;align-items:center;gap:12px;margin-bottom:16px;}
+    .topbar h1{font-size:18px;margin:0;}
+    .topbar .sub{color:var(--muted);font-size:12px;}
+    .topbar .spacer{flex:1;}
+    button{padding:7px 12px;border:0;border-radius:8px;background:var(--blue);color:#fff;cursor:pointer;font-size:12px;font-weight:600;}
+    button.secondary{background:var(--line);color:var(--fg);font-weight:500;}
+    .links a{color:#7ea6ff;text-decoration:none;font-size:12px;}
+    .grid{display:grid;gap:14px;}
+    .cards{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin-bottom:2px;}
+    @media(max-width:1100px){.cards{grid-template-columns:repeat(2,minmax(0,1fr));}}
+    @media(max-width:720px){.cards{grid-template-columns:1fr;}}
+    .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:13px 15px;}
+    .card .label{color:var(--muted);font-size:11.5px;margin-bottom:6px;}
+    .card .value{font-size:22px;font-weight:800;letter-spacing:-.5px;}
+    .card .value.green{color:var(--green);} .card .value.blue{color:var(--blue);} .card .value.amber{color:var(--amber);} .card .value.purple{color:var(--purple);}
+    .card .meta{color:var(--muted);font-size:11px;margin-top:5px;line-height:1.4;}
+    .panel{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:14px 16px;}
+    .panel h2{font-size:14px;margin:0 0 12px;display:flex;align-items:center;gap:8px;}
+    .panel h2 .tag{font-size:10px;color:var(--muted);font-weight:400;}
+    .two{display:grid;grid-template-columns:1fr 1fr;gap:14px;}
+    @media(max-width:920px){.two{grid-template-columns:1fr;}}
+    /* 进度环 */
+    .ring-wrap{display:flex;align-items:center;gap:14px;}
+    .ring{--p:0;--c:var(--green);width:78px;height:78px;border-radius:50%;background:conic-gradient(var(--c) calc(var(--p)*1%), #232a36 0);display:flex;align-items:center;justify-content:center;flex-shrink:0;position:relative;}
+    .ring::after{content:"";position:absolute;inset:8px;border-radius:50%;background:var(--card);}
+    .ring .rt{position:relative;z-index:1;text-align:center;}
+    .ring .rt b{font-size:17px;display:block;}
+    .ring .rt span{font-size:9px;color:var(--muted);}
+    table{width:100%;border-collapse:collapse;font-size:12px;}
+    th,td{text-align:left;padding:7px 8px;border-bottom:1px solid var(--line);}
+    th{color:var(--muted);font-weight:600;font-size:10.5px;background:#131820;position:sticky;top:0;}
+    td.num{font-variant-numeric:tabular-nums;}
+    tr:hover td{background:#131820;}
+    .pill{display:inline-block;padding:2px 8px;border-radius:20px;font-size:10.5px;background:var(--line);color:var(--fg);}
+    .pill.gift{background:rgba(43,108,255,.18);color:#7ea6ff;}
+    .pill.trial{background:rgba(255,180,84,.18);color:var(--amber);}
+    .soon{color:var(--red);font-weight:600;}
+    .ok{color:var(--green);}
+    .bar{height:6px;background:var(--line);border-radius:4px;margin-top:4px;overflow:hidden;}
+    .bar>i{display:block;height:100%;background:var(--green);}
+    .kv{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:4px 18px;}
+    .kv .item{display:flex;justify-content:space-between;border-bottom:1px dashed var(--line);padding:4px 0;font-size:12px;}
+    .kv .item .k{color:var(--muted);} .kv .item .v{font-weight:600;text-align:right;max-width:60%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+    .memo{background:#0b0e13;border:1px solid var(--line);border-radius:8px;padding:12px;font-size:12px;line-height:1.7;white-space:pre-wrap;max-height:220px;overflow:auto;color:#c9d2e3;}
+    .timeline{display:flex;gap:7px;flex-wrap:wrap;margin-top:6px;}
+    .chip{font-size:10.5px;padding:4px 9px;border-radius:20px;background:#1c2330;border:1px solid var(--line);}
+    .chip.done{background:rgba(39,192,138,.12);border-color:rgba(39,192,138,.4);color:var(--green);}
+    .chip.today{background:rgba(43,108,255,.15);border-color:var(--blue);color:#9ebcff;font-weight:700;}
+    pre{background:#0b0e13;padding:12px;border-radius:8px;overflow:auto;max-height:220px;font-size:11px;margin:0;white-space:pre-wrap;word-break:break-all;}
+    .empty{color:var(--muted);font-size:12px;padding:6px 0;}
+    .note{color:var(--red);font-size:11px;margin-top:8px;}
+    .note.ok{color:var(--amber);}
+    .section-title{font-size:11.5px;color:var(--muted);margin:16px 4px 8px;font-weight:600;}
+    /* 记忆画像结构化 */
+    .sec{margin:8px 0;border:1px solid var(--line);border-radius:8px;overflow:hidden;background:#0b0e13;}
+    .sec>summary{cursor:pointer;padding:8px 12px;font-size:12.5px;font-weight:600;background:#131820;list-style:none;display:flex;align-items:center;gap:6px;}
+    .sec>summary::-webkit-details-marker{display:none;}
+    .sec>summary::before{content:'▸';color:var(--muted);transition:.15s;font-size:10px;}
+    .sec[open]>summary::before{content:'▾';}
+    .sec-body{padding:10px 12px;font-size:12px;line-height:1.7;white-space:pre-wrap;color:#c9d2e3;}
+    /* 到期时间轴 */
+    .axis{margin-bottom:14px;}
+    .axis-track{position:relative;height:58px;background:linear-gradient(90deg,#16202e,#131820);border:1px solid var(--line);border-radius:8px;}
+    .axis-line{position:absolute;left:6%;right:6%;top:30px;height:2px;background:var(--line);}
+    .axis-dot{position:absolute;top:18px;transform:translateX(-50%);text-align:center;cursor:default;}
+    .axis-dot .pt{width:11px;height:11px;border-radius:50%;background:var(--green);margin:0 auto;border:2px solid #0f1115;box-shadow:0 0 0 2px rgba(39,192,138,.3);}
+    .axis-dot.near .pt{background:var(--red);box-shadow:0 0 0 2px rgba(255,92,92,.35);}
+    .axis-dot .d{display:block;font-size:9.5px;margin-top:4px;color:var(--muted);white-space:nowrap;}
+    .axis-dot.near .d{color:var(--red);font-weight:600;}
+    .axis-end{position:absolute;top:38px;font-size:9px;color:var(--muted);}
+    .axis-end.l{left:6%;transform:translateX(-50%);}
+    .axis-end.r{right:6%;transform:translateX(50%);}
+    /* 模态 */
+    .modal{display:none;position:fixed;inset:0;background:rgba(0,0,0,.62);z-index:50;align-items:center;justify-content:center;}
+    .modal.show{display:flex;}
+    .modal-box{width:min(700px,92vw);max-height:86vh;background:var(--panel);border:1px solid var(--line);border-radius:12px;display:flex;flex-direction:column;}
+    .modal-head{display:flex;align-items:center;justify-content:space-between;padding:12px 16px;border-bottom:1px solid var(--line);font-weight:700;font-size:14px;}
+    .modal-head button{background:transparent;color:var(--muted);padding:2px 8px;font-size:18px;}
+    #report-out{flex:1;min-height:300px;margin:12px 16px;background:#0b0e13;border:1px solid var(--line);border-radius:8px;color:#c9d2e3;font-size:11.5px;padding:12px;resize:none;font-family:ui-monospace,Menlo,monospace;white-space:pre;overflow:auto;}
+    .modal-foot{display:flex;gap:10px;justify-content:flex-end;padding:0 16px 14px;}
+    /* 自定义 API / 同步 */
+    input,textarea{font-family:inherit;background:#0b0e13;border:1px solid var(--line);color:var(--fg);border-radius:7px;padding:7px 9px;font-size:12.5px;width:100%;box-sizing:border-box;}
+    input:focus,textarea:focus{outline:none;border-color:var(--blue);}
+    .field{margin-bottom:10px;}
+    .field label{display:block;font-size:11px;color:var(--muted);margin-bottom:4px;}
+    .field .hint{font-size:10px;color:var(--muted);margin-top:3px;}
+    .api-item{display:flex;align-items:center;gap:10px;padding:9px 11px;border:1px solid var(--line);border-radius:9px;margin-bottom:7px;background:#0b0e13;}
+    .api-item .ainfo{flex:1;overflow:hidden;}
+    .api-item .an{font-weight:600;font-size:13px;}
+    .api-item .au{font-size:11px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+    .api-item .ast{font-size:10.5px;white-space:nowrap;margin-left:6px;}
+    .api-item .ast.ok{color:var(--green);} .api-item .ast.err{color:var(--red);}
+    .mini{padding:4px 9px;font-size:11px;border-radius:6px;background:var(--line);color:var(--fg);cursor:pointer;border:0;font-weight:500;}
+    .mini.primary{background:var(--blue);color:#fff;}
+    .mini.danger{background:rgba(255,92,92,.16);color:var(--red);}
+    .sync-note{font-size:11px;color:var(--muted);margin-top:8px;line-height:1.6;}
+    .sec-line{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:8px;}
+  </style>
+</head>
+<body>
+  <!-- 侧边栏 -->
+  <aside class="sidebar">
+    <h3>当前登录</h3>
+    <div class="me" id="me-card">
+      <div class="av" id="me-av">👤</div>
+      <div class="nm" id="me-nm">加载中…</div>
+      <div class="id" id="me-id"></div>
+      <span class="badge" id="me-type"></span>
+    </div>
+
+    <h3>已登记账号</h3>
+    <div id="acc-list"><div class="empty">加载中…</div></div>
+
+    <h3>本地数据目录</h3>
+    <div id="dir-list"><div class="empty">加载中…</div></div>
+  </aside>
+
+  <!-- 主区 -->
+  <main class="main">
+    <div class="topbar">
+      <div>
+        <h1>WorkBuddy 账户全景仪表盘</h1>
+        <div class="sub"><span id="status-text">自动读本机登录态 · 直连官方接口 · web 调试版</span><span id="updated"></span></div>
+      </div>
+      <div class="spacer"></div>
+      <button onclick="loadAll()">刷新全部</button>
+      <button class="secondary" onclick="loadQuota()">仅查积分</button>
+      <button class="secondary" onclick="openReport()">导出报告</button>
+      <span class="links"><a href="/debug" target="_blank">原始探针</a></span>
+    </div>
+
+    <!-- 概览卡 -->
+    <div class="cards" id="overview">
+      <div class="card"><div class="label">权益赠送包剩余</div><div class="value green" id="ov-gift">—</div><div class="meta" id="ov-gift-m"></div></div>
+      <div class="card"><div class="label">体验版剩余</div><div class="value blue" id="ov-trial">—</div><div class="meta" id="ov-trial-m"></div></div>
+      <div class="card"><div class="label">全部剩余</div><div class="value" id="ov-grand">—</div><div class="meta" id="ov-grand-m"></div></div>
+      <div class="card"><div class="label">登录态剩余</div><div class="value purple" id="ov-jwt">—</div><div class="meta" id="ov-jwt-m"></div></div>
+    </div>
+
+    <div class="section-title">账户信息</div>
+    <div class="grid">
+      <div class="panel">
+        <h2>账户档案 <span class="tag">本机登录态</span></h2>
+        <div class="kv" id="kv-account"><span class="empty">加载中…</span></div>
+      </div>
+      <div class="panel">
+        <h2>登录态有效期 <span class="tag">JWT</span></h2>
+        <div class="ring-wrap">
+          <div class="ring" id="jwt-ring"><div class="rt"><b id="jwt-days">—</b><span>天</span></div></div>
+          <div class="kv" id="kv-jwt" style="flex:1;"><span class="empty">加载中…</span></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="section-title">积分与签到</div>
+    <div class="grid">
+      <div class="panel">
+        <h2>积分套餐明细 <span class="tag">/billing/meter/get-user-resource</span></h2>
+        <div class="cards" style="margin-bottom:10px;">
+          <div class="card"><div class="label">使用率</div><div class="value amber" id="q-use">—</div><div class="meta" id="q-use-m"></div></div>
+          <div class="card"><div class="label">最早到期</div><div class="value" id="q-expire">—</div></div>
+          <div class="card"><div class="label">套餐数</div><div class="value blue" id="q-count">—</div></div>
+        </div>
+        <div class="axis">
+          <div class="axis-track" id="axis-track">
+            <div class="axis-end l">今天</div>
+            <div class="axis-line"></div>
+            <div class="axis-end r">90 天后</div>
+          </div>
+        </div>
+        <div style="max-height:200px;overflow:auto;">
+          <table>
+            <thead><tr><th>套餐</th><th>类型</th><th class="num">剩余</th><th class="num">已用</th><th class="num">总量</th><th>周期到期</th><th>抵扣到期</th><th>使用率</th></tr></thead>
+            <tbody id="pkg-body"></tbody>
+          </table>
+        </div>
+        <div class="note ok" id="expire-note"></div>
+      </div>
+
+      <div class="panel">
+        <h2>每日签到 <span class="tag">/billing/meter/checkin-activity-status</span></h2>
+        <div class="cards" style="margin-bottom:10px;">
+          <div class="card"><div class="label">活动进行中</div><div class="value green" id="ck-active">—</div></div>
+          <div class="card"><div class="label">今日</div><div class="value" id="ck-today">—</div></div>
+          <div class="card"><div class="label">连续</div><div class="value blue" id="ck-streak">—</div></div>
+          <div class="card"><div class="label">今日得</div><div class="value amber" id="ck-credit">—</div></div>
+        </div>
+        <div class="meta" style="color:var(--muted);font-size:12px;margin-bottom:6px;">最近签到记录</div>
+        <div class="timeline" id="ck-timeline"></div>
+      </div>
+    </div>
+
+    <div class="section-title">AI 记忆 · 环境</div>
+    <div class="grid">
+      <div class="panel">
+        <h2>AI 记忆画像 <span class="tag">/api/memory/profile</span></h2>
+        <div class="kv" id="kv-memory" style="margin-bottom:12px;"><span class="empty">加载中…</span></div>
+        <div id="memory-sections"></div>
+        <div class="memo" id="memo-foryou">—</div>
+      </div>
+      <div class="panel">
+        <h2>本机环境</h2>
+        <div class="kv" id="kv-env"><span class="empty">加载中…</span></div>
+      </div>
+    </div>
+
+    <div class="section-title">自定义 API · 跨端配置</div>
+    <div class="panel">
+      <h2>自定义 API 配置 <span class="tag">OpenAI 兼容 · 密钥存本地</span></h2>
+      <div class="sec-line" style="margin-bottom:10px;">
+        <button onclick="showApiEditor()">+ 新增 API</button>
+        <button class="secondary" onclick="exportConfig()">导出配置</button>
+        <button class="secondary" onclick="importConfig()">导入配置</button>
+      </div>
+      <div id="api-list"><div class="empty">暂无自定义 API，点「+ 新增 API」添加</div></div>
+      <div class="sync-note">提示：密钥仅保存在本机浏览器/App 本地存储（Tauri 下为应用沙盒），不会上传。浏览器中测试连接可能受目标接口 CORS 限制；打包为桌面 App 后无此限制。</div>
+
+      <details style="margin-top:12px;border-top:1px solid var(--line);padding-top:10px;">
+        <summary style="cursor:pointer;font-size:12.5px;font-weight:600;color:var(--muted);">跨端同步（极空间 NAS · Tailscale）</summary>
+        <div style="margin-top:10px;">
+          <div class="kv" style="margin-bottom:8px;">
+            <div class="field" style="min-width:160px;flex:1;"><label>NAS 地址</label><input id="nas-host" placeholder="100.124.11.49"/></div>
+            <div class="field" style="min-width:80px;flex:0 0 90px;"><label>SSH 端口</label><input id="nas-port" placeholder="10000"/></div>
+            <div class="field" style="min-width:120px;flex:1;"><label>用户名</label><input id="nas-user" placeholder="13950215101a"/></div>
+            <div class="field" style="min-width:140px;flex:1;"><label>密码</label><input id="nas-pass" type="password" placeholder="仅存本地，不提交"/></div>
+          </div>
+          <div class="sec-line">
+            <button class="secondary" onclick="nasSync('push')">同步到 NAS</button>
+            <button class="secondary" onclick="nasSync('pull')">从 NAS 拉取</button>
+            <span id="nas-status" class="sync-note" style="margin:0;"></span>
+          </div>
+          <div class="sync-note">同步内容为「账号清单 + 自定义 API 配置（不含密钥）」，不含登录态 Token。需本机已连接 Tailscale 且能访问 NAS。文件存于 NAS 的 <code>/root/workbuddy-hub/hub-config.json</code>。</div>
+        </div>
+      </details>
+    </div>
+
+    <div class="panel" style="margin-top:12px;">
+      <h2>原始返回（调试）</h2>
+      <pre id="raw-out">点击「刷新全部」…</pre>
+    </div>
+  </main>
+
+  <!-- 导出报告 -->
+  <div class="modal" id="report-modal">
+    <div class="modal-box">
+      <div class="modal-head"><span>账户快照报告</span><button onclick="closeReport()">×</button></div>
+      <textarea id="report-out" readonly spellcheck="false"></textarea>
+      <div class="modal-foot">
+        <button class="secondary" onclick="closeReport()">关闭</button>
+        <button onclick="copyReport()">复制内容</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 自定义 API 编辑 -->
+  <div class="modal" id="api-modal">
+    <div class="modal-box" style="width:min(520px,92vw);">
+      <div class="modal-head"><span id="api-modal-title">新增 API</span><button onclick="closeApiEditor()">×</button></div>
+      <div style="padding:14px 16px;overflow:auto;">
+        <div class="field"><label>名称</label><input id="api-name" placeholder="如：deepseek订阅" /></div>
+        <div class="field"><label>Base URL（OpenAI 兼容，含 /v1）</label><input id="api-url" placeholder="https://api.example.com/v1" />
+          <div class="hint">接口格式 chat/completions；测试时会自动尝试 GET /models 与 POST /chat/completions</div></div>
+        <div class="field"><label>API Key</label><input id="api-key" type="password" placeholder="sk-…" /></div>
+        <div class="field"><label>模型名（多个用逗号分隔，首个作为测试模型）</label><input id="api-models" placeholder="deepseek-v4-flash-free" /></div>
+      </div>
+      <div class="modal-foot">
+        <button class="secondary" onclick="closeApiEditor()">取消</button>
+        <button onclick="saveApi()">保存</button>
+      </div>
+    </div>
+  </div>
+  <input type="file" id="import-file" accept=".json,application/json" style="display:none;" onchange="doImport(this.files[0])" />
+
+  <script>
+    window.__LOCAL_KEYS__ = null; // 由本地调试服务从 local-keys.json 注入，永不提交
+    const $ = id => document.getElementById(id) || { textContent:'', innerHTML:'', style:{ setProperty(){} }, appendChild(){}, classList:{toggle(){},add(){},remove(){},contains(){return false;}}, value:'' };
+    const num2 = v => Number(v ?? 0);
+    const isTrial = a => Number(a.CapacityType) === 4;
+    const pad = n => String(n).padStart(2,'0');
+    function fmt(ms){
+      if(!ms) return '—';
+      const t = ms < 1e12 ? ms*1000 : ms;
+      const d = new Date(t); if(isNaN(d)) return String(ms);
+      return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+    }
+    function daysLeft(ms){
+      if(!ms) return null;
+      const t = ms < 1e12 ? ms*1000 : ms;
+      const d = new Date(t); if(isNaN(d)) return null;
+      return Math.ceil((d - Date.now())/86400000);
+    }
+
+    // ===== 侧边栏 =====
+    function renderSidebar(j){
+      const cur = j.current_uid || (j.login && j.login.uid);
+      // 当前账号卡
+      if(j.login){
+        $('me-av').textContent = '👤';
+        $('me-nm').textContent = j.login.nickname || j.login.uid;
+        $('me-id').textContent = j.login.uid;
+        $('me-type').textContent = j.login.type === 'personal' ? '个人账号' : (j.login.type||'—');
+      }
+      // 已登记账号
+      const al = $('acc-list'); al.innerHTML='';
+      const regs = j.registered_accounts || [];
+      if(!regs.length){ al.innerHTML='<div class="empty">无已登记账号</div>'; }
+      regs.forEach(a=>{
+        const div = document.createElement('div');
+        div.className = 'acc' + (a.uid===cur ? ' active':'');
+        const initial = (a.nickname||a.uid||'?').slice(0,2);
+        div.innerHTML = `<div class="dot">${initial}</div><div class="info"><div class="n">${a.nickname||'(无昵称)'}</div><div class="s">${a.uid}</div></div>${a.uid===cur?'<span class="cur">当前</span>':''}`;
+        div.onclick = ()=> selectAccount(a, regs);
+        al.appendChild(div);
+      });
+      // 本地数据目录
+      const dl = $('dir-list'); dl.innerHTML='';
+      const dirs = (j.local_accounts && j.local_accounts.accounts) || [];
+      if(!dirs.length){ dl.innerHTML='<div class="empty">无本地目录</div>'; }
+      dirs.forEach(d=>{
+        const div = document.createElement('div');
+        div.className = 'dir' + (d.has_login?' has':'') + (d.is_current?' active':'');
+        const tag = d.has_login ? '有登录态' : '空目录';
+        div.innerHTML = `<span>📁 ${d.name}</span><span class="sz">${d.size} · ${tag}</span>`;
+        div.title = d.name;
+        div.onclick = ()=> selectDir(d, dirs);
+        dl.appendChild(div);
+      });
+    }
+
+    let selectedAccount = null, selectedDir = null;
+    function selectAccount(a, all){
+      selectedAccount = a.uid;
+      // 高亮
+      document.querySelectorAll('#acc-list .acc').forEach(el=>{
+        const id = el.querySelector('.s')?.textContent;
+        el.classList.toggle('active', id===a.uid);
+      });
+      showAccountDetail(a, all);
+    }
+    function selectDir(d, all){
+      selectedDir = d.name;
+      document.querySelectorAll('#dir-list .dir').forEach(el=>el.classList.remove('active'));
+      event.currentTarget.classList.add('active');
+      showDirDetail(d, all);
+    }
+
+    // 已登记账号详情（无独立 API，展示本机文件里的登记信息）
+    function showAccountDetail(a, all){
+      const isCur = a.uid === (all.find(x=>x.lastLogin)?.uid || selectedAccount);
+      const items = [
+        ['昵称', a.nickname||'—'], ['UID', a.uid], ['手机号', a.phoneNumber||'—'],
+        ['账号类型', a.type==='personal'?'个人':'—'], ['最近登录', a.lastLogin?'是':'否'],
+        ['创建者', a.isCreator?'是':'否'], ['管理员', a.isAdmin?'是':'否'],
+      ];
+      $('kv-account').innerHTML = items.map(([k,v])=>`<div class="item"><span class="k">${k}</span><span class="v">${v}</span></div>`).join('');
+      // 切换时其余板块提示
+      $('kv-jwt').innerHTML = '<span class="empty">已选账号非当前登录态，JWT/积分需切换 WorkBuddy 登录后查看</span>';
+      $('memo-foryou').textContent = isCur ? '（当前登录账号，刷新全部可加载记忆画像）' : '（需在 WorkBuddy 中切换到该账号后才能读取其记忆画像）';
+      $('pkg-body').innerHTML = '';
+      $('raw-out').textContent = '已选中账号：' + a.nickname + ' (' + a.uid + ')\n' +
+        (isCur ? '即当前登录态，点「刷新全部」加载完整数据。' : '非当前登录态。本调试器只读当前登录态的文件，无法直接拉取该账号的远程数据（需先在 WorkBuddy 切换账号）。');
+    }
+    function showDirDetail(d, all){
+      $('kv-account').innerHTML = `<div class="item"><span class="k">目录名</span><span class="v">${d.name}</span></div>` +
+        `<div class="item"><span class="k">磁盘占用</span><span class="v">${d.size}</span></div>` +
+        `<div class="item"><span class="k">是否含登录态</span><span class="v">${d.has_login?'是':'否'}</span></div>` +
+        `<div class="item"><span class="k">当前登录</span><span class="v">${d.is_current?'是':'否'}</span></div>` +
+        `<div class="item"><span class="k">数据根</span><span class="v">${ (all && all[0])?'…':'' }</span></div>`;
+      $('memo-foryou').textContent = d.has_login ? '该目录含独立登录态文件（workbuddy-desktop.info）。' : '该目录无登录态，可能是历史残留或空账号。';
+    }
+
+    // ===== 渲染各板块 =====
+    function renderAccount(j){
+      if(!j || !j.uid){ $('kv-account').innerHTML='<span class="empty">未找到登录态</span>'; return; }
+      const items = [
+        ['昵称', j.nickname], ['UID', j.uid], ['UIN', j.uin||'—'],
+        ['账号类型', j.type==='personal'?'个人账号':(j.type||'—')], ['手机号', j.phoneNumber||'—'],
+        ['最近登录', j.lastLogin ? '是' : '否'], ['管理员', j.isAdmin ? '是' : '否'],
+      ];
+      $('kv-account').innerHTML = items.map(([k,v])=>`<div class="item"><span class="k">${k}</span><span class="v">${v}</span></div>`).join('');
+      const st = $('status-text'); if(st) st.textContent = '已读取 ' + (j.nickname||'') + ' · ' + j.uid;
+    }
+    function renderJwt(j){
+      if(!j || j.error){ $('kv-jwt').innerHTML='<span class="empty">解析失败</span>'; $('jwt-ring').style.setProperty('--p',0); return; }
+      const items = [
+        ['签发者', j.issuer], ['主题', j.subject], ['受众', j.audience],
+        ['授权方', j.azp], ['邮箱验证', j.email_verified ? '是' : '否'],
+        ['用户名', j.preferred_username], ['签发时间', j.issued_at], ['过期时间', j.expires_at],
+      ];
+      $('kv-jwt').innerHTML = items.map(([k,v])=>`<div class="item"><span class="k">${k}</span><span class="v">${v||'—'}</span></div>`).join('');
+      const days = j.remaining_days ?? 0;
+      const pct = Math.max(0, Math.min(100, Math.round(days/90*100))); // 以90天为满环
+      $('jwt-ring').style.setProperty('--p', pct);
+      $('jwt-ring').style.setProperty('--c', days<15?'var(--red)':(days<30?'var(--amber)':'var(--green)'));
+      $('jwt-days').textContent = days;
+      $('ov-jwt').textContent = days + ' 天';
+      $('ov-jwt-m').textContent = '过期 ' + (j.expires_at||'—').slice(0,10);
+    }
+    function renderEnv(j){
+      if(!j){ $('kv-env').innerHTML='<span class="empty">无数据</span>'; return; }
+      const items = [
+        ['WorkBuddy 版本', j.version||'—'], ['构建号', j.build||'—'],
+        ['安装大小', j.appSize||'—'], ['系统平台', j.platform], ['架构', j.arch], ['Node', j.node],
+      ];
+      $('kv-env').innerHTML = items.map(([k,v])=>`<div class="item"><span class="k">${k}</span><span class="v">${v||'—'}</span></div>`).join('');
+    }
+    function parseQuota(body){
+      const data = body?.data?.Response?.Data;
+      if(!data || !data.Accounts) return null;
+      const accs = data.Accounts;
+      const pkgs = accs.map(a => ({
+        name: a.PackageName, resource_id: a.ResourceId, trial: isTrial(a),
+        remain: num2(a.CapacityRemainPrecise ?? a.CapacityRemain),
+        used: num2(a.CapacityUsedPrecise ?? a.CapacityUsed),
+        size: num2(a.CapacitySizePrecise ?? a.CapacitySize),
+        cycle_end: a.CycleEndTime, deduction_end: a.DeductionEndTime,
+      }));
+      const gift = pkgs.filter(p => !p.trial);
+      const trial = pkgs.filter(p => p.trial);
+      const sum = (arr, k) => arr.reduce((s, x) => s + x[k], 0);
+      let soonest = null;
+      for(const a of gift){ const dl = daysLeft(a.deduction_end); if(dl===null) continue; if(!soonest || dl < soonest.dl) soonest = {dl,a}; }
+      return {
+        pkgs, gift, trial,
+        giftRemain: sum(gift,'remain'), giftUsed: sum(gift,'used'), giftSize: sum(gift,'size'),
+        trialRemain: sum(trial,'remain'),
+        grandRemain: sum(pkgs,'remain'), grandUsed: sum(pkgs,'used'), grandSize: sum(pkgs,'size'),
+        soonest,
+        usePct: sum(pkgs,'size')>0 ? Math.round(sum(pkgs,'used')/sum(pkgs,'size')*100) : 0,
+      };
+    }
+    function renderQuota(body){
+      const q = parseQuota(body);
+      if(!q) return;
+      const {pkgs, gift, trial, giftRemain, giftUsed, giftSize, trialRemain, grandRemain, grandUsed, grandSize, soonest, usePct} = q;
+      $('ov-gift').textContent = giftRemain.toFixed(2);
+      $('ov-gift-m').textContent = `已用 ${giftUsed.toFixed(2)} / ${giftSize.toFixed(2)} · ${gift.length} 包`;
+      $('ov-trial').textContent = trialRemain.toFixed(2);
+      $('ov-trial-m').textContent = `体验版 · ${trial.length} 个`;
+      $('ov-grand').textContent = grandRemain.toFixed(2);
+      $('ov-grand-m').textContent = `已用 ${grandUsed.toFixed(2)} / ${grandSize.toFixed(2)}`;
+
+      $('q-use').textContent = usePct + '%';
+      $('q-use-m').textContent = `${grandUsed.toFixed(2)} / ${grandSize.toFixed(2)}`;
+      $('q-count').textContent = pkgs.length;
+      $('q-expire').textContent = soonest ? (soonest.dl<=0?'已过期':soonest.dl+' 天') : '长期';
+
+      // 到期时间轴（仅赠送包，含抵扣到期）
+      const track = $('axis-track');
+      const dots = gift.map(p => {
+        const dl = daysLeft(p.deduction_end);
+        if(dl===null) return '';
+        const pos = Math.max(6, Math.min(94, 6 + (dl/90)*88));
+        const near = dl <= 30;
+        const label = dl<=0 ? '已过期' : (dl+'天');
+        return `<div class="axis-dot ${near?'near':''}" style="left:${pos}%;"><div class="pt"></div><span class="d">${label}</span></div>`;
+      }).join('');
+      // 保留 track 内原有的今天/线/90天后三个节点，仅替换可能已有的 dot
+      track.querySelectorAll('.axis-dot').forEach(n=>n.remove());
+      track.insertAdjacentHTML('beforeend', dots);
+
+      const tb = $('pkg-body'); tb.innerHTML='';
+      for(const a of pkgs){
+        const pct = a.size>0 ? Math.round(a.used/a.size*100) : 0;
+        const dl = daysLeft(a.deduction_end);
+        const pill = a.trial ? '<span class="pill trial">体验版</span>' : '<span class="pill gift">赠送包</span>';
+        const exp = (dl!==null) ? (dl<=30 ? `<span class="soon">${fmt(a.deduction_end)} (${dl}天)</span>` : fmt(a.deduction_end)) : '—';
+        tb.appendChild(row([
+          `${a.name||'—'}<div class="meta" style="color:var(--muted);font-size:10px;">${a.resource_id||''}</div>`, pill,
+          a.remain.toFixed(2), a.used.toFixed(2), a.size.toFixed(2),
+          a.cycle_end||'—', exp,
+          `<div class="bar"><i style="width:${pct}%"></i></div><span class="meta" style="color:var(--muted);font-size:10px;">${pct}%</span>`
+        ]));
+      }
+      const soon = gift.filter(p=>{const dl=daysLeft(p.deduction_end);return dl!==null && dl<=30;}).sort((x,y)=>daysLeft(x.deduction_end)-daysLeft(y.deduction_end));
+      $('expire-note').innerHTML = soon.length ? '⏰ 30 天内到期：' + soon.map(p=>`${p.name}（${daysLeft(p.deduction_end)}天，${fmt(p.deduction_end)}）`).join('；') : '近期无套餐到期。';
+      window.__quota = q; // 供导出报告使用
+    }
+    function row(cells){ const tr=document.createElement('tr'); tr.innerHTML = cells.map((c,i)=>`<td class="${i>=2&&i<=4?'num':''}">${c}</td>`).join(''); return tr; }
+
+    function renderCheckin(body){
+      const d = body?.data;
+      if(!d){ return; }
+      $('ck-active').textContent = d.active ? '是' : '否';
+      $('ck-today').textContent = d.today_checked_in ? '已签 ✓' : '未签';
+      $('ck-today').style.color = d.today_checked_in ? 'var(--green)' : 'var(--fg)';
+      $('ck-streak').textContent = (d.streak_days||0) + ' 天';
+      $('ck-credit').textContent = (d.today_credit||0);
+      const dates = (d.checkin_dates||[]).slice(-16);
+      const today = new Date().toISOString().slice(0,10);
+      $('ck-timeline').innerHTML = dates.length ? dates.map(dt=>{
+        const isToday = dt === today;
+        const cell = new Date(dt).getTime() >= Date.now()-86400000*2;
+        return `<span class="chip ${isToday?'today':''} ${!isToday?'done':''}">${dt.slice(5)}</span>`;
+      }).join('') : '<span class="empty">暂无记录</span>';
+    }
+    function renderMemory(body){
+      const d = body?.data;
+      if(!d){ $('kv-memory').innerHTML='<span class="empty">无数据</span>'; return; }
+      const items = [
+        ['用户 ID', d.user_id], ['用户名', d.user_name],
+        ['更新时间', (d.updated_at||d.updatedAt||'—')], ['版本', d.version ?? '—'],
+      ];
+      $('kv-memory').innerHTML = items.map(([k,v])=>`<div class="item"><span class="k">${k}</span><span class="v">${v||'—'}</span></div>`).join('');
+      const raw = d.foryou_prompt || d.memory || '';
+      $('memo-foryou').textContent = raw || '(空)';
+      // 结构化分段
+      const box = $('memory-sections'); box.innerHTML='';
+      if(raw){
+        const parts = raw.split(/^##\s+/m).filter(Boolean);
+        parts.forEach(p=>{
+          const nl = p.indexOf('\n');
+          const title = (nl>0 ? p.slice(0,nl) : p).trim();
+          const content = (nl>0 ? p.slice(nl+1) : '').trim();
+          const det = document.createElement('details');
+          det.className='sec';
+          det.open = false;
+          det.innerHTML = `<summary>${title}</summary><div class="sec-body">${escapeHtml(content)}</div>`;
+          box.appendChild(det);
+        });
+        if(!parts.length){ // 无 ## 标题则整段折叠
+          const det=document.createElement('details');det.className='sec';det.open=false;
+          det.innerHTML=`<summary>记忆内容</summary><div class="sec-body">${escapeHtml(raw)}</div>`;
+          box.appendChild(det);
+        }
+      } else {
+        box.innerHTML='<span class="empty">无记忆画像</span>';
+      }
+      window.__memoryRaw = raw;
+    }
+    function escapeHtml(s){return String(s).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));}
+
+    // ===== 导出报告 =====
+    function buildReport(){
+      const L = window.__login || {};
+      const q = window.__quota;
+      const lines = [];
+      lines.push('# WorkBuddy 账户快照');
+      lines.push(`生成时间：${new Date().toLocaleString()}`);
+      lines.push('');
+      lines.push('## 账户');
+      lines.push(`- 昵称/手机号：${L.nickname||'—'}`);
+      lines.push(`- UID：${L.uid||'—'}`);
+      lines.push(`- UIN：${L.uin||'—'}`);
+      lines.push(`- 类型：${L.type==='personal'?'个人账号':'—'}`);
+      lines.push(`- 登录态剩余：${ ($('jwt-days').textContent||'—') } 天（过期 ${ ($('ov-jwt-m').textContent||'').replace('过期 ','') }）`);
+      if(q){
+        lines.push('');
+        lines.push('## 积分额度');
+        lines.push(`- 权益赠送包剩余：${q.giftRemain.toFixed(2)}（已用 ${q.giftUsed.toFixed(2)} / ${q.giftSize.toFixed(2)}，${q.gift.length} 包）`);
+        lines.push(`- 体验版剩余：${q.trialRemain.toFixed(2)}（${q.trial.length} 个）`);
+        lines.push(`- 全部剩余：${q.grandRemain.toFixed(2)}（已用 ${q.grandUsed.toFixed(2)} / ${q.grandSize.toFixed(2)}）`);
+        lines.push(`- 总使用率：${q.usePct}%`);
+        lines.push(`- 最早到期：${ ($('q-expire').textContent||'—') }`);
+        lines.push('- 套餐明细：');
+        q.pkgs.forEach(p=>{
+          const dl = daysLeft(p.deduction_end);
+          lines.push(`  - ${p.name} [${p.trial?'体验版':'赠送包'}] 剩余 ${p.remain.toFixed(2)} / ${p.size.toFixed(2)}，抵扣到期 ${p.deduction_end||'—'}${dl!==null?` (${dl}天)`:''}`);
+        });
+      }
+      const ck = window.__checkin || {};
+      if(ck.data){
+        lines.push('');
+        lines.push('## 每日签到');
+        lines.push(`- 活动进行中：${ck.data.active?'是':'否'}`);
+        lines.push(`- 今日：${ck.data.today_checked_in?'已签 ✓':'未签'}`);
+        lines.push(`- 连续：${ck.data.streak_days||0} 天 · 今日得 ${ck.data.today_credit||0}`);
+        const dates=(ck.data.checkin_dates||[]).slice(-8);
+        if(dates.length) lines.push(`- 最近：${dates.join('、')}`);
+      }
+      const raw = window.__memoryRaw || '';
+      if(raw){
+        lines.push('');
+        lines.push('## AI 记忆画像摘要');
+        const parts = raw.split(/^##\s+/m).filter(Boolean);
+        if(parts.length){
+          parts.forEach(p=>{const nl=p.indexOf('\n');lines.push(`- ${nl>0?p.slice(0,nl).trim():p.trim()}`);});
+        } else { lines.push(raw.slice(0,200)); }
+      }
+      lines.push('');
+      lines.push('---');
+      lines.push('由 WorkBuddy 账户全景仪表盘（web 调试版）生成');
+      return lines.join('\n');
+    }
+    function openReport(){
+      $('report-out').value = buildReport();
+      $('report-modal').classList.add('show');
+    }
+    function closeReport(){ $('report-modal').classList.remove('show'); }
+    function copyReport(){
+      const t = $('report-out'); t.select();
+      navigator.clipboard?.writeText(t.value).then(
+        ()=>{ const b=document.querySelector('#report-modal .modal-foot button:last-child'); const o=b.textContent; b.textContent='已复制 ✓'; setTimeout(()=>b.textContent=o,1500); },
+        ()=>{ document.execCommand('copy'); }
+      );
+    }
+    $('report-modal').addEventListener('click', e=>{ if(e.target.id==='report-modal') closeReport(); });
+
+    // ===== 自定义 API 配置 =====
+    const LS_APIS='wb_api_configs', LS_NAS='wb_nas';
+    let editingApiId=null;
+    function getApis(){ try{ return JSON.parse(localStorage.getItem(LS_APIS)||'[]'); }catch(e){ return []; } }
+    function saveApis(list){ localStorage.setItem(LS_APIS, JSON.stringify(list)); }
+    function renderApiList(){
+      const box=$('api-list'); box.innerHTML='';
+      const list=getApis();
+      if(!list.length){ box.innerHTML='<div class="empty">暂无自定义 API，点「+ 新增 API」添加</div>'; return; }
+      list.forEach(c=>{
+        const st = c.lastTest ? (c.lastTest.ok?`<span class="ast ok">✓ ${escapeHtml(c.lastTest.info||'ok')}</span>`:`<span class="ast err">✗ ${escapeHtml(c.lastTest.err||'失败')}</span>`) : '';
+        const div=document.createElement('div');
+        div.className='api-item'; div.dataset.api=c.id;
+        div.innerHTML=`<div class="ainfo"><div class="an">${escapeHtml(c.name||'未命名')}</div><div class="au">${escapeHtml(c.baseUrl||'')} · ${escapeHtml((c.models||'').split(',').filter(Boolean).join(', ')||'无模型')}</div></div>${st}
+          <button class="mini primary" onclick="testApi('${c.id}')">测试</button>
+          <button class="mini" onclick="showApiEditor('${c.id}')">编辑</button>
+          <button class="mini danger" onclick="deleteApi('${c.id}')">删除</button>`;
+        box.appendChild(div);
+      });
+    }
+    function showApiEditor(id){
+      editingApiId=id||null;
+      $('api-modal-title').textContent = id?'编辑 API':'新增 API';
+      const c = id? getApis().find(x=>x.id===id) : null;
+      $('api-name').value=c?.name||''; $('api-url').value=c?.baseUrl||''; $('api-key').value=c?.key||''; $('api-models').value=c?.models||'';
+      $('api-modal').classList.add('show');
+    }
+    function closeApiEditor(){ $('api-modal').classList.remove('show'); editingApiId=null; }
+    function saveApi(){
+      const name=$('api-name').value.trim(), baseUrl=$('api-url').value.trim(), key=$('api-key').value.trim(), models=$('api-models').value.trim();
+      if(!name||!baseUrl||!key){ alert('名称 / Base URL / API Key 必填'); return; }
+      const list=getApis();
+      if(editingApiId){ const c=list.find(x=>x.id===editingApiId); if(c) Object.assign(c,{name,baseUrl,key,models}); }
+      else list.push({id:'api_'+Date.now().toString(36), name,baseUrl,key,models,lastTest:null});
+      saveApis(list); renderApiList(); closeApiEditor();
+    }
+    function deleteApi(id){ if(!confirm('删除该 API 配置？')) return; saveApis(getApis().filter(c=>c.id!==id)); renderApiList(); }
+    async function testApi(id){
+      const cfg=getApis().find(c=>c.id===id); if(!cfg) return;
+      const el=document.querySelector(`[data-api="${id}"] .ast`);
+      const set=(cls,t)=>{ el.className='ast '+(cls||''); el.textContent=t; };
+      set('','测试中…');
+      const base=(cfg.baseUrl||'').trim().replace(/\/+$/,'');
+      const cands=[];
+      if(base){ if(/\/v1$/.test(base)) cands.push(base+'/models', base.replace(/\/v1$/,'')+'/v1/models'); else cands.push(base+'/models', base+'/v1/models'); }
+      let models=[], listMs=0, listErr=null;
+      for(const u of cands){
+        try{
+          const t0=performance.now(); const r=await fetch(u,{headers:{Authorization:'Bearer '+cfg.key}});
+          listMs=Math.round(performance.now()-t0);
+          if(r.ok){ const j=await r.json(); models=(j.data||[]).map(m=>m.id); break; } else listErr='HTTP '+r.status;
+        }catch(e){ listErr=e.message; }
+      }
+      const m=(cfg.models||'').split(',')[0].trim();
+      let out = models.length? `✓ 模型列表 ${models.length} 个 · ${listMs}ms` : `✗ 模型列表失败${listErr?' ('+listErr+')':''}`;
+      let chatOk=false, chatErr=null;
+      if(m && base){
+        const u=(cands[0]||base+'/models').replace(/\/models$/,'/chat/completions');
+        try{
+          const t0=performance.now();
+          const r=await fetch(u,{method:'POST',headers:{'Content-Type':'application/json',Authorization:'Bearer '+cfg.key},body:JSON.stringify({model:m,messages:[{role:'user',content:'ping'}],max_tokens:1})});
+          const ms=Math.round(performance.now()-t0);
+          if(r.ok){ chatOk=true; out+=` · ✓ 对话「${m}」可用 · ${ms}ms`; } else { chatErr='HTTP '+r.status; out+=` · ✗ 对话 ${chatErr}`; }
+        }catch(e){ chatErr=e.message; out+=' · ✗ 对话 '+chatErr; }
+      }
+      set(chatOk?'ok':(chatErr||!models.length?'err':''), out);
+      const c=getApis().find(x=>x.id===id);
+      if(c){ c.lastTest = chatOk? {ok:true,info:'模型'+models.length+' · 对话OK'} : {ok:false,err:out}; saveApis(); }
+    }
+
+    // ===== 配置导出 / 导入 / NAS 同步 =====
+    function buildHubConfig(){
+      const regs = (window.__all && window.__all.registered_accounts) || [];
+      return {
+        app:'workbuddy-account-hub', version:1, exportedAt:new Date().toISOString(),
+        accounts: regs.map(a=>({nickname:a.nickname, uid:a.uid, uin:a.uin, type:a.type})),
+        apis: getApis().map(c=>({id:c.id, name:c.name, baseUrl:c.baseUrl, models:c.models})),
+      };
+    }
+    function mergeApis(remote){
+      if(!remote || !Array.isArray(remote.apis)) return {added:0, skipped:0};
+      const list=getApis(); let added=0, skipped=0;
+      remote.apis.forEach(a=>{
+        if(!a.name || !a.baseUrl) return;
+        if(list.some(c=>c.name===a.name && c.baseUrl===a.baseUrl)){ skipped++; return; }
+        list.push({id:'api_'+Date.now().toString(36)+'_'+added, name:a.name, baseUrl:a.baseUrl, key:'', models:a.models||'', lastTest:null});
+        added++;
+      });
+      saveApis(list); renderApiList();
+      return {added, skipped};
+    }
+    function exportConfig(){
+      const blob=new Blob([JSON.stringify(buildHubConfig(),null,2)],{type:'application/json'});
+      const a=document.createElement('a'); a.href=URL.createObjectURL(blob);
+      a.download='workbuddy-hub-config.json'; a.click(); setTimeout(()=>URL.revokeObjectURL(a.href),3000);
+    }
+    function importConfig(){ $('import-file').click(); }
+    function doImport(file){
+      if(!file) return;
+      const rd=new FileReader();
+      rd.onload=()=>{
+        try{
+          const j=JSON.parse(rd.result);
+          if(!j.apis || !Array.isArray(j.apis)) throw new Error('不是 hub 配置（缺 apis 数组）');
+          const {added, skipped}=mergeApis(j);
+          alert(added?`已导入 ${added} 条 API（${skipped} 条重复跳过）。密钥为空，请点「编辑」补填后再测试。`:(skipped?`全部 ${skipped} 条均已存在，跳过。`:'未导入任何配置'));
+        }catch(e){ alert('导入失败：'+e.message); }
+      };
+      rd.readAsText(file);
+      $('import-file').value='';
+    }
+    function nasSync(action){
+      const host=$('nas-host').value.trim()||'100.124.11.49';
+      const port=$('nas-port').value.trim()||'10000';
+      const user=$('nas-user').value.trim()||'13950215101a';
+      const pass=$('nas-pass').value.trim();
+      if(!pass){ $('nas-status').textContent='请填写 NAS 密码（仅存本机）'; return; }
+      localStorage.setItem(LS_NAS, JSON.stringify({host,port,user,pass}));
+      const st=$('nas-status'); st.textContent = action==='push'?'正在推送…':'正在拉取…';
+      fetch('/nas-sync',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action,host,port,user,pass,config:buildHubConfig()})})
+        .then(r=>r.json()).then(j=>{
+          if(j.error){ st.textContent='✗ '+j.error; return; }
+          if(action==='push'){ st.textContent='✓ 已推送配置到 NAS'; }
+          else { const {added, skipped}=mergeApis(j.config); st.textContent='✓ 已拉取'+(added?'，导入 '+added+' 条':'')+(skipped?'（'+skipped+' 重复）':''); }
+        }).catch(e=>{ st.textContent='✗ '+e.message; });
+    }
+    function seedDefaultApis(){
+      if(localStorage.getItem('wb_api_seeded')) return;
+      const list=getApis();
+      const seeds=(window.__LOCAL_KEYS__ && window.__LOCAL_KEYS__.apis)||[];
+      if(!list.length && seeds.length){
+        seeds.forEach((s,i)=>list.push({id:'api_seed_'+i, name:s.name||('API '+(i+1)), baseUrl:s.baseUrl||'', key:s.key||'', models:s.models||'', lastTest:null}));
+        saveApis(list);
+      }
+      localStorage.setItem('wb_api_seeded','1');
+    }
+    function initApiPanel(){
+      seedDefaultApis();
+      try{ const s=JSON.parse(localStorage.getItem(LS_NAS)||'{}'); if(s.host)$('nas-host').value=s.host; if(s.port)$('nas-port').value=s.port; if(s.user)$('nas-user').value=s.user; if(s.pass)$('nas-pass').value=s.pass; }catch(e){}
+      renderApiList();
+    }
+
+    // ===== 数据加载 =====
+    async function loadAll(){
+      $('raw-out').textContent = '请求中…';
+      try{
+        const r = await fetch('/all'); const j = await r.json();
+        $('raw-out').textContent = JSON.stringify(j, null, 2);
+        window.__all = j;
+        selectedAccount = j.current_uid; selectedDir = null;
+        window.__login = j.login || {};
+        window.__checkin = j.checkin || {};
+        renderSidebar(j);
+        renderAccount(j.login);
+        renderJwt(j.jwt);
+        renderEnv(j.env);
+        if(j.quota && j.quota.status===200) renderQuota(typeof j.quota.body==='string'?JSON.parse(j.quota.body):j.quota.body);
+        if(j.checkin && j.checkin.status===200) renderCheckin(typeof j.checkin.body==='string'?JSON.parse(j.checkin.body):j.checkin.body);
+        if(j.memory && j.memory.status===200) renderMemory(typeof j.memory.body==='string'?JSON.parse(j.memory.body):j.memory.body);
+        $('updated').textContent = ' · 更新 ' + new Date().toLocaleTimeString();
+      }catch(e){ $('raw-out').textContent = '错误：'+e; }
+    }
+    async function loadQuota(){
+      $('raw-out').textContent = '请求中…';
+      try{
+        const r = await fetch('/api',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({endpoint:'/billing/meter/get-user-resource',method:'POST',body:'{}'})});
+        const j = await r.json(); $('raw-out').textContent = JSON.stringify(j,null,2);
+        if(j.status===200) renderQuota(typeof j.body==='string'?JSON.parse(j.body):j.body);
+      }catch(e){ $('raw-out').textContent = '错误：'+e; }
+    }
+
+    initApiPanel();
+    loadAll();
+  </script>
+</body>
+</html>

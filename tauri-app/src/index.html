@@ -1,0 +1,353 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>WorkBuddy 账户中枢</title>
+  <style>
+    :root{
+      --bg:#0f1115; --panel:#161a21; --line:#2a2f3a; --fg:#e6e6e6; --muted:#8a93a6;
+      --blue:#2b6cff; --green:#27c08a; --red:#ff5c5c; --amber:#ffb454; --purple:#a779ff;
+      --card:#1b212b; --sidebar:#12161d;
+    }
+    *{box-sizing:border-box;}
+    html,body{margin:0;height:100vh;width:100vw;overflow:hidden;}
+    ::-webkit-scrollbar{width:0;height:0;background:transparent;}
+    html{scrollbar-width:none;}
+    body{font-family:system-ui,-apple-system,"PingFang SC",sans-serif;background:var(--bg);color:var(--fg);display:flex;width:100vw;height:100vh;font-size:14px;}
+    /* 侧边栏 */
+    .sidebar{width:260px;min-width:260px;max-width:260px;background:var(--sidebar);border-right:1px solid var(--line);height:100vh;overflow-y:auto;padding:14px 10px;display:flex;flex-direction:column;gap:5px;overscroll-behavior:contain;}
+    .sidebar h3{font-size:10px;letter-spacing:.08em;color:var(--muted);margin:12px 7px 5px;text-transform:uppercase;}
+    .me{background:linear-gradient(135deg,#23314d,#1a2233);border:1px solid var(--line);border-radius:10px;padding:10px;margin-bottom:4px;}
+    .me .av{width:34px;height:34px;border-radius:8px;background:var(--blue);display:flex;align-items:center;justify-content:center;font-size:16px;color:#fff;float:left;margin-right:9px;}
+    .me .nm{font-weight:700;font-size:13px;}
+    .me .id{color:var(--muted);font-size:10px;margin-top:1px;word-break:break-all;}
+    .me .badge{display:inline-block;margin-top:6px;font-size:9px;padding:2px 7px;border-radius:20px;background:rgba(39,192,138,.18);color:var(--green);}
+    .acc{display:flex;align-items:center;gap:8px;padding:7px 9px;border-radius:8px;cursor:pointer;border:1px solid transparent;transition:.12s;}
+    .acc:hover{background:#1c2330;}
+    .acc.active{background:#1d2a44;border-color:var(--blue);}
+    .acc .dot{width:26px;height:26px;border-radius:7px;background:#222a38;display:flex;align-items:center;justify-content:center;font-weight:700;color:#7ea6ff;font-size:11px;flex-shrink:0;}
+    .acc .info{overflow:hidden;flex:1;min-width:0;}
+    .acc .info .n{font-size:12px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+    .acc .info .s{font-size:10px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+    .acc .cur{font-size:9px;color:var(--green);border:1px solid var(--green);border-radius:4px;padding:0 4px;}
+    .acc .mini{padding:3px 9px;border:0;border-radius:6px;background:var(--blue);color:#fff;cursor:pointer;font-size:10.5px;font-weight:600;flex-shrink:0;}
+    .dir{display:flex;align-items:center;gap:7px;padding:6px 9px;border-radius:7px;cursor:pointer;font-size:11.5px;color:var(--muted);}
+    .dir:hover{background:#1c2330;color:var(--fg);}
+    .dir.active{color:var(--fg);background:#1d2a44;}
+    .dir .sz{margin-left:auto;font-size:10px;}
+    .dir.has{color:#7ea6ff;}
+    /* 主区 */
+    .main{flex:1;min-width:0;width:100%;height:100vh;overflow-y:auto;overflow-x:hidden;padding:18px 22px;overscroll-behavior:contain;}
+    .topbar{display:flex;align-items:center;gap:12px;margin-bottom:16px;}
+    .topbar h1{font-size:18px;margin:0;}
+    .topbar .sub{color:var(--muted);font-size:12px;}
+    .topbar .spacer{flex:1;}
+    button{padding:7px 12px;border:0;border-radius:8px;background:var(--blue);color:#fff;cursor:pointer;font-size:12px;font-weight:600;}
+    button.secondary{background:var(--line);color:var(--fg);font-weight:500;}
+    .links a{color:#7ea6ff;text-decoration:none;font-size:12px;}
+    .grid{display:grid;gap:14px;}
+    .cards{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin-bottom:2px;}
+    @media(max-width:1100px){.cards{grid-template-columns:repeat(2,minmax(0,1fr));}}
+    @media(max-width:720px){.cards{grid-template-columns:1fr;}}
+    .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:13px 15px;}
+    .card .label{color:var(--muted);font-size:11.5px;margin-bottom:6px;}
+    .card .value{font-size:22px;font-weight:800;letter-spacing:-.5px;}
+    .card .value.green{color:var(--green);} .card .value.blue{color:var(--blue);} .card .value.amber{color:var(--amber);} .card .value.purple{color:var(--purple);}
+    .card .meta{color:var(--muted);font-size:11px;margin-top:5px;line-height:1.4;}
+    .panel{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:14px 16px;}
+    .panel h2{font-size:14px;margin:0 0 12px;display:flex;align-items:center;gap:8px;}
+    .panel h2 .tag{font-size:10px;color:var(--muted);font-weight:400;}
+    .two{display:grid;grid-template-columns:1fr 1fr;gap:14px;}
+    @media(max-width:920px){.two{grid-template-columns:1fr;}}
+    .ring-wrap{display:flex;align-items:center;gap:14px;}
+    .ring{--p:0;--c:var(--green);width:78px;height:78px;border-radius:50%;background:conic-gradient(var(--c) calc(var(--p)*1%), #232a36 0);display:flex;align-items:center;justify-content:center;flex-shrink:0;position:relative;}
+    .ring::after{content:"";position:absolute;inset:8px;border-radius:50%;background:var(--card);}
+    .ring .rt{position:relative;z-index:1;text-align:center;}
+    .ring .rt b{font-size:17px;display:block;}
+    .ring .rt span{font-size:9px;color:var(--muted);}
+    table{width:100%;border-collapse:collapse;font-size:12px;}
+    th,td{text-align:left;padding:7px 8px;border-bottom:1px solid var(--line);}
+    th{color:var(--muted);font-weight:600;font-size:10.5px;background:#131820;position:sticky;top:0;}
+    td.num{font-variant-numeric:tabular-nums;}
+    tr:hover td{background:#131820;}
+    .pill{display:inline-block;padding:2px 8px;border-radius:20px;font-size:10.5px;background:var(--line);color:var(--fg);}
+    .pill.gift{background:rgba(43,108,255,.18);color:#7ea6ff;}
+    .pill.trial{background:rgba(255,180,84,.18);color:var(--amber);}
+    .soon{color:var(--red);font-weight:600;}
+    .ok{color:var(--green);}
+    .bar{height:6px;background:var(--line);border-radius:4px;margin-top:4px;overflow:hidden;}
+    .bar>i{display:block;height:100%;background:var(--green);}
+    .kv{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:4px 18px;}
+    .kv .item{display:flex;justify-content:space-between;border-bottom:1px dashed var(--line);padding:4px 0;font-size:12px;}
+    .kv .item .k{color:var(--muted);} .kv .item .v{font-weight:600;text-align:right;max-width:60%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+    .memo{background:#0b0e13;border:1px solid var(--line);border-radius:8px;padding:12px;font-size:12px;line-height:1.7;white-space:pre-wrap;max-height:220px;overflow:auto;color:#c9d2e3;}
+    /* API 管理 */
+    .cur-bar{background:rgba(39,192,138,.08);border:1px solid rgba(39,192,138,.3);border-radius:8px;padding:8px 12px;font-size:12px;margin-bottom:10px;display:flex;align-items:center;gap:8px;flex-wrap:wrap;}
+    .cur-bar b{color:var(--green);}
+    .cur-bar .dot{width:8px;height:8px;border-radius:50%;background:var(--green);display:inline-block;}
+    .api-row{display:flex;align-items:center;gap:10px;padding:9px 10px;border:1px solid var(--line);border-radius:9px;margin-bottom:7px;background:#131820;}
+    .api-row .av{width:34px;height:34px;border-radius:9px;background:#1c2330;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:12px;color:#7ea6ff;flex-shrink:0;}
+    .api-row .info{flex:1;min-width:0;}
+    .api-row .info .n{font-size:13px;font-weight:600;display:flex;align-items:center;gap:6px;}
+    .api-row .info .s{font-size:11px;color:var(--muted);margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+    .api-row .ops{display:flex;gap:6px;flex-shrink:0;}
+    .api-row .tst{font-size:10.5px;margin-top:3px;}
+    .api-row .tst.ok{color:var(--green);} .api-row .tst.err{color:var(--red);}
+    .mini{padding:4px 10px;border:0;border-radius:6px;background:var(--blue);color:#fff;cursor:pointer;font-size:11px;font-weight:600;}
+    .mini.secondary{background:var(--line);color:var(--fg);font-weight:500;}
+    .badge{font-size:9.5px;padding:1px 7px;border-radius:20px;background:var(--line);color:var(--muted);}
+    .badge.cur{background:rgba(39,192,138,.18);color:var(--green);border:1px solid rgba(39,192,138,.4);}
+    .badge.builtin{background:rgba(43,108,255,.15);color:#7ea6ff;}
+    .key-sec{font-family:ui-monospace,Menlo,monospace;font-size:11px;background:rgba(0,0,0,.3);border:1px solid var(--line);padding:1px 6px;border-radius:5px;white-space:nowrap;}
+    .key-sec .pre, .key-sec .suf{color:#c9d1d9;}
+    .key-sec .mid{color:#8b949e;filter:blur(5px);transition:filter .18s ease;user-select:none;}
+    .key-sec .mid.show{filter:none;color:#e6edf3;user-select:text;}
+    .eye-global{background:none;border:1px solid var(--line);border-radius:7px;cursor:pointer;font-size:13px;line-height:1;padding:3px 8px 4px;opacity:.85;transition:opacity .15s;vertical-align:middle;}
+    .eye-global:hover{opacity:1;border-color:var(--blue);}
+    .eye-global.off{opacity:.55;filter:grayscale(1);}
+    /* 通用隐私分段：前缀(清晰) 中段(默认模糊) 后缀(清晰) */
+    .psec .pre, .psec .suf{color:inherit;}
+    .psec .mid{color:inherit;filter:blur(5px);transition:filter .18s ease;user-select:none;}
+    .psec .mid.show{filter:none;user-select:text;color:inherit;}
+    .privacy-text{filter:blur(6px);transition:filter .18s ease;user-select:none;}
+    .privacy-text.show{filter:none;user-select:text;}
+    .modal-err{color:var(--red);font-size:11.5px;margin-top:2px;}
+    input{background:#0b0e13;border:1px solid var(--line);border-radius:6px;color:var(--fg);padding:7px 9px;font-size:12px;width:100%;box-sizing:border-box;margin-top:4px;}
+    input:focus{outline:none;border-color:var(--blue);}
+    .modal-body label{font-size:11px;color:var(--muted);}
+    .timeline{display:flex;gap:7px;flex-wrap:wrap;margin-top:6px;}
+    .chip{font-size:10.5px;padding:4px 9px;border-radius:20px;background:#1c2330;border:1px solid var(--line);}
+    .chip.done{background:rgba(39,192,138,.12);border-color:rgba(39,192,138,.4);color:var(--green);}
+    .chip.today{background:rgba(43,108,255,.15);border-color:var(--blue);color:#9ebcff;font-weight:700;}
+    pre{background:#0b0e13;padding:12px;border-radius:8px;overflow:auto;max-height:220px;font-size:11px;margin:0;white-space:pre-wrap;word-break:break-all;}
+    .empty{color:var(--muted);font-size:12px;padding:6px 0;}
+    .note{color:var(--red);font-size:11px;margin-top:8px;}
+    .note.ok{color:var(--amber);}
+    .section-title{font-size:11.5px;color:var(--muted);margin:16px 4px 8px;font-weight:600;}
+    .sec{margin:8px 0;border:1px solid var(--line);border-radius:8px;overflow:hidden;background:#0b0e13;}
+    .sec>summary{cursor:pointer;padding:8px 12px;font-size:12.5px;font-weight:600;background:#131820;list-style:none;display:flex;align-items:center;gap:6px;}
+    .sec>summary::-webkit-details-marker{display:none;}
+    .sec>summary::before{content:'▸';color:var(--muted);transition:.15s;font-size:10px;}
+    .sec[open]>summary::before{content:'▾';}
+    .sec-body{padding:10px 12px;font-size:12px;line-height:1.7;white-space:pre-wrap;color:#c9d2e3;}
+    .axis{margin-bottom:14px;}
+    .axis-track{position:relative;height:58px;background:linear-gradient(90deg,#16202e,#131820);border:1px solid var(--line);border-radius:8px;}
+    .axis-line{position:absolute;left:6%;right:6%;top:30px;height:2px;background:var(--line);}
+    .axis-dot{position:absolute;top:18px;transform:translateX(-50%);text-align:center;cursor:default;}
+    .axis-dot .pt{width:11px;height:11px;border-radius:50%;background:var(--green);margin:0 auto;border:2px solid #0f1115;box-shadow:0 0 0 2px rgba(39,192,138,.3);}
+    .axis-dot.near .pt{background:var(--red);box-shadow:0 0 0 2px rgba(255,92,92,.35);}
+    .axis-dot .d{display:block;font-size:9.5px;margin-top:4px;color:var(--muted);white-space:nowrap;}
+    .axis-dot.near .d{color:var(--red);font-weight:600;}
+    .axis-end{position:absolute;top:38px;font-size:9px;color:var(--muted);}
+    .axis-end.l{left:6%;transform:translateX(-50%);}
+    .axis-end.r{right:6%;transform:translateX(50%);}
+    .modal{display:none;position:fixed;inset:0;background:rgba(0,0,0,.62);z-index:50;align-items:center;justify-content:center;}
+    .modal.show{display:flex;}
+    .modal-box{width:min(700px,92vw);max-height:86vh;background:var(--panel);border:1px solid var(--line);border-radius:12px;display:flex;flex-direction:column;}
+    .modal-head{display:flex;align-items:center;justify-content:space-between;padding:12px 16px;border-bottom:1px solid var(--line);font-weight:700;font-size:14px;}
+    .modal-head button{background:transparent;color:var(--muted);padding:2px 8px;font-size:18px;}
+    #report-out{flex:1;min-height:300px;margin:12px 16px;background:#0b0e13;border:1px solid var(--line);border-radius:8px;color:#c9d2e3;font-size:11.5px;padding:12px;resize:none;font-family:ui-monospace,Menlo,monospace;white-space:pre;overflow:auto;}
+    .modal-foot{display:flex;gap:10px;justify-content:flex-end;padding:0 16px 14px;}
+    .banner{background:#1c2a1c;border:1px solid var(--green);color:#bff;padding:12px 14px;border-radius:10px;margin-bottom:14px;display:none;align-items:center;gap:12px;}
+    .banner.show{display:flex;}
+    .banner button{margin-left:auto;}
+    .toast{position:fixed;left:50%;bottom:24px;transform:translateX(-50%);background:#222a36;border:1px solid var(--line);padding:10px 16px;border-radius:10px;font-size:13px;opacity:0;transition:opacity .2s;pointer-events:none;z-index:60;}
+    .toast.show{opacity:1;}
+  </style>
+</head>
+<body>
+  <!-- 切换提示 banner -->
+  <div class="banner" id="banner"><span id="banner-msg"></span><button id="btn-restart">重启 WorkBuddy</button></div>
+
+  <!-- 侧边栏 -->
+  <aside class="sidebar">
+    <h3>当前登录</h3>
+    <div class="me" id="me-card">
+      <div class="av" id="me-av">👤</div>
+      <div class="nm" id="me-nm">加载中…</div>
+      <div class="id" id="me-id"></div>
+      <span class="badge" id="me-type"></span>
+    </div>
+
+    <h3>已登记账号</h3>
+    <div id="acc-list"><div class="empty">加载中…</div></div>
+
+    <h3>本地数据目录</h3>
+    <div id="dir-list"><div class="empty">加载中…</div></div>
+  </aside>
+
+  <!-- 主区 -->
+  <main class="main">
+    <div class="topbar">
+      <div>
+        <h1>WorkBuddy 账户中枢</h1>
+        <div class="sub"><span id="status-text">只读本机登录态 · 直连官方接口 · 桌面端</span><span id="updated"></span></div>
+      </div>
+      <div class="spacer"></div>
+      <button onclick="loadAll()">刷新全部</button>
+      <button class="secondary" onclick="loadQuota()">仅查积分</button>
+      <button class="secondary" onclick="doCheckin()">一键签到</button>
+      <button class="secondary" onclick="openReport()">导出报告</button>
+      <button class="secondary eye-global off" id="eye-global" title="显示所有隐私数据中段（Key/UID/Token 等）" onclick="toggleAllKeys()">👁 隐私</button>
+    </div>
+
+    <!-- 概览卡 -->
+    <div class="cards" id="overview">
+      <div class="card"><div class="label">权益赠送包剩余</div><div class="value green" id="ov-gift">—</div><div class="meta" id="ov-gift-m"></div></div>
+      <div class="card"><div class="label">体验版剩余</div><div class="value blue" id="ov-trial">—</div><div class="meta" id="ov-trial-m"></div></div>
+      <div class="card"><div class="label">全部剩余</div><div class="value" id="ov-grand">—</div><div class="meta" id="ov-grand-m"></div></div>
+      <div class="card"><div class="label">登录态剩余</div><div class="value purple" id="ov-jwt">—</div><div class="meta" id="ov-jwt-m"></div></div>
+    </div>
+
+    <div class="section-title">账户信息</div>
+    <div class="grid">
+      <div class="panel">
+        <h2>账户档案 <span class="tag">本机登录态</span></h2>
+        <div class="kv" id="kv-account"><span class="empty">加载中…</span></div>
+      </div>
+      <div class="panel">
+        <h2>登录态有效期 <span class="tag">JWT</span></h2>
+        <div class="ring-wrap">
+          <div class="ring" id="jwt-ring"><div class="rt"><b id="jwt-days">—</b><span>天</span></div></div>
+          <div class="kv" id="kv-jwt" style="flex:1;"><span class="empty">加载中…</span></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="section-title">积分与签到</div>
+    <div class="grid">
+      <div class="panel">
+        <h2>积分套餐明细 <span class="tag">/billing/meter/get-user-resource</span></h2>
+        <div class="cards" style="margin-bottom:10px;">
+          <div class="card"><div class="label">使用率</div><div class="value amber" id="q-use">—</div><div class="meta" id="q-use-m"></div></div>
+          <div class="card"><div class="label">最早到期</div><div class="value" id="q-expire">—</div></div>
+          <div class="card"><div class="label">套餐数</div><div class="value blue" id="q-count">—</div></div>
+        </div>
+        <div class="axis">
+          <div class="axis-track" id="axis-track">
+            <div class="axis-end l">今天</div>
+            <div class="axis-line"></div>
+            <div class="axis-end r">90 天后</div>
+          </div>
+        </div>
+        <div style="max-height:200px;overflow:auto;">
+          <table>
+            <thead><tr><th>套餐</th><th>类型</th><th class="num">剩余</th><th class="num">已用</th><th class="num">总量</th><th>周期到期</th><th>抵扣到期</th><th>使用率</th></tr></thead>
+            <tbody id="pkg-body"></tbody>
+          </table>
+        </div>
+        <div class="note ok" id="expire-note"></div>
+      </div>
+
+      <div class="panel">
+        <h2>每日签到 <span class="tag">/billing/meter/checkin-activity-status</span></h2>
+        <div class="cards" style="margin-bottom:10px;">
+          <div class="card"><div class="label">活动进行中</div><div class="value green" id="ck-active">—</div></div>
+          <div class="card"><div class="label">今日</div><div class="value" id="ck-today">—</div></div>
+          <div class="card"><div class="label">连续</div><div class="value blue" id="ck-streak">—</div></div>
+          <div class="card"><div class="label">今日得</div><div class="value amber" id="ck-credit">—</div></div>
+        </div>
+        <div class="meta" style="color:var(--muted);font-size:12px;margin-bottom:6px;">最近签到记录</div>
+        <div class="timeline" id="ck-timeline"></div>
+      </div>
+    </div>
+
+    <div class="section-title">AI 记忆 · 环境</div>
+    <div class="grid">
+      <div class="panel">
+        <h2>AI 记忆画像 <span class="tag">/api/memory/profile</span></h2>
+        <div class="kv" id="kv-memory" style="margin-bottom:12px;"><span class="empty">加载中…</span></div>
+        <div id="memory-sections"></div>
+        <div class="memo" id="memo-foryou">—</div>
+      </div>
+      <div class="panel">
+        <h2>本机环境</h2>
+        <div class="kv" id="kv-env"><span class="empty">加载中…</span></div>
+      </div>
+    </div>
+
+    <div class="section-title">API 管理</div>
+
+    <div class="panel" style="margin-top:12px;">
+      <h2>自定义 API <span class="tag" id="api-path">~/.workbuddy/models.json</span>
+        <span style="flex:1"></span>
+        <button class="mini" onclick="addModel()">+ 新增</button>
+        <button class="mini secondary" onclick="restartWB()">重启 WorkBuddy</button>
+      </h2>
+      <div class="cur-bar" id="api-current">探测当前使用模型…</div>
+      <div id="api-list"><span class="empty">加载中…</span></div>
+    </div>
+
+    <div class="panel" style="margin-top:12px;">
+      <h2>官方渠道 API <span class="tag">WorkBuddy 内置 · 只读</span></h2>
+      <div id="official-list"><span class="empty">加载中…</span></div>
+    </div>
+
+    <div class="panel" style="margin-top:12px;">
+      <h2>原始返回（调试）</h2>
+      <pre id="raw-out">点击「刷新全部」…</pre>
+    </div>
+  </main>
+
+  <!-- 模型编辑弹窗 -->
+  <div class="modal" id="model-modal">
+    <div class="modal-box">
+      <div class="modal-head"><span id="model-modal-title">新增自定义 API</span><button onclick="closeModelModal()">×</button></div>
+      <div class="modal-body" style="display:grid;grid-template-columns:1fr 1fr;gap:10px 14px;padding:14px 16px;">
+        <label style="grid-column:1/2;">名称（显示名）
+          <input id="mf-name" placeholder="如 DeepSeek V4 Free">
+        </label>
+        <label style="grid-column:2/3;">模型 ID（唯一，切换时显示）
+          <input id="mf-id" placeholder="如 deepseek-v4-flash-free">
+        </label>
+        <label style="grid-column:1/3;">API 地址（Base 或完整 chat/completions）
+          <input id="mf-url" placeholder="https://api.example.com/v1">
+        </label>
+        <label style="grid-column:1/3;">API Key（新增必填；编辑留空=保持不变）
+          <input id="mf-key" type="password" placeholder="sk-…">
+        </label>
+        <label style="grid-column:1/2;">渠道 / 分组（provider）
+          <input id="mf-provider" placeholder="如 feng7072 · deepseek订阅">
+        </label>
+        <label style="grid-column:2/3;">备注（label）
+          <input id="mf-label" placeholder="可选说明">
+        </label>
+        <label style="grid-column:1/2;">上下文窗口（tokens）
+          <input id="mf-ctx" type="number" placeholder="128000" value="128000">
+        </label>
+        <label style="grid-column:2/3;">最大输出（tokens）
+          <input id="mf-max" type="number" placeholder="8192" value="8192">
+        </label>
+        <div style="grid-column:1/3;display:flex;gap:14px;font-size:12px;color:var(--fg);">
+          <label><input id="mf-tool" type="checkbox" checked> 工具调用</label>
+          <label><input id="mf-img" type="checkbox"> 图片输入</label>
+          <label><input id="mf-reason" type="checkbox"> 推理</label>
+        </div>
+        <div class="modal-err" id="mf-err" style="grid-column:1/3;display:none;"></div>
+      </div>
+      <div class="modal-foot">
+        <button class="secondary" onclick="closeModelModal()">取消</button>
+        <button class="secondary" onclick="testCurrentForm()">测试连接</button>
+        <button onclick="saveModel()">保存</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 导出报告 -->
+  <div class="modal" id="report-modal">
+    <div class="modal-box">
+      <div class="modal-head"><span>账户快照报告</span><button onclick="closeReport()">×</button></div>
+      <textarea id="report-out" readonly spellcheck="false"></textarea>
+      <div class="modal-foot">
+        <button class="secondary" onclick="closeReport()">关闭</button>
+        <button onclick="copyReport()">复制内容</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="toast" id="toast"></div>
+
+  <script src="main.js"></script>
+</body>
+</html>

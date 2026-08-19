@@ -1,0 +1,44 @@
+# Rust / Tauri
+tauri-app/src-tauri/target/
+tauri-app/src-tauri/gen/
+tauri-app/src-tauri/Cargo.lock
+
+# Node
+tauri-app/node_modules/
+tauri-app/dist/
+
+# Legacy Electron scaffold (replaced by Tauri; not part of current build)
+tauri-app/credits-api.js
+tauri-app/dev-server.mjs
+tauri-app/package.json
+tauri-app/package-lock.json
+
+# Build artifacts
+*.dmg
+*.app/
+WorkBuddy Account Hub.app/
+
+# Python
+__pycache__/
+*.pyc
+
+# Sensitive
+*.info
+vault/
+*.poc
+*.enc
+local-keys.json
+mitm_capture.py
+sync/data/
+
+# macOS
+.DS_Store
+
+# IDE / logs
+*.log
+.idea/
+.vscode/
+
+# Embedded publish-* repos (each published separately)
+publish-checkin-qinglong/
+publish-dashboard/

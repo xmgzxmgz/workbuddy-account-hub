@@ -1,0 +1,9 @@
+[package]
+name = "account_ops"
+version = "0.1.0"
+edition = "2021"
+description = "WorkBuddy 账户中枢 — 纯文件/进程操作逻辑（无网络、无 tauri 依赖）"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

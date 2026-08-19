@@ -1,0 +1,146 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <title>WorkBuddy 接口调试器</title>
+  <style>
+    :root { --bg:#0f1115; --panel:#161a21; --line:#2a2f3a; --fg:#e6e6e6; --muted:#8a93a6; --blue:#2b6cff; --green:#27c08a; --red:#ff5c5c; }
+    * { box-sizing: border-box; }
+    body { font-family: system-ui, -apple-system, "PingFang SC", sans-serif; margin:0; padding:24px; background:var(--bg); color:var(--fg); }
+    h1 { font-size:20px; margin:0 0 4px; } .sub { color:var(--muted); margin:0 0 20px; font-size:13px; }
+    .panel { background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:16px 18px; margin-bottom:18px; }
+    .panel h2 { font-size:15px; margin:0 0 12px; }
+    button { margin:4px 6px 4px 0; padding:8px 14px; border:0; border-radius:8px; background:var(--blue); color:#fff; cursor:pointer; font-size:13px; }
+    button.secondary { background:var(--line); color:var(--fg); }
+    button:disabled { opacity:.45; cursor:not-allowed; }
+    input, select { padding:7px 10px; border-radius:6px; border:1px solid var(--line); background:#11151c; color:var(--fg); font-size:13px; width:320px; }
+    .row { display:flex; align-items:center; gap:8px; margin:8px 0; flex-wrap:wrap; }
+    .meta { color:var(--muted); font-size:13px; margin-top:8px; }
+    pre { background:#0b0e13; padding:14px; border-radius:8px; overflow:auto; max-height:420px; font-size:12px; margin:0; white-space:pre-wrap; word-break:break-all; }
+    .endpoint-group { margin-bottom:10px; }
+    .endpoint-group h3 { font-size:13px; color:var(--muted); margin:10px 0 6px; }
+    code { background:#222; padding:2px 5px; border-radius:4px; font-size:12px; }
+    .ok { color:var(--green); } .err { color:var(--red); }
+  </style>
+</head>
+<body>
+  <h1>WorkBuddy 接口调试器</h1>
+  <p class="sub">自动读本机登录态，快速 probe 剩余积分/到期时间接口</p>
+
+  <div class="panel">
+    <h2>登录态</h2>
+    <button onclick="loadToken()">刷新登录态</button>
+    <pre id="token-out" class="meta">点击刷新...</pre>
+  </div>
+
+  <div class="panel">
+    <h2>候选接口（预置）</h2>
+    <div id="buttons"></div>
+  </div>
+
+  <div class="panel">
+    <h2>自定义请求</h2>
+    <div class="row">
+      <select id="method"><option>POST</option><option>GET</option></select>
+      <input id="endpoint" placeholder="/v2/billing/meter/xxx 或完整 URL" />
+      <button onclick="customCall()">发送</button>
+    </div>
+    <div class="row">
+      <textarea id="body" rows="3" style="width:100%;background:#11151c;color:var(--fg);border:1px solid var(--line);border-radius:8px;padding:10px;" placeholder='{}'></textarea>
+    </div>
+  </div>
+
+  <div class="panel">
+    <h2>结果</h2>
+    <pre id="result">点击上方按钮...</pre>
+  </div>
+
+  <script>
+    async function loadToken() {
+      const out = document.getElementById('token-out');
+      try {
+        const r = await fetch('/token');
+        const j = await r.json();
+        out.textContent = r.ok ? JSON.stringify(j, null, 2) : ('错误：' + JSON.stringify(j));
+      } catch (e) { out.textContent = '错误：' + e; }
+    }
+
+    async function call(endpoint, method = 'POST', body = '{}') {
+      const out = document.getElementById('result');
+      out.textContent = '请求中...';
+      try {
+        const r = await fetch('/api', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ endpoint, method, body })
+        });
+        const j = await r.json();
+        out.textContent = JSON.stringify(j, null, 2);
+      } catch (e) { out.textContent = '错误：' + e; }
+    }
+
+    function customCall() {
+      const method = document.getElementById('method').value;
+      const endpoint = document.getElementById('endpoint').value.trim();
+      const body = document.getElementById('body').value.trim() || (method === 'GET' ? '' : '{}');
+      if (!endpoint) return;
+      call(endpoint, method, body);
+    }
+
+    const groups = [
+      {
+        title: '签到/活动（已知可用）',
+        items: [
+          ['POST', '/v2/billing/meter/checkin-activity-status', '{}'],
+          ['POST', '/v2/billing/meter/daily-checkin', '{}'],
+        ]
+      },
+      {
+        title: '积分/额度（已确认）',
+        items: [
+          ['POST', '/billing/meter/get-user-resource', '{}'],
+        ]
+      },
+      {
+        title: '积分/额度（猜测）',
+        items: [
+          ['POST', '/v2/billing/meter/quota', '{}'],
+          ['POST', '/v2/billing/meter/usage', '{}'],
+          ['POST', '/v2/billing/meter/credits', '{}'],
+          ['POST', '/v2/billing/meter/account', '{}'],
+          ['POST', '/v2/billing/meter/subscription', '{}'],
+          ['POST', '/v2/account/quota', '{}'],
+          ['POST', '/v2/user/quota', '{}'],
+          ['POST', '/v2/billing/quota', '{}'],
+          ['POST', '/v2/account/subscription', '{}'],
+          ['POST', '/v2/user/subscription', '{}'],
+          ['POST', '/v2/billing/subscription', '{}'],
+        ]
+      },
+      {
+        title: '本地 WorkBuddy 客户端接口',
+        items: [
+          ['GET', 'http://127.0.0.1:8080/api/v1/quota', ''],
+        ]
+      }
+    ];
+
+    const box = document.getElementById('buttons');
+    for (const g of groups) {
+      const div = document.createElement('div');
+      div.className = 'endpoint-group';
+      div.innerHTML = '<h3>' + g.title + '</h3>';
+      for (const [m, ep, b] of g.items) {
+        const btn = document.createElement('button');
+        btn.className = 'secondary';
+        btn.textContent = m + ' ' + ep;
+        btn.onclick = () => call(ep, m, b);
+        div.appendChild(btn);
+      }
+      box.appendChild(div);
+    }
+
+    loadToken();
+  </script>
+</body>
+</html>
