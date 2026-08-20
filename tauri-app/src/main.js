@@ -1,9 +1,6 @@
-// WorkBuddy 账户中枢 — Tauri 前端（调用 Rust Command 替代 fetch）
-// 仪表盘视觉沿用 web 版本；网络/账号操作全部走 invoke。
-// 双环境分派：Tauri 桌面 → window.__TAURI__.core.invoke；纯 Web（GitHub Pages 演示版）→ 内置 mock。
-const IS_WEB = typeof window !== 'undefined' && !(window.__TAURI__ && window.__TAURI__.core);
-const invoke = (cmd, args = {}) =>
-  IS_WEB ? webMockInvoke(cmd, args) : window.__TAURI__.core.invoke(cmd, args);
+// WorkBuddy 账户中枢 — Tauri 桌面前端（调用 Rust Command 替代 fetch）
+// 网络/账号操作全部走 Tauri invoke（无 Web 版）。
+const invoke = (cmd, args = {}) => window.__TAURI__.core.invoke(cmd, args);
 
 function $(id) { return document.getElementById(id); }
 function toast(msg) {
@@ -769,67 +766,6 @@ async function restartWB() {
   catch (e) { toast('重启失败: ' + e); }
 }
 
-// ===== Web 演示模式 mock 层（无 Tauri 环境时使用，供 GitHub Pages 静态演示） =====
-async function webMockInvoke(cmd, args) {
-  if (typeof window !== 'undefined') window.__web_mode = true;
-  const uid4 = '4c6af085-6a28-4c45-8025-099590dac28a';
-  const uid5 = 'de58fc75-61f2-4429-a4af-11ffcc5fc6fa';
-  const accounts = [
-    { uid: uid4, nickname: '24\\7', has_snapshot: true },
-    { uid: uid5, nickname: '19232885101', has_snapshot: true },
-  ];
-  const webBanner = { web: true, message: 'Web 演示模式：本页为纯浏览器静态版，仅用于界面预览，真实的账号切换 / 快照 / 签到 / API 管理需在 macOS 或 Windows 桌面版中使用。' };
-
-  switch (cmd) {
-    case 'ensure_snapshot':
-      return { uid: uid4, existed: true, web: true };
-    case 'list_accounts':
-      return { workbuddy_running: false, accounts, web: true };
-    case 'backup_all':
-      return accounts.map(a => ({ uid: a.uid, ok: true, type: a.uid === uid4 ? 'current' : 'archived' }));
-    case 'list_backups':
-      return { backups: accounts.map(a => ({ uid: a.uid, entries: [{ ts: String(Date.now()), auth_included: true, file_count: 12 }] })), web: true };
-    case 'backup_detail':
-      return { uid: args && args.uid, ts: args && args.ts, auth_included: true, file_count: 12, files: ['auth.info', 'local_storage/entry_demo.info'], web: true };
-    case 'get_all':
-      return {
-        login: { uid: uid4, nickname: '24\\7', type: 'personal' },
-        registered_accounts: accounts,
-        current_uid: uid4,
-        quota: { status: 200, body: { usage: { type: '个人专业版', used: 420, total: 1024, remain: 604, level: 'plus' }, packs: [
-          { name: 'CodeBuddy 个人版应用包', used: 80, total: 100, remain: 20, expire: Date.now() + 60*86400000 },
-        ] } },
-        checkin: webBanner,
-        memory: null,
-        env: { platform: 'web-demo', version: '0.2.0' },
-        jwt: null,
-        web: true,
-      };
-    case 'get_quota':
-      return { status: 200, body: { usage: { type: '个人专业版', used: 420, total: 1024, remain: 604, level: 'plus' } }, web: true };
-    case 'do_checkin':
-      return { skipped: true, web: true };
-    case 'list_custom_models':
-      return { ok: true, models: [{ id: 'web-demo', name: 'deepseek-v4-flash', base: 'https://api.deepseek.com' }], web: true };
-    case 'official_models':
-      return [{ id: 'deepseek-v4-flash', name: 'DeepSeek V4 Flash' }, { id: 'deepseek-v4-pro', name: 'DeepSeek V4 Pro' }];
-    case 'current_model':
-      return { id: 'web-demo', name: 'deepseek-v4-flash', selected: true };
-    case 'test_custom_model':
-      return { ok: true, path: 'ok', model: args && args.model, latency_ms: 120 };
-    case 'add_custom_model':
-    case 'update_custom_model':
-    case 'delete_custom_model':
-      return { ok: true };
-    case 'switch_account':
-      return { uid: args && args.uid, restart_required: false, web: true };
-    case 'restart_workbuddy':
-      return { web: true };
-    default:
-      return { ok: true, web: true };
-  }
-}
-
 // 暴露给 inline onclick
 window.addModel = addModel;
 window.editModel = editModel;
@@ -858,9 +794,4 @@ window.openBackupDetail = openBackupDetail;
 window.closeBackups = closeBackups;
 window.closeBackupDetail = closeBackupDetail;
 
-if (IS_WEB) {
-  // Web 演示模式：跳过 Tauri 注入，直接加载；Toast 顶部提示
-  window.addEventListener('DOMContentLoaded', () => { try { loadAll(); } catch (e) {} });
-} else {
-  loadAll();
-}
+loadAll();

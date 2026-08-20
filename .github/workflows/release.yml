@@ -1,4 +1,4 @@
-name: Release Win / Mac / Web
+name: Release Win / Mac
 
 # 触发：推送 v* tag 时构建并发布；也可通过 workflow_dispatch 手动触发
 on:
@@ -78,45 +78,3 @@ jobs:
           releaseName: "WorkBuddy Account Hub v__VERSION__"
           releaseDraft: true
           prerelease: false
-
-  # ---------- web 版（纯浏览器演示版，静态无后端） ----------
-  build-web:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Prepare web demo bundle
-        run: |
-          mkdir -p web-dist
-          cp tauri-app/src/index.html web-dist/index.html
-          cp tauri-app/src/main.js web-dist/main.js
-
-      - name: Package web demo zip
-        run: |
-          cd web-dist && zip -r ../workbuddy-account-hub-web.zip . && cd ..
-          ls -la workbuddy-account-hub-web.zip
-
-      - name: Attach web bundle to Release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ github.ref_name }}
-          files: workbuddy-account-hub-web.zip
-
-      - name: Upload Pages artifact
-        uses: actions/upload-pages-artifact@v3
-        with:
-          path: web-dist
-
-  # 部署到 GitHub Pages（Web 演示版）
-  deploy-web:
-    runs-on: ubuntu-latest
-    needs: build-web
-    permissions:
-      pages: write
-      id-token: write
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-    steps:
-      - id: deployment
-        uses: actions/deploy-pages@v4
