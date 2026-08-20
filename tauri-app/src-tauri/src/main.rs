@@ -37,8 +37,35 @@ fn get_checkin() -> Value {
 }
 
 #[tauri::command]
+fn get_memory() -> Value {
+    api::get_memory()
+}
+
+#[tauri::command]
 fn do_checkin() -> Value {
     api::do_checkin()
+}
+
+// ---------- 宠物旅行（buddy travel） ----------
+
+#[tauri::command]
+fn buddy_status() -> Value {
+    api::buddy_status()
+}
+
+#[tauri::command]
+fn buddy_config() -> Value {
+    api::buddy_config()
+}
+
+#[tauri::command]
+fn buddy_depart(location_id: String) -> Value {
+    api::buddy_depart(&location_id)
+}
+
+#[tauri::command]
+fn buddy_claim() -> Value {
+    api::buddy_claim()
 }
 
 // ---------- 模型 / API 管理（wb_api::models） ----------
@@ -155,7 +182,12 @@ pub fn run() {
             get_all,
             get_quota,
             get_checkin,
+            get_memory,
             do_checkin,
+            buddy_status,
+            buddy_config,
+            buddy_depart,
+            buddy_claim,
             list_accounts,
             snapshot_current,
             ensure_snapshot,

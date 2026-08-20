@@ -125,6 +125,28 @@ fn mask(s: &str, n: usize) -> String {
     if s.is_empty() { "(空)".into() } else { format!("{}…({}字符)", &s[..s.len().min(n)], s.len()) }
 }
 
+/// 构建带超时与代理的 HTTP 客户端。
+/// - timeout: 整体 15s、connect 10s，避免网络挂起导致整个 get_all（含本地昵称）永久卡死 UI。
+/// - 代理：尊重 HTTPS_PROXY/HTTP_PROXY 等环境变量（如本机 Clash 127.0.0.1:7897），
+///   直连被墙/不通时自动走代理，避免无限等待。
+fn make_client() -> reqwest::blocking::Client {
+    let mut builder = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .connect_timeout(std::time::Duration::from_secs(10));
+    // 代理：优先 HTTPS_PROXY，其次 HTTP_PROXY（含小写），任一存在则全局套用
+    let proxy_env = std::env::var("HTTPS_PROXY")
+        .or_else(|_| std::env::var("https_proxy"))
+        .or_else(|_| std::env::var("HTTP_PROXY"))
+        .or_else(|_| std::env::var("http_proxy"))
+        .unwrap_or_default();
+    if !proxy_env.is_empty() {
+        if let Ok(p) = reqwest::Proxy::all(&proxy_env) {
+            builder = builder.proxy(p);
+        }
+    }
+    builder.build().unwrap_or_else(|_| reqwest::blocking::Client::new())
+}
+
 /// 统一代理官方接口；返回 { status, body(Value), login(脱敏) }
 pub fn call_api(endpoint: &str, method: &str, body: &str) -> Result<Value, String> {
     let login = load_login().ok_or("未找到本机 WorkBuddy 登录态，请先登录 WorkBuddy 客户端".to_string())?;
@@ -133,7 +155,7 @@ pub fn call_api(endpoint: &str, method: &str, body: &str) -> Result<Value, Strin
     } else {
         format!("{}{}", API_BASE, endpoint)
     };
-    let client = reqwest::blocking::Client::new();
+    let client = make_client();
     let mut req = match method.to_uppercase().as_str() {
         "GET" => client.get(&target),
         "POST" => client.post(&target),
@@ -193,7 +215,10 @@ pub fn jwt_info() -> Value {
     })
 }
 
-/// 一键拉全部（等价于 web 调试版的 /all）
+/// 一键拉「本地信息」（不含任何网络请求，瞬时返回）。
+/// 昵称/UID/类型/已登记账号/本地目录/环境/JWT 均为本机文件或本地解析，
+/// 不再内嵌额度/签到/记忆等网络查询 —— 避免网络慢/不通时把本地昵称一起卡成空白。
+/// 网络部分由前端分批独立调用 get_quota / get_checkin / get_memory 加载。
 pub fn get_all() -> Value {
     let login = load_login();
     let auth_file = load_auth_file();
@@ -233,24 +258,17 @@ pub fn get_all() -> Value {
         }
     }
 
-    if let Some(l) = &login {
-        // 并行查询：额度 / 签到 / 记忆
-        let quota = call_api(&format!("{}{}/get-user-resource", API_BASE, BILLING_METER), "POST", "{}")
-            .unwrap_or_else(|e| json!({ "error": e }));
-        let checkin = call_api(&format!("{}{}/checkin-activity-status", API_BASE, BILLING_METER), "POST", "{}")
-            .unwrap_or_else(|e| json!({ "error": e }));
-        let memory = call_api(&format!("{}/api/memory/profile", API_BASE), "GET", "")
-            .unwrap_or_else(|e| json!({ "error": e }));
-        result["quota"] = quota;
-        result["checkin"] = checkin;
-        result["memory"] = memory;
-        result["jwt"] = jwt_info();
-    }
-
-    // 本地数据目录
+    // 本地数据目录 + 环境 + JWT（均为本地，快）
     result["local_accounts"] = local_accounts(&cur);
     result["env"] = app_env();
+    result["jwt"] = jwt_info();
     result
+}
+
+/// 仅查询 AI 记忆画像（网络部分，独立加载，失败不影响本地信息）
+pub fn get_memory() -> Value {
+    call_api(&format!("{}/api/memory/profile", API_BASE), "GET", "")
+        .unwrap_or_else(|e| json!({ "error": e }))
 }
 
 /// 执行今日签到（幂等：已签则跳过）
@@ -281,11 +299,71 @@ pub fn get_checkin() -> Value {
         .unwrap_or_else(|e| json!({ "error": e }))
 }
 
+// ===== 宠物旅行（buddy travel） =====
+
+/// 宠物状态端点（所有 travel 接口共用的路径前缀）
+const BUDDY_TRAVEL: &str = "/activity/growth/buddy/travel";
+
+/// 查询宠物当前状态（idle / traveling / arrived）
+/// 返回 { status, body }，body.data.state: "idle"|"traveling"|"arrived"，
+/// 含 location_name / arrive_at / daily_limit_reached 等。
+pub fn buddy_status() -> Value {
+    call_api(&format!("{}{}/status", API_BASE, BUDDY_TRAVEL), "GET", "")
+        .unwrap_or_else(|e| json!({ "error": e }))
+}
+
+/// 查询可派出地点列表（location_id -> 名称/耗时/收益）
+pub fn buddy_config() -> Value {
+    call_api(&format!("{}{}/config", API_BASE, BUDDY_TRAVEL), "GET", "")
+        .unwrap_or_else(|e| json!({ "error": e }))
+}
+
+/// 派出宠物前往指定地点（幂等原因：每天限 1 次；traveling/arrived 时返回对应错误）
+pub fn buddy_depart(location_id: &str) -> Value {
+    let body = json!({ "location_id": location_id }).to_string();
+    call_api(&format!("{}{}/depart", API_BASE, BUDDY_TRAVEL), "POST", &body)
+        .unwrap_or_else(|e| json!({ "error": e }))
+}
+
+/// 领取已归来宠物的奖励（空闲时返回 400 "no unclaimed travel"，幂等安全）
+pub fn buddy_claim() -> Value {
+    call_api(&format!("{}{}/claim", API_BASE, BUDDY_TRAVEL), "POST", "{}")
+        .unwrap_or_else(|e| json!({ "error": e }))
+}
+
 // ===== 本地信息 =====
 
+/// WorkBuddy 本机数据根目录（跨平台）：
+///   macOS:   ~/Library/Application Support/CodeBuddyExtension/Data
+///   Windows: %APPDATA%\CodeBuddyExtension\Data
+fn data_root() -> std::path::PathBuf {
+    if cfg!(target_os = "windows") {
+        std::path::Path::new(&std::env::var("APPDATA").unwrap_or_default())
+            .join("CodeBuddyExtension").join("Data")
+    } else {
+        std::path::Path::new(&std::env::var("HOME").unwrap_or_default())
+            .join("Library").join("Application Support").join("CodeBuddyExtension").join("Data")
+    }
+}
+
+/// WorkBuddy 安装包路径（跨平台），找不到返回 None（不崩溃）
+fn app_bundle_path() -> Option<std::path::PathBuf> {
+    if cfg!(target_os = "windows") {
+        let local = std::env::var("LOCALAPPDATA").unwrap_or_default();
+        let candidates = [
+            format!("{}\\Programs\\WorkBuddy\\WorkBuddy.exe", local),
+            "C:\\Program Files\\WorkBuddy\\WorkBuddy.exe".to_string(),
+            format!("{}\\WorkBuddy\\WorkBuddy.exe", local),
+        ];
+        candidates.iter().map(std::path::PathBuf::from).find(|p| p.exists())
+    } else {
+        let p = std::path::Path::new("/Applications/WorkBuddy.app");
+        if p.exists() { Some(p.to_path_buf()) } else { None }
+    }
+}
+
 fn local_accounts(cur: &str) -> Value {
-    let home = std::env::var("HOME").unwrap_or_default();
-    let base = std::path::Path::new(&home).join("Library").join("Application Support").join("CodeBuddyExtension").join("Data");
+    let base = data_root();
     let mut accounts = Vec::new();
     if let Ok(rd) = std::fs::read_dir(&base) {
         for e in rd.flatten() {
@@ -336,27 +414,33 @@ fn du_human(bytes: u64) -> String {
 }
 
 fn app_env() -> Value {
+    let bundle = app_bundle_path();
+    let app_bundle_str = bundle.as_ref().map(|p| p.to_string_lossy().into_owned()).unwrap_or_else(|| "（未检测到安装路径）".into());
     let mut out = json!({
         "platform": if cfg!(target_os = "windows") { "win32" } else { "darwin" },
         "arch": std::env::consts::ARCH,
         "node": "—", // Tauri 不含 Node
-        "appBundle": "/Applications/WorkBuddy.app",
+        "appBundle": app_bundle_str,
     });
-    let bundle = "/Applications/WorkBuddy.app";
-    let plist = format!("{}/Contents/Info.plist", bundle);
-    if let Ok(s) = std::fs::read_to_string(&plist) {
-        let grab = |k: &str| -> Option<String> {
-            let key = format!("<key>{}</key>", k);
-            let idx = s.find(&key)?;
-            let rest = &s[idx + key.len()..];
-            let sidx = rest.find("<string>")? + "<string>".len();
-            let eidx = rest[sidx..].find("</string>")?;
-            Some(rest[sidx..sidx + eidx].to_string())
-        };
-        if let Some(v) = grab("CFBundleShortVersionString") { out["version"] = json!(v); }
-        if let Some(v) = grab("CFBundleVersion") { out["build"] = json!(v); }
+    if let Some(b) = &bundle {
+        if cfg!(target_os = "macos") {
+            let plist = format!("{}/Contents/Info.plist", b.display());
+            if let Ok(s) = std::fs::read_to_string(&plist) {
+                let grab = |k: &str| -> Option<String> {
+                    let key = format!("<key>{}</key>", k);
+                    let idx = s.find(&key)?;
+                    let rest = &s[idx + key.len()..];
+                    let sidx = rest.find("<string>")? + "<string>".len();
+                    let eidx = rest[sidx..].find("</string>")?;
+                    Some(rest[sidx..sidx + eidx].to_string())
+                };
+                if let Some(v) = grab("CFBundleShortVersionString") { out["version"] = json!(v); }
+                if let Some(v) = grab("CFBundleVersion") { out["build"] = json!(v); }
+            }
+        }
+        // Windows 暂未解析 exe 版本资源，保留平台/架构即可；不崩溃。
+        out["appSize"] = json!(du_human(dir_size(b)));
     }
-    out["appSize"] = json!(du_human(dir_size(std::path::Path::new(bundle))));
     out
 }
 

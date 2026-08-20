@@ -512,27 +512,274 @@ function closeBackupDetail() { $('bk-detail-modal').classList.remove('show'); }
 if ($('bk-modal')) $('bk-modal').addEventListener('click', e => { if (e.target.id === 'bk-modal') closeBackups(); });
 if ($('bk-detail-modal')) $('bk-detail-modal').addEventListener('click', e => { if (e.target.id === 'bk-detail-modal') closeBackupDetail(); });
 
+// ===== 宠物旅行（buddy travel） =====
+let buddyLocations = [];       // 可选地点列表 [{location_id,name,hour,reward,desc}]
+let buddyLog = [];             // 本次会话操作日志 [{t,msg,cls}]
+let buddyTimer = null;         // 自动轮询定时器
+
+function buddyLogAdd(msg, cls) {
+  buddyLog.unshift({ t: new Date(), msg, cls: cls || 'info' });
+  const box = $('buddy-log');
+  if (!box) return;
+  const line = document.createElement('div');
+  line.className = 'line';
+  const t = `${pad(buddyLog[0].t.getHours())}:${pad(buddyLog[0].t.getMinutes())}:${pad(buddyLog[0].t.getSeconds())}`;
+  line.innerHTML = `<span class="t">${t}</span><span class="${cls || 'info'}">${escapeHtml(msg)}</span>`;
+  box.prepend(line);
+  while (box.children.length > 60) box.lastChild?.remove();
+}
+function buddyLogInit() {
+  const box = $('buddy-log');
+  if (!box) return;
+  box.innerHTML = '';
+  (buddyLog || []).forEach(l => {
+    const line = document.createElement('div');
+    line.className = 'line';
+    const t = `${pad(l.t.getHours())}:${pad(l.t.getMinutes())}:${pad(l.t.getSeconds())}`;
+    line.innerHTML = `<span class="t">${t}</span><span class="${l.cls || 'info'}">${escapeHtml(l.msg)}</span>`;
+    box.appendChild(line);
+  });
+  if (!buddyLog.length) box.innerHTML = '<span class="empty">暂无记录。点击「🔄 刷新」读取宠物状态。</span>';
+}
+
+// 从 status 响应中安全取 data（body 可能是 JSON 字符串或已解析对象）
+function buddyData(body, field) {
+  if (body === null || body === undefined) return undefined;
+  const d = (typeof body === 'object' && 'data' in body) ? body.data : body;
+  return d && field ? d[field] : d;
+}
+function setBuddyState(state, loc, desc, arriveAt) {
+  const tag = $('buddy-state-tag'); if (!tag) return;
+  const av = $('buddy-avatar');
+  const map = {
+    idle: ['休息中', 'idle', '🐱', '宠物在家休息，可以派它出去旅行赚积分。'],
+    traveling: ['旅行中', 'traveling', '🧳', desc || '宠物正在旅途中，即将到达目的地。'],
+    arrived: ['已到达 🎉', 'arrived', '🎁', desc || '宠物已到达目的地，可以领取旅行奖励了！'],
+  };
+  const m = map[state] || map.idle;
+  tag.textContent = m[0]; tag.className = 'st-tag ' + m[1];
+  av.textContent = m[2]; av.className = 'buddy-avatar ' + (m[1] === 'idle' ? '' : m[1]);
+  $('buddy-desc').textContent = desc || m[3];
+  $('buddy-countdown').style.display = (state === 'traveling' && arriveAt) ? 'flex' : 'none';
+  // 按钮可用性
+  $('btn-buddy-depart').disabled = state !== 'idle';
+  if (state === 'idle') { $('btn-buddy-depart').textContent = '📤 派出宠物'; }
+  const claimBtn = $('btn-buddy-claim');
+  if (state === 'arrived') { claimBtn.disabled = false; claimBtn.innerHTML = '🎁 领取奖励'; }
+  else { claimBtn.disabled = true; claimBtn.innerHTML = '🎁 领取奖励'; }
+}
+function buddyCountdownTick() {
+  const c = $('buddy-countdown'); if (!c || c.style.display === 'none') return;
+  const at = parseInt(c.dataset.at || 0, 10);
+  if (!at) return;
+  const remain = at - Date.now();
+  if (remain <= 0) { c.textContent = '即将到达 ⌛'; loadBuddy(); return; }
+  const s = Math.floor(remain / 1000);
+  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
+  c.textContent = `⏱ 还有 ${h}时 ${m}分 ${sec}秒 到达`;
+}
+
+async function loadBuddy() {
+  try {
+    const [st, cfg] = await Promise.all([
+      invoke('buddy_status').catch(e => ({ error: String(e) })),
+      invoke('buddy_config').catch(e => ({ error: String(e) })),
+    ]);
+    if (st && st.error) { buddyLogAdd('读取状态失败: ' + st.error, 'err'); toast('宠物状态读取失败'); return; }
+    // 地点配置
+    if (cfg && !cfg.error && cfg.status === 200) {
+      const cfgBody = typeof cfg.body === 'string' ? JSON.parse(cfg.body) : cfg.body;
+      const rawLocs = buddyData(cfgBody, 'locations') || buddyData(cfgBody, 'config') || [];
+      buddyLocations = (Array.isArray(rawLocs) ? rawLocs : []).map(l => {
+        const hMin = l.duration_hours_min ?? l.hour_min ?? l.duration_hour ?? 0;
+        const hMax = l.duration_hours_max ?? l.hour_max ?? l.duration_hours ?? hMin;
+        const rMin = l.reward_credit_min ?? l.reward_min ?? l.reward_credit ?? 0;
+        const rMax = l.reward_credit_max ?? l.reward_max ?? rMin;
+        return {
+          id: l.location_id ?? l.id ?? '',
+          name: l.name || l.location_name || '',
+          hour: hMin, hourMax: hMax,
+          reward: rMin, rewardMax: rMax,
+          desc: l.description || l.desc || '',
+        };
+      }).filter(l => l.id !== '' && l.id !== null && l.id !== undefined);
+      renderBuddyLocs();
+    }
+    // 状态
+    if (st.status === 200) {
+      const sBody = typeof st.body === 'string' ? JSON.parse(st.body) : st.body;
+      const d = buddyData(sBody);
+      renderBuddy(d);
+    } else if (st.status && st.status !== 200) {
+      buddyLogAdd('状态接口返回 ' + st.status, 'err');
+    }
+  } catch (e) {
+    buddyLogAdd('加载宠物失败: ' + e, 'err');
+    toast('宠物加载失败: ' + e);
+  }
+}
+
+function renderBuddy(d) {
+  const state = (d && d.state) || 'idle';
+  const loc = (d && (typeof d.location === 'object' ? d.location : null)) || {};
+  const locName = loc.name || d.location_name || (typeof d.location === 'string' ? d.location : '') || '—';
+  const arriveAt = d && d.arrive_at ? (d.arrive_at < 1e12 ? d.arrive_at * 1000 : d.arrive_at) : 0;
+  const dailyLimit = !!(d && d.daily_limit_reached);
+  const durationH = (d && (d.duration_hours ?? d.duration_hour)) || 0;
+  const rewardFor = d && d.reward_credit;
+  let desc = '';
+  if (state === 'traveling') desc = `正在前往「${locName}」，旅程约 ${durationH} 小时，预计 +${rewardFor ?? '?'} 积分。`;
+  else if (state === 'arrived') desc = `已到达「${locName}」，可领取 ${rewardFor !== undefined ? rewardFor + ' 积分' : '奖励'}！`;
+  else if (state === 'idle') desc = '宠物在家休息，选个地点派它出去旅行赚积分吧。';
+  setBuddyState(state, locName, desc, arriveAt);
+  $('buddy-loc').textContent = state === 'idle' ? '窝里休息 🏠' : locName;
+  $('bd-today').textContent = dailyLimit ? '已派' : '未派';
+  $('bd-credit').textContent = rewardFor !== undefined ? rewardFor : '—';
+  $('bd-dur').textContent = durationH ? durationH + 'h' : '—';
+  $('bd-next').textContent = dailyLimit ? '明日可派' : (rewardFor !== undefined ? rewardFor + ' 分' : '—');
+  $('buddy-tip').textContent = dailyLimit ? '今日已派出，明日再来' : (state === 'idle' ? '可派出' : '');
+  if (state === 'traveling' && arriveAt) {
+    const c = $('buddy-countdown');
+    c.dataset.at = arriveAt;
+    c.style.display = 'flex';
+    buddyCountdownTick();
+  } else {
+    $('buddy-countdown').style.display = 'none';
+  }
+  buddyLogAdd(`状态：${state}${locName !== '—' ? '（' + locName + '）' : ''}`, state === 'arrived' ? 'ok' : 'info');
+}
+
+function renderBuddyLocs() {
+  const box = $('buddy-locs');
+  if (!buddyLocations.length) { box.innerHTML = '<span class="empty">暂无可选地点</span>'; return; }
+  box.innerHTML = '';
+  buddyLocations.forEach(l => {
+    const div = document.createElement('div');
+    div.className = 'buddy-loc';
+    div.title = '点击派出宠物到此地';
+    const hTxt = l.hourMax && l.hourMax !== l.hour ? `${l.hour}-${l.hourMax}h` : (l.hour + 'h');
+    const rTxt = l.rewardMax && l.rewardMax !== l.reward ? `${l.reward}-${l.rewardMax} 积分` : `+${l.reward} 积分`;
+    div.innerHTML = `
+      <div class="ln">📍 ${escapeHtml(l.name)}</div>
+      <div class="lm">${escapeHtml(l.desc || `旅行 ${hTxt} 后返回`)}</div>
+      <div class="lr">${rTxt} <small>· ${hTxt}</small></div>`;
+    div.onclick = () => buddyDepart(l.id, l.name);
+    box.appendChild(div);
+  });
+}
+
+async function buddyDepart(locationId, name) {
+  const btn = $('btn-buddy-depart');
+  const id = locationId || (buddyLocations.length ? buddyLocations[0].id : '');
+  if (!id) { toast('无可派地点'); return; }
+  const org = btn.textContent; btn.disabled = true; btn.textContent = '派出中…';
+  try {
+    const r = await invoke('buddy_depart', { locationId: id });
+    const b = typeof r.body === 'string' ? JSON.parse(r.body) : r.body;
+    if (r.error) { buddyLogAdd('派出失败: ' + r.error, 'err'); toast('派出失败: ' + r.error); }
+    else if (r.status === 200) {
+      buddyLogAdd(`已派出到「${name || id}」`, 'ok');
+      toast(`宠物已出发前往「${name || id}」！`);
+      loadBuddy();
+    } else {
+      const em = (b && (b.message || b.msg)) || ('HTTP ' + r.status);
+      buddyLogAdd('派出失败(' + r.status + '): ' + em, 'err');
+      toast('派出失败: ' + em);
+    }
+  } catch (e) { buddyLogAdd('派出出错: ' + e, 'err'); toast('派出出错: ' + e); }
+  btn.disabled = false; btn.textContent = org;
+}
+
+async function buddyClaim() {
+  const btn = $('btn-buddy-claim');
+  btn.disabled = true;
+  try {
+    const r = await invoke('buddy_claim');
+    const b = typeof r.body === 'string' ? JSON.parse(r.body) : r.body;
+    if (r.error) { buddyLogAdd('领取失败: ' + r.error, 'err'); toast('领取失败: ' + r.error); }
+    else if (r.status === 200) {
+      const got = b && (b.credit || b.reward || b.amount);
+      buddyLogAdd(`已领取奖励${got !== undefined ? '：+' + got + ' 积分' : ''}`, 'ok');
+      toast('宠物奖励已领取 🎉');
+      loadBuddy();
+    }     else if (r.status === 400) {
+      const em = (b && (b.msg || b.message)) || '暂无待领取的奖励';
+      buddyLogAdd('领取未成功: ' + em, 'info');
+      toast(em);
+    } else {
+      const em = (b && (b.message || b.msg)) || ('HTTP ' + r.status);
+      buddyLogAdd('领取失败(' + r.status + '): ' + em, 'err');
+      toast('领取失败: ' + em);
+    }
+  } catch (e) { buddyLogAdd('领取出错: ' + e, 'err'); toast('领取出错: ' + e); }
+  btn.disabled = true; btn.textContent = '🎁 领取奖励';
+}
+
+// 自动轮询：旅行中每 20s 同步状态，到达后自动领取
+function startBuddyPoll() {
+  if (buddyTimer) clearInterval(buddyTimer);
+  buddyTimer = setInterval(async () => {
+    try {
+      const r = await invoke('buddy_status');
+      if (r && r.error) return;
+      if (r && r.status === 200) {
+        const b = typeof r.body === 'string' ? JSON.parse(r.body) : r.body;
+        const d = buddyData(b);
+        if (d && d.state === 'arrived') {
+          buddyLogAdd('检测到宠物已到达，自动领取奖励…', 'ok');
+          await buddyClaim();
+        } else if (d && d.arrive_at) {
+          const at = d.arrive_at < 1e12 ? d.arrive_at * 1000 : d.arrive_at;
+          if (at <= Date.now() && d.state === 'traveling') {
+            buddyLogAdd('旅程时间到，刷新状态…', 'info');
+            loadBuddy();
+          }
+        }
+      }
+    } catch (e) { /* 静默，避免频繁打扰 */ }
+  }, 20000);
+}
+
 // ===== 数据加载 =====
 async function loadAll() {
   $('raw-out').textContent = '请求中…';
   // 登录态默认自动保存（防数据丢失）
   ensureSnapshot();
   try {
+    // get_all 现在只返回本地信息（昵称/UID/账号列表/环境/JWT），瞬时返回，
+    // 不再被网络请求卡住 —— 这是「进软件加载不出昵称」的根因修复点。
     const j = await invoke('get_all');
     $('raw-out').textContent = JSON.stringify(j, null, 2);
     window.__login = j.login || {};
-    window.__checkin = j.checkin || {};
     renderSidebar(j);
     renderAccount(j.login);
     renderJwt(j.jwt);
     renderEnv(j.env);
-    if (j.quota && j.quota.status === 200) renderQuota(typeof j.quota.body === 'string' ? JSON.parse(j.quota.body) : j.quota.body);
-    if (j.checkin && j.checkin.status === 200) renderCheckin(typeof j.checkin.body === 'string' ? JSON.parse(j.checkin.body) : j.checkin.body);
-    if (j.memory && j.memory.status === 200) renderMemory(typeof j.memory.body === 'string' ? JSON.parse(j.memory.body) : j.memory.body);
-    $('updated').textContent = ' · 更新 ' + new Date().toLocaleTimeString();
+    $('updated').textContent = ' · 本地已加载 ' + new Date().toLocaleTimeString();
     refreshAccounts();
     loadModels();
+    // 网络部分（额度/签到/记忆）独立分批加载，互不阻塞，失败不影响本地信息
+    loadNetworkParts();
   } catch (e) { $('raw-out').textContent = '错误：' + e; }
+}
+
+// 额度/签到/记忆分开独立拉取（后端各自带 15s 超时），
+// 任一部分慢/失败都不会卡住其余，更不会卡住本地昵称。
+function loadNetworkParts() {
+  invoke('get_quota').then(j => {
+    if (j && j.status === 200) renderQuota(typeof j.body === 'string' ? JSON.parse(j.body) : j.body);
+    else if (j && j.error) toast('额度加载失败: ' + j.error);
+  }).catch(e => console.warn('quota err', e));
+
+  invoke('get_checkin').then(j => {
+    if (j && j.status === 200) { window.__checkin = j.body || {}; renderCheckin(typeof j.body === 'string' ? JSON.parse(j.body) : j.body); }
+    else if (j && j.error) toast('签到状态加载失败: ' + j.error);
+  }).catch(e => console.warn('checkin err', e));
+
+  invoke('get_memory').then(j => {
+    if (j && j.status === 200) renderMemory(typeof j.body === 'string' ? JSON.parse(j.body) : j.body);
+    else if (j && j.error) toast('记忆画像加载失败: ' + j.error);
+  }).catch(e => console.warn('memory err', e));
 }
 async function loadQuota() {
   $('raw-out').textContent = '请求中…';
@@ -793,5 +1040,10 @@ window.renderBackups = renderBackups;
 window.openBackupDetail = openBackupDetail;
 window.closeBackups = closeBackups;
 window.closeBackupDetail = closeBackupDetail;
+window.loadBuddy = loadBuddy;
+window.buddyDepart = buddyDepart;
+window.buddyClaim = buddyClaim;
 
 loadAll();
+setTimeout(loadBuddy, 800);   // 主面板加载后拉取宠物状态
+setTimeout(startBuddyPoll, 3000); // 自动轮询 + 到达自动领奖
