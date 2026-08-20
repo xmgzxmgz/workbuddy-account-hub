@@ -1,6 +1,6 @@
 [package]
 name = "workbuddy-account-hub"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "WorkBuddy 账户中枢：多账号切换 + 跨设备同步 + 积分/签到"
 authors = ["you"]

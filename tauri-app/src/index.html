@@ -154,11 +154,38 @@
     .banner button{margin-left:auto;}
     .toast{position:fixed;left:50%;bottom:24px;transform:translateX(-50%);background:#222a36;border:1px solid var(--line);padding:10px 16px;border-radius:10px;font-size:13px;opacity:0;transition:opacity .2s;pointer-events:none;z-index:60;}
     .toast.show{opacity:1;}
+    /* 历史备份 */
+    .bk-row{display:flex;align-items:center;gap:10px;padding:9px 10px;border:1px solid var(--line);border-radius:9px;margin-bottom:7px;background:#131820;}
+    .bk-dot{width:8px;height:8px;border-radius:50%;background:var(--blue);flex-shrink:0;}
+    .bk-info{flex:1;min-width:0;}
+    .bk-t{font-size:12.5px;font-weight:600;display:flex;align-items:center;gap:6px;}
+    .bk-s{font-size:10.5px;color:var(--muted);margin-top:2px;}
+    .bk-latest{background:rgba(39,192,138,.18);color:var(--green);}
+    #bk-list{overflow:auto;flex:1;min-height:200px;padding:12px 16px;}
+    #bk-detail-tree{flex:1;min-height:200px;margin:12px 16px;background:#0b0e13;border:1px solid var(--line);border-radius:8px;color:#c9d2e3;font-size:11px;padding:12px;overflow:auto;white-space:pre;font-family:ui-monospace,Menlo,monospace;line-height:1.6;}
+    #bk-detail-kv{display:grid;grid-template-columns:1fr 1fr;gap:4px 18px;padding:12px 16px 0;}
+    #bk-detail-kv .item{display:flex;justify-content:space-between;border-bottom:1px dashed var(--line);padding:4px 0;font-size:12px;}
+    #bk-detail-kv .item .k{color:var(--muted);} #bk-detail-kv .item .v{font-weight:600;text-align:right;max-width:60%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
   </style>
 </head>
 <body>
   <!-- 切换提示 banner -->
   <div class="banner" id="banner"><span id="banner-msg"></span><button id="btn-restart">重启 WorkBuddy</button></div>
+
+  <!-- 切换风险确认弹窗（软件内提示，非浏览器 confirm） -->
+  <div class="modal" id="sw-risk-modal">
+    <div class="modal-box" style="width:min(460px,92vw);">
+      <div class="modal-head"><span>切换账号确认</span><button onclick="confirmSwitchNo()">×</button></div>
+      <div class="modal-body" style="padding:16px;">
+        <div style="font-size:13px;margin-bottom:8px;">即将切换到 <b id="sw-risk-uid"></b></div>
+        <div id="sw-risk-status" style="font-size:12px;color:var(--muted);line-height:1.6;"></div>
+      </div>
+      <div class="modal-foot">
+        <button class="mini secondary" onclick="confirmSwitchNo()">取消</button>
+        <button class="mini" style="background:var(--green);" onclick="confirmSwitchYes()">确认切换</button>
+      </div>
+    </div>
+  </div>
 
   <!-- 侧边栏 -->
   <aside class="sidebar">
@@ -172,6 +199,10 @@
 
     <h3>已登记账号</h3>
     <div id="acc-list"><div class="empty">加载中…</div></div>
+    <div style="margin:4px 6px 10px;display:flex;gap:8px;">
+      <button class="mini" style="flex:1;justify-content:center;" onclick="backupAll()">💾 备份所有账号</button>
+      <button class="mini secondary" style="justify-content:center;" onclick="openBackups()" title="查看历史备份">历史</button>
+    </div>
 
     <h3>本地数据目录</h3>
     <div id="dir-list"><div class="empty">加载中…</div></div>
@@ -189,6 +220,7 @@
       <button class="secondary" onclick="loadQuota()">仅查积分</button>
       <button class="secondary" onclick="doCheckin()">一键签到</button>
       <button class="secondary" onclick="openReport()">导出报告</button>
+      <button class="secondary" onclick="openBackups()" title="查看每个账号的历史自动/手动备份">🕘 历史备份</button>
       <button class="secondary eye-global off" id="eye-global" title="显示所有隐私数据中段（Key/UID/Token 等）" onclick="toggleAllKeys()">👁 隐私</button>
     </div>
 
@@ -348,6 +380,28 @@
 
   <div class="toast" id="toast"></div>
 
+  <!-- 历史备份列表 -->
+  <div class="modal" id="bk-modal">
+    <div class="modal-box">
+      <div class="modal-head">
+        <span>历史备份 <span style="font-size:11px;color:var(--muted);font-weight:400;">切换账号时自动为当前账号生成，可追溯</span></span>
+        <button onclick="closeBackups()">×</button>
+      </div>
+      <div id="bk-list"><div class="empty" style="padding:12px 16px;">加载中…</div></div>
+    </div>
+  </div>
+
+  <!-- 备份详情 -->
+  <div class="modal" id="bk-detail-modal">
+    <div class="modal-box">
+      <div class="modal-head"><span id="bk-detail-head">备份详情</span><button onclick="closeBackupDetail()">×</button></div>
+      <div id="bk-detail-kv"></div>
+      <div id="bk-detail-tree"></div>
+    </div>
+  </div>
+
   <script src="main.js"></script>
 </body>
 </html>
+
+<!--ACCHUB_MARKER_Q42-->

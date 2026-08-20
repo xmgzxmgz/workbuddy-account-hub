@@ -1,6 +1,9 @@
 // WorkBuddy 账户中枢 — Tauri 前端（调用 Rust Command 替代 fetch）
 // 仪表盘视觉沿用 web 版本；网络/账号操作全部走 invoke。
-const invoke = (cmd, args = {}) => window.__TAURI__.core.invoke(cmd, args);
+// 双环境分派：Tauri 桌面 → window.__TAURI__.core.invoke；纯 Web（GitHub Pages 演示版）→ 内置 mock。
+const IS_WEB = typeof window !== 'undefined' && !(window.__TAURI__ && window.__TAURI__.core);
+const invoke = (cmd, args = {}) =>
+  IS_WEB ? webMockInvoke(cmd, args) : window.__TAURI__.core.invoke(cmd, args);
 
 function $(id) { return document.getElementById(id); }
 function toast(msg) {
@@ -75,12 +78,11 @@ function renderSidebar(j) {
       ? '<span class="cur">当前</span>'
       : (snapped
         ? `<button class="mini" onclick="event.stopPropagation();switchTo('${a.uid}')">切换</button>`
-        : '<span class="mini" style="background:var(--line);color:var(--muted);padding:3px 9px;border-radius:6px;font-size:10.5px;">未快照</span>');
-    const snapBtn = isCur ? '<button class="mini" onclick="event.stopPropagation();snapshotCurrent()">快照当前</button>' : '';
+        : '<span class="mini" style="background:var(--line);color:var(--muted);padding:3px 9px;border-radius:6px;font-size:10.5px;" title="该账号尚未在 WorkBuddy 中登录保存过登录态，无法直接切换">未登录</span>');
     div.innerHTML = `
       <div class="dot">${initial}</div>
       <div class="info"><div class="n">${a.nickname ? privacy(a.nickname, { head: 3, tail: 4 }) : '(无昵称)'}</div><div class="s">${privacy(a.uid, { head: 4, tail: 4 })}</div></div>
-      ${badge}${snapBtn}`;
+      ${badge}`;
     div.onclick = () => selectAccount(a, regs);
     al.appendChild(div);
   });
@@ -239,8 +241,17 @@ function renderQuota(body) {
       `<div class="bar"><i style="width:${pct}%"></i></div><span class="meta" style="color:var(--muted);font-size:10px;">${pct}%</span>`
     ]));
   }
-  const soon = gift.filter(p => { const dl = daysLeft(p.deduction_end); return dl !== null && dl <= 30; }).sort((x, y) => daysLeft(x.deduction_end) - daysLeft(y.deduction_end));
-  $('expire-note').innerHTML = soon.length ? '⏰ 30 天内到期：' + soon.map(p => `${p.name}（${daysLeft(p.deduction_end)}天，${fmt(p.deduction_end)}）`).join('；') : '近期无套餐到期。';
+  // 30 天内到期：只看「还有剩余额度（remain>0）」的包，避免把已 100% 用完的每日赠送包全罗列；并按 resource_id 去重
+  const seenRid = new Set();
+  const soon = gift.filter(p => {
+    const dl = daysLeft(p.deduction_end);
+    if (dl === null || dl > 30) return false;
+    if (!(p.remain > 0.004)) return false;          // 剩余≤0 的已用尽
+    if (seenRid.has(p.resource_id)) return false;  // 同资源去重
+    seenRid.add(p.resource_id);
+    return true;
+  }).sort((x, y) => daysLeft(x.deduction_end) - daysLeft(y.deduction_end));
+  $('expire-note').innerHTML = soon.length ? '⏰ 30 天内到期（剩余额度>0）：' + soon.map(p => `${p.name}（${daysLeft(p.deduction_end)}天，${fmt(p.deduction_end)}，余 ${p.remain.toFixed(2)}）`).join('；') : '近期无待用套餐到期。';
   window.__quota = q;
 }
 function row(cells) { const tr = document.createElement('tr'); tr.innerHTML = cells.map((c, i) => `<td class="${i >= 2 && i <= 4 ? 'num' : ''}">${c}</td>`).join(''); return tr; }
@@ -351,25 +362,58 @@ function copyReport() {
 if ($('report-modal')) $('report-modal').addEventListener('click', e => { if (e.target.id === 'report-modal') closeReport(); });
 
 // ===== 账号操作 =====
-async function snapshotCurrent(uid) {
+// 备份所有已登记账号：当前账号全新备份（含最新登录态），其余账号归档其保存的快照。
+// 登录态默认自动保存（App 启动时已调用 ensure_snapshot），无需手动「记住」。
+async function backupAll() {
   try {
-    const r = await invoke('snapshot_current');
-    toast('已快照当前账号: ' + r.uid + '（' + (r.local_files ?? 0) + ' 文件' + (r.auth_included ? ' + 登录态' : '') + '）');
-    refreshAccounts();
-  } catch (e) { toast('快照失败: ' + e); }
+    toast('正在备份所有账号…');
+    const rows = await invoke('backup_all');
+    if (!rows || !rows.length) { toast('未发现可备份的账号'); return; }
+    const okN = rows.filter(r => r.ok).length;
+    const fails = rows.filter(r => !r.ok);
+    toast('已备份 ' + okN + '/' + rows.length + ' 个账号' + (fails.length ? '，' + fails.length + ' 个未保存过登录态' : ''));
+  } catch (e) { toast('备份失败: ' + e); }
+}
+
+// 启动时自动保存当前账号登录态（默认自动保存，无需手动操作）
+async function ensureSnapshot() {
+  try { await invoke('ensure_snapshot'); } catch (e) { /* 无登录态时忽略 */ }
 }
 async function switchTo(uid) {
-  if (!confirm('确认切换到 ' + shortUid(uid) + '？\n切换会先退出 WorkBuddy，完成后需重启生效（参考 CC Switch）。')) return;
+  // 一键切换：切换前自动备份当前账号 → 写入目标登录态 → 自动重启 WorkBuddy 生效。
+  // 若 WorkBuddy 当前正在运行且有任务在跑，先弹软件内确认框提示「正在关闭，任务会被中断」。
   try {
+    let wbRunning = false;
+    try { const s = await invoke('list_accounts'); wbRunning = !!(s && s.workbuddy_running); } catch (e) {}
+
+    if (wbRunning) {
+      // 软件内确认框（非系统 confirm）：提示关闭 WorkBuddy 会中断可能在跑的任务
+      const ok = await confirmSwitchRisk(uid);
+      if (!ok) { toast('已取消切换'); return; }
+    }
+
+    toast('正在切换 ' + shortUid(uid) + ' …');
     const r = await invoke('switch_account', { uid });
-    if (r && r.restart_required) {
-      $('banner-msg').textContent = r.message;
-      $('banner').classList.add('show');
-      toast('已切换，请重启 WorkBuddy');
+    if (r) {
+      toast('已切换到 ' + shortUid(r.uid) + '，WorkBuddy 已自动重启生效');
       refreshAccounts();
+      setTimeout(() => loadAll(), 1800);
     }
   } catch (e) { toast('切换失败: ' + e); }
 }
+
+// 软件内确认弹窗（自定义样式，提示关闭 WorkBuddy 的中断风险）
+let switchResolve = null;
+function confirmSwitchRisk(uid) {
+  return new Promise(res => {
+    $('sw-risk-uid').textContent = shortUid(uid);
+    $('sw-risk-status').textContent = '检测到 WorkBuddy 正在运行。切换将先关闭 WorkBuddy（如有任务正在生成/下载会被中断），再自动重启切换账号。';
+    $('sw-risk-modal').classList.add('show');
+    switchResolve = res;
+  });
+}
+function confirmSwitchYes() { $('sw-risk-modal').classList.remove('show'); if (switchResolve) { switchResolve(true); switchResolve = null; } }
+function confirmSwitchNo() { $('sw-risk-modal').classList.remove('show'); if (switchResolve) { switchResolve(false); switchResolve = null; } }
 if ($('btn-restart')) $('btn-restart').addEventListener('click', async () => {
   try { await invoke('restart_workbuddy'); $('banner').classList.remove('show'); toast('已发送启动 WorkBuddy'); }
   catch (e) { toast('启动失败: ' + e); }
@@ -385,9 +429,97 @@ async function refreshAccounts() {
   });
 }
 
+// ===== 历史备份页 =====
+let backupsCache = [];           // [{uid, ts, file_count, auth_included, bytes, local_files, is_latest}]
+function escBack(ts) { return String(ts).replace(/[^0-9a-zA-Z_-]/g, '_'); }
+function fmtBytes(b) {
+  if (!b) return '0 B';
+  if (b < 1024) return b + ' B';
+  if (b < 1048576) return (b / 1024).toFixed(1) + ' KB';
+  return (b / 1048576).toFixed(2) + ' MB';
+}
+function fmtTs(ts) {
+  if (!ts) return ts || '—';
+  const n = /^[0-9]+$/.test(ts) ? Number(ts) : NaN;
+  if (!isNaN(n) && ts.length >= 10) {
+    // ts 为毫秒（13 位）或秒（10 位），统一转 Date
+    const d = new Date(ts.length >= 13 ? n : n * 1000);
+    if (!isNaN(d)) return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+  }
+  return ts;
+}
+async function openBackups() {
+  try { backupsCache = await invoke('list_backups'); }
+  catch (e) { backupsCache = []; toast('读取备份失败: ' + e); }
+  $('bk-modal').classList.add('show');
+  renderBackups();
+}
+
+async function renderBackups() {
+  const box = $('bk-list');
+  box.innerHTML = '';
+  if (!backupsCache || !backupsCache.length) {
+    box.innerHTML = '<div class="empty">暂无历史备份。\n点侧边栏当前账号的「快照当前」，或切换账号时系统会自动为当前账号生成备份。</div>';
+    return;
+  }
+  // 按 uid 分组
+  const groups = {};
+  backupsCache.forEach(b => { (groups[b.uid] = groups[b.uid] || []).push(b); });
+  Object.keys(groups).forEach(uid => {
+    const items = groups[uid].sort((a, b) => (b.ts > a.ts ? 1 : -1));
+    const sec = document.createElement('div');
+    sec.style.marginBottom = '14px';
+    sec.innerHTML = `<div style="font-size:11px;color:var(--muted);margin:6px 2px 6px;font-weight:600;">账号 ${privacy(uid, { head: 4, tail: 4, safe: false })} · ${items.length} 份</div>`;
+    const list = document.createElement('div');
+    items.forEach(b => {
+      const row = document.createElement('div');
+      row.className = 'bk-row';
+      row.innerHTML = `
+        <span class="bk-dot"></span>
+        <div class="bk-info">
+          <div class="bk-t">${fmtTs(b.ts)}${b.is_latest ? ' <span class="badge bk-latest">最新</span>' : ''}</div>
+          <div class="bk-s">${b.file_count ?? 0} 文件${b.auth_included ? ' · 含登录态' : ''} · 共 ${fmtBytes(b.bytes)}</div>
+        </div>
+        <button class="mini secondary" onclick="event.stopPropagation();openBackupDetail('${escBack(b.uid)}','${escBack(b.ts)}')">详情</button>`;
+      list.appendChild(row);
+    });
+    sec.appendChild(list);
+    box.appendChild(sec);
+  });
+}
+
+async function openBackupDetail(uid, ts) {
+  let meta;
+  try { meta = await invoke('backup_detail', { uid, ts }); }
+  catch (e) { toast('读取备份详情失败: ' + e); return; }
+  if (!meta) return;
+  const head = $('bk-detail-head');
+  head.innerHTML = `备份详情 · ${privacy(uid, { head: 4, tail: 4, safe: false })} @ ${fmtTs(ts)}${meta.is_latest ? ' <span class="badge bk-latest">最新</span>' : ''}`;
+  const kv = [
+    ['备份时间', fmtTs(meta.ts)],
+    ['UID', privacy(meta.uid, { head: 4, tail: 4, safe: false })],
+    ['文件数量', (meta.file_count ?? 0) + ' 个'],
+    ['含登录态', meta.auth_included ? '是（auth.info）' : '否'],
+    ['总大小', fmtBytes(meta.bytes)],
+  ];
+  const kvBox = $('bk-detail-kv');
+  kvBox.innerHTML = kv.map(([k, v]) => `<div class="item"><span class="k">${k}</span><span class="v">${v}</span></div>`).join('');
+  const tree = (meta.local_files || []).join('\n') || '（无文件）';
+  const treeBox = $('bk-detail-tree');
+  treeBox.innerHTML = escapeHtml(tree);
+  $('bk-detail-modal').classList.add('show');
+}
+
+function closeBackups() { $('bk-modal').classList.remove('show'); }
+function closeBackupDetail() { $('bk-detail-modal').classList.remove('show'); }
+if ($('bk-modal')) $('bk-modal').addEventListener('click', e => { if (e.target.id === 'bk-modal') closeBackups(); });
+if ($('bk-detail-modal')) $('bk-detail-modal').addEventListener('click', e => { if (e.target.id === 'bk-detail-modal') closeBackupDetail(); });
+
 // ===== 数据加载 =====
 async function loadAll() {
   $('raw-out').textContent = '请求中…';
+  // 登录态默认自动保存（防数据丢失）
+  ensureSnapshot();
   try {
     const j = await invoke('get_all');
     $('raw-out').textContent = JSON.stringify(j, null, 2);
@@ -637,6 +769,67 @@ async function restartWB() {
   catch (e) { toast('重启失败: ' + e); }
 }
 
+// ===== Web 演示模式 mock 层（无 Tauri 环境时使用，供 GitHub Pages 静态演示） =====
+async function webMockInvoke(cmd, args) {
+  if (typeof window !== 'undefined') window.__web_mode = true;
+  const uid4 = '4c6af085-6a28-4c45-8025-099590dac28a';
+  const uid5 = 'de58fc75-61f2-4429-a4af-11ffcc5fc6fa';
+  const accounts = [
+    { uid: uid4, nickname: '24\\7', has_snapshot: true },
+    { uid: uid5, nickname: '19232885101', has_snapshot: true },
+  ];
+  const webBanner = { web: true, message: 'Web 演示模式：本页为纯浏览器静态版，仅用于界面预览，真实的账号切换 / 快照 / 签到 / API 管理需在 macOS 或 Windows 桌面版中使用。' };
+
+  switch (cmd) {
+    case 'ensure_snapshot':
+      return { uid: uid4, existed: true, web: true };
+    case 'list_accounts':
+      return { workbuddy_running: false, accounts, web: true };
+    case 'backup_all':
+      return accounts.map(a => ({ uid: a.uid, ok: true, type: a.uid === uid4 ? 'current' : 'archived' }));
+    case 'list_backups':
+      return { backups: accounts.map(a => ({ uid: a.uid, entries: [{ ts: String(Date.now()), auth_included: true, file_count: 12 }] })), web: true };
+    case 'backup_detail':
+      return { uid: args && args.uid, ts: args && args.ts, auth_included: true, file_count: 12, files: ['auth.info', 'local_storage/entry_demo.info'], web: true };
+    case 'get_all':
+      return {
+        login: { uid: uid4, nickname: '24\\7', type: 'personal' },
+        registered_accounts: accounts,
+        current_uid: uid4,
+        quota: { status: 200, body: { usage: { type: '个人专业版', used: 420, total: 1024, remain: 604, level: 'plus' }, packs: [
+          { name: 'CodeBuddy 个人版应用包', used: 80, total: 100, remain: 20, expire: Date.now() + 60*86400000 },
+        ] } },
+        checkin: webBanner,
+        memory: null,
+        env: { platform: 'web-demo', version: '0.2.0' },
+        jwt: null,
+        web: true,
+      };
+    case 'get_quota':
+      return { status: 200, body: { usage: { type: '个人专业版', used: 420, total: 1024, remain: 604, level: 'plus' } }, web: true };
+    case 'do_checkin':
+      return { skipped: true, web: true };
+    case 'list_custom_models':
+      return { ok: true, models: [{ id: 'web-demo', name: 'deepseek-v4-flash', base: 'https://api.deepseek.com' }], web: true };
+    case 'official_models':
+      return [{ id: 'deepseek-v4-flash', name: 'DeepSeek V4 Flash' }, { id: 'deepseek-v4-pro', name: 'DeepSeek V4 Pro' }];
+    case 'current_model':
+      return { id: 'web-demo', name: 'deepseek-v4-flash', selected: true };
+    case 'test_custom_model':
+      return { ok: true, path: 'ok', model: args && args.model, latency_ms: 120 };
+    case 'add_custom_model':
+    case 'update_custom_model':
+    case 'delete_custom_model':
+      return { ok: true };
+    case 'switch_account':
+      return { uid: args && args.uid, restart_required: false, web: true };
+    case 'restart_workbuddy':
+      return { web: true };
+    default:
+      return { ok: true, web: true };
+  }
+}
+
 // 暴露给 inline onclick
 window.addModel = addModel;
 window.editModel = editModel;
@@ -654,7 +847,20 @@ window.doCheckin = doCheckin;
 window.openReport = openReport;
 window.closeReport = closeReport;
 window.copyReport = copyReport;
-window.snapshotCurrent = snapshotCurrent;
+window.snapshotCurrent = snapshotCurrent;   // 兼容旧内联引用
+window.backupAll = backupAll;
+window.confirmSwitchYes = confirmSwitchYes;
+window.confirmSwitchNo = confirmSwitchNo;
 window.switchTo = switchTo;
+window.openBackups = openBackups;
+window.renderBackups = renderBackups;
+window.openBackupDetail = openBackupDetail;
+window.closeBackups = closeBackups;
+window.closeBackupDetail = closeBackupDetail;
 
-loadAll();
+if (IS_WEB) {
+  // Web 演示模式：跳过 Tauri 注入，直接加载；Toast 顶部提示
+  window.addEventListener('DOMContentLoaded', () => { try { loadAll(); } catch (e) {} });
+} else {
+  loadAll();
+}

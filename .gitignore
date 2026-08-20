@@ -1,17 +1,14 @@
 # Rust / Tauri
 tauri-app/src-tauri/target/
 tauri-app/src-tauri/gen/
-tauri-app/src-tauri/Cargo.lock
 
 # Node
 tauri-app/node_modules/
 tauri-app/dist/
 
-# Legacy Electron scaffold (replaced by Tauri; not part of current build)
+# Tauri CLI dev helpers (legacy Electron scaffold leftovers; not needed for build)
 tauri-app/credits-api.js
 tauri-app/dev-server.mjs
-tauri-app/package.json
-tauri-app/package-lock.json
 
 # Build artifacts
 *.dmg
