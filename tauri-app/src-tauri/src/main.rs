@@ -15,7 +15,15 @@ use wb_api as api;
 
 #[tauri::command]
 fn get_all() -> Value {
-    api::get_all()
+    let mut v = api::get_all();
+    // 侧边栏账号列表改为「登记表 + 当前账号」的完整枚举（不随当前登录态 allAccounts 收缩，
+    // 避免切换后只剩目标账号、原账号消失在列表里无法切回）。
+    let accs = ops::list_accounts(&ops::vault_dir());
+    if let Some(arr) = v.get_mut("registered_accounts").and_then(|x| x.as_array_mut()) {
+        *arr = serde_json::to_value(accs).unwrap_or(Value::Array(vec![]))
+            .as_array().cloned().unwrap_or_default();
+    }
+    v
 }
 
 #[tauri::command]
@@ -98,6 +106,18 @@ fn snapshot_current() -> Result<Value, String> {
 }
 
 #[tauri::command]
+fn ensure_snapshot() -> Result<Value, String> {
+    let m = ops::ensure_snapshot(&ops::vault_dir())?;
+    Ok(serde_json::to_value(m).unwrap_or(Value::Null))
+}
+
+#[tauri::command]
+fn backup_all() -> Result<Value, String> {
+    let rows = ops::backup_all(&ops::vault_dir())?;
+    Ok(serde_json::to_value(rows).unwrap_or(Value::Null))
+}
+
+#[tauri::command]
 fn switch_account(uid: String) -> Result<Value, String> {
     let r = ops::switch_account(&ops::vault_dir(), &uid)?;
     Ok(serde_json::to_value(r).unwrap_or(Value::Null))
@@ -113,6 +133,21 @@ fn app_running() -> bool {
     ops::is_workbuddy_running()
 }
 
+// 历史备份：list_backups() 返回全部账号的历史备份；list_backups(uid) 只返回某账号。
+#[tauri::command]
+fn list_backups(uid: Option<String>) -> Value {
+    let uid = uid.as_deref();
+    let rows = ops::list_backups(&ops::vault_dir(), uid);
+    serde_json::to_value(rows).unwrap_or(Value::Null)
+}
+
+// 单份备份详情（含完整文件树）
+#[tauri::command]
+fn backup_detail(uid: String, ts: String) -> Result<Value, String> {
+    let m = ops::backup_detail(&ops::vault_dir(), &uid, &ts)?;
+    Ok(serde_json::to_value(m).unwrap_or(Value::Null))
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -123,9 +158,13 @@ pub fn run() {
             do_checkin,
             list_accounts,
             snapshot_current,
+            ensure_snapshot,
+            backup_all,
             switch_account,
             restart_workbuddy,
             app_running,
+            list_backups,
+            backup_detail,
             list_custom_models,
             add_custom_model,
             update_custom_model,
