@@ -83,29 +83,81 @@ pub fn current_uid() -> Option<String> {
         .map(|s| s.to_string())
 }
 
-/// 在 local_storage 中定位账号登记表（JSON 数组 [{userId, data}, ...]）
-fn find_registry() -> Option<Vec<(String, Option<String>)>> {
+/// 在 local_storage 中收集账号登记表中的全部账号（JSON 数组 [{userId, data}, ...]）。
+///
+/// 关键修复：不再「返回第一个能解析的登记表」，而是遍历所有 `.info` 登记表，
+/// 把里面出现的所有 `userId` 合并成并集（去重）。原因：WorkBuddy 官方客户端
+/// 会在账号切换/刷新时把某个 entry_xxx.info 压缩成「仅当前账号」，
+/// 若只取第一个命中就会丢账号 —— 合并所有登记表 + 下面 list_accounts 的
+/// vault 枚举兜底，才能保证侧边栏永远显示全部已保存账号、可切换。
+fn find_registry() -> Vec<(String, Option<String>)> {
     let ls = local_storage_dir();
-    let rd = std::fs::read_dir(&ls).ok()?;
-    for e in rd.flatten() {
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    let rd = std::fs::read_dir(&ls).ok();
+    for e in rd.into_iter().flat_map(|r| r.flatten()) {
         let p = e.path();
         if p.extension().and_then(|s| s.to_str()) != Some("info") { continue; }
-        if let Ok(s) = std::fs::read_to_string(&p) {
-            if let Ok(arr) = serde_json::from_str::<Vec<serde_json::Value>>(&s) {
-                let mut out = Vec::new();
-                for item in arr {
-                    if let Some(uid) = item.get("userId").and_then(|x| x.as_str()) {
-                        let nick = item
-                            .get("data")
-                            .and_then(|d| d.get("nickname"))
-                            .and_then(|x| x.as_str())
-                            .map(|s| s.to_string());
-                        out.push((uid.to_string(), nick));
-                    }
-                }
-                if !out.is_empty() { return Some(out); }
+        let Ok(s) = std::fs::read_to_string(&p) else { continue; };
+        let Ok(arr) = serde_json::from_str::<Vec<serde_json::Value>>(&s) else { continue; };
+        for item in arr {
+            let Some(uid) = item.get("userId").and_then(|x| x.as_str()) else { continue; };
+            let uid = uid.to_string();
+            if seen.insert(uid.clone()) {
+                let nick = item
+                    .get("data")
+                    .and_then(|d| d.get("nickname"))
+                    .and_then(|x| x.as_str())
+                    .map(|s| s.to_string());
+                out.push((uid, nick));
             }
         }
+    }
+    out
+}
+
+/// 从保险库(vault)目录枚举所有已保存账号的 uid（只要有 snapshot/history 目录就算）。
+/// 兜底来源：即使官方登记表被压缩丢失账号，只要之前快照过，这里就能找回并可切换。
+fn vault_account_uids(vault: &Path) -> Vec<String> {
+    let mut uids = Vec::new();
+    let Ok(rd) = std::fs::read_dir(vault) else { return uids; };
+    for e in rd.flatten() {
+        let p = e.path();
+        if !p.is_dir() { continue; }
+        // 仅保留像 uid 的目录（含 '-'）+ 内部有 snapshot 或 history 的有效账号
+        if let Some(name) = p.file_name().and_then(|s| s.to_str()) {
+            if name.contains('-') && (p.join("snapshot").exists() || p.join("history").exists()) {
+                uids.push(name.to_string());
+            }
+        }
+    }
+    uids
+}
+
+/// 读取某个账号快照中的昵称（vault/<uid>/snapshot/local_storage 登记表或 auth.info 兜底）
+fn nickname_from_vault(vault: &Path, uid: &str) -> Option<String> {
+    // 1) 从该账号快照的 local_storage 登记表找昵称
+    let snap_ls = vault.join(uid).join("snapshot").join("local_storage");
+    if let Ok(rd) = std::fs::read_dir(&snap_ls) {
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.extension().and_then(|s| s.to_str()) != Some("info") { continue; }
+            let Ok(s) = std::fs::read_to_string(&p) else { continue; };
+            let Ok(arr) = serde_json::from_str::<Vec<serde_json::Value>>(&s) else { continue; };
+            for item in arr {
+                if item.get("userId").and_then(|x| x.as_str()) == Some(uid) {
+                    let nick = item.get("data").and_then(|d| d.get("nickname")).and_then(|x| x.as_str()).map(|s| s.to_string());
+                    if nick.is_some() { return nick; }
+                }
+            }
+        }
+    }
+    // 2) 兜底：auth.info 里的 nickname / uid
+    let auth_p = vault.join(uid).join("snapshot").join("auth.info");
+    let Ok(s) = std::fs::read_to_string(&auth_p) else { return None; };
+    let Ok(v) = serde_json::from_str::<Value>(&s) else { return None; };
+    if let Some(nick) = v.get("account").and_then(|a| a.get("nickname")).and_then(|x| x.as_str()) {
+        return Some(nick.to_string());
     }
     None
 }
@@ -115,28 +167,47 @@ fn snapshot_exists(vault: &Path, uid: &str) -> bool {
 }
 
 /// 枚举本机账号 + 当前账号 + 是否已快照
+///
+/// 账号来源合并三处，保证不丢：
+///   1. local_storage 所有登记表并集（find_registry）
+///   2. vault 目录下所有已有 snapshot/history 的账号（兜底，防登记表被官方压缩丢账号）
+///   3. 当前登录账号（永远展示）
+/// 昵称优先级：登记表 > vault 快照兜底。
 pub fn list_accounts(vault: &Path) -> Vec<AccountInfo> {
     let cur = current_uid();
     let mut seen = std::collections::HashSet::new();
     let mut out = Vec::new();
-    if let Some(reg) = find_registry() {
-        for (uid, nick) in reg {
-            if seen.insert(uid.clone()) {
-                out.push(AccountInfo {
-                    uid: uid.clone(),
-                    nickname: nick,
-                    current: cur.as_deref() == Some(uid.as_str()),
-                    has_snapshot: snapshot_exists(vault, &uid),
-                });
-            }
+
+    // 1) 合并所有登记表
+    for (uid, nick) in find_registry() {
+        if seen.insert(uid.clone()) {
+            out.push(AccountInfo {
+                uid: uid.clone(),
+                nickname: nick.or_else(|| nickname_from_vault(vault, &uid)),
+                current: cur.as_deref() == Some(uid.as_str()),
+                has_snapshot: snapshot_exists(vault, &uid),
+            });
         }
     }
-    // 确保当前账号始终出现（即使不在登记表中）
+
+    // 2) vault 兜底：登记表里没有的已快照账号也补进来（可切换）
+    for uid in vault_account_uids(vault) {
+        if seen.insert(uid.clone()) {
+            out.push(AccountInfo {
+                uid: uid.clone(),
+                nickname: nickname_from_vault(vault, &uid),
+                current: cur.as_deref() == Some(uid.as_str()),
+                has_snapshot: true,
+            });
+        }
+    }
+
+    // 3) 确保当前账号始终出现
     if let Some(c) = &cur {
         if seen.insert(c.clone()) {
             out.push(AccountInfo {
                 uid: c.clone(),
-                nickname: None,
+                nickname: nickname_from_vault(vault, c),
                 current: true,
                 has_snapshot: snapshot_exists(vault, c),
             });
