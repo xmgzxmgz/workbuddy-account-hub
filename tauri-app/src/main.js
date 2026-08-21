@@ -1,8 +1,28 @@
 // WorkBuddy 账户中枢 — Tauri 桌面前端（调用 Rust Command 替代 fetch）
 // 网络/账号操作全部走 Tauri invoke（无 Web 版）。
-const invoke = (cmd, args = {}) => window.__TAURI__.core.invoke(cmd, args);
+function rawInvoke(cmd, args = {}) {
+  if (!window.__TAURI__ || !window.__TAURI__.core || typeof window.__TAURI__.core.invoke !== 'function') {
+    return Promise.reject(new Error('Tauri API 尚未注入'));
+  }
+  return window.__TAURI__.core.invoke(cmd, args);
+}
+// 带超时保护的 invoke，避免启动时 IPC 未就绪导致无限挂起
+function invokeWithTimeout(cmd, args = {}, ms = 8000) {
+  return Promise.race([
+    rawInvoke(cmd, args),
+    new Promise((_, reject) => setTimeout(() => reject(new Error('Tauri invoke 超时: ' + cmd)), ms))
+  ]);
+}
+const invoke = rawInvoke;
 
 function $(id) { return document.getElementById(id); }
+function bootLog(msg, cls = '') {
+  const el = $('boot-log');
+  if (!el) return;
+  el.textContent = msg;
+  el.className = 'show ' + cls;
+  console.log('[boot]', msg);
+}
 function toast(msg) {
   const t = $('toast');
   if (!t) return;
@@ -775,25 +795,44 @@ function startBuddyPoll() {
 
 // ===== 数据加载 =====
 async function loadAll() {
-  $('raw-out').textContent = '请求中…';
-  // 登录态默认自动保存（防数据丢失）
-  ensureSnapshot();
   try {
+    bootLog('启动加载：开始…');
+    const ro = $('raw-out'); if (ro) ro.textContent = '请求中…';
+
+    // 登录态默认自动保存（防数据丢失）
+    try { ensureSnapshot(); bootLog('启动加载：快照已确认'); }
+    catch (e) { bootLog('启动加载：快照忽略 ' + e.message, 'err'); }
+
     // get_all 现在只返回本地信息（昵称/UID/账号列表/环境/JWT），瞬时返回，
     // 不再被网络请求卡住 —— 这是「进软件加载不出昵称」的根因修复点。
-    const j = await invoke('get_all');
-    $('raw-out').textContent = JSON.stringify(j, null, 2);
+    bootLog('启动加载：请求 get_all…');
+    const j = await invokeWithTimeout('get_all', {}, 5000);
+    bootLog('启动加载：get_all 返回 ' + (j && typeof j), 'ok');
+    if (ro) ro.textContent = JSON.stringify(j, null, 2);
+
     window.__login = j.login || {};
-    renderSidebar(j);
-    renderAccount(j.login);
-    renderJwt(j.jwt);
-    renderEnv(j.env);
+    try { renderSidebar(j); bootLog('启动加载：侧边栏已渲染'); }
+    catch (e) { bootLog('启动加载：侧边栏渲染失败 ' + e.message, 'err'); }
+
+    try { renderAccount(j.login); bootLog('启动加载：账户信息已渲染'); }
+    catch (e) { bootLog('启动加载：账户信息渲染失败 ' + e.message, 'err'); }
+
+    try { renderJwt(j.jwt); bootLog('启动加载：JWT 已渲染'); }
+    catch (e) { bootLog('启动加载：JWT 渲染失败 ' + e.message, 'err'); }
+
+    try { renderEnv(j.env); bootLog('启动加载：环境已渲染'); }
+    catch (e) { bootLog('启动加载：环境渲染失败 ' + e.message, 'err'); }
+
     $('updated').textContent = ' · 本地已加载 ' + new Date().toLocaleTimeString();
     refreshAccounts();
     loadModels();
     // 网络部分（额度/签到/记忆）独立分批加载，互不阻塞，失败不影响本地信息
     loadNetworkParts();
-  } catch (e) { $('raw-out').textContent = '错误：' + e; }
+  } catch (e) {
+    bootLog('启动加载失败：' + e, 'err');
+    const ro = $('raw-out'); if (ro) ro.textContent = '错误：' + e;
+    throw e; // 让 bootBootstrap 的重试机制接管
+  }
 }
 
 // 额度/签到/记忆分开独立拉取（后端各自带 15s 超时），
@@ -1092,27 +1131,41 @@ function refreshAll() { loadAll(); loadBuddy(); }
 // 本地信息、网络部分（额度/签到/记忆）、宠物面板不自动显示，要点「刷新全部」或再点宠物才出来。
 // 方案：分阶段自动加载 + 失败自动重试，保证用户打开即见全部数据，无需手动操作。
 function bootBootstrap() {
-  let allTries = 0, buddyTries = 0;
-  // 关键：直接检测全局 invoke 函数是否可用（Tauri 注入 window.invoke 后才可调用），
-  // 之前误检测 window.__TAURI__ 在运行时不存在，导致启动加载永远卡在「未就绪」分支。
+  // 真正判断 Tauri IPC 是否就绪：window.__TAURI__.core.invoke 必须存在
   function ready() {
-    try { return typeof invoke === 'function'; } catch { return false; }
+    try { return !!(window.__TAURI__ && window.__TAURI__.core && typeof window.__TAURI__.core.invoke === 'function'); }
+    catch { return false; }
   }
-  async function tryLoadAll() {
-    allTries++;
-    if (!ready()) { if (allTries < 30) setTimeout(tryLoadAll, 250); return; } // 等 Tauri 注入（最多 ~7.5s）
-    try { await loadAll(); } catch (e) { /* 冷启动 invoke 可能短暂失败，下方重试 */ }
-    if (allTries < 8) setTimeout(tryLoadAll, 800); // 后端冷启动兜底重试（覆盖 ~6.4s）
+  async function tryLoadAll(retries = 0) {
+    if (!ready()) {
+      bootLog('等待 Tauri IPC 注入… (' + retries + ')');
+      if (retries < 40) { setTimeout(() => tryLoadAll(retries + 1), 250); return; }
+      bootLog('Tauri IPC 未注入，停止自动加载', 'err');
+      return;
+    }
+    bootLog('Tauri IPC 已就绪，开始加载…', 'ok');
+    try {
+      await loadAll();
+      bootLog('启动加载完成', 'ok');
+    } catch (e) {
+      bootLog('启动加载失败，5秒后重试：' + e.message, 'err');
+      if (retries < 8) setTimeout(() => tryLoadAll(retries + 1), 5000);
+    }
   }
-  async function tryBuddy() {
-    buddyTries++;
-    if (!ready()) { if (buddyTries < 30) setTimeout(tryBuddy, 250); return; }
-    let ok = false;
-    try { ok = await loadBuddy(); } catch (e) { /* 同上 */ }
-    if (!ok && buddyTries < 8) setTimeout(tryBuddy, 1200);
+  async function tryBuddy(retries = 0) {
+    if (!ready()) { if (retries < 40) setTimeout(() => tryBuddy(retries + 1), 250); return; }
+    try {
+      const ok = await loadBuddy();
+      if (!ok && retries < 6) setTimeout(() => tryBuddy(retries + 1), 2000);
+      else if (ok) bootLog('宠物面板加载完成', 'ok');
+    } catch (e) {
+      if (retries < 6) setTimeout(() => tryBuddy(retries + 1), 2000);
+    }
   }
   tryLoadAll();
-  setTimeout(tryBuddy, 600);
-  setTimeout(startBuddyPoll, 3000); // 自动轮询 + 到达自动领奖
+  setTimeout(() => tryBuddy(), 800);
+  setTimeout(() => {
+    if (ready()) startBuddyPoll(); // 自动轮询 + 到达自动领奖
+  }, 3000);
 }
 bootBootstrap();
