@@ -71,14 +71,33 @@ jobs:
       - name: Install tauri CLI deps
         run: cd tauri-app && npm install
 
-      - name: Build & attach Windows installers to Release
+      - name: Build & attach Windows installer to Release
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           projectPath: "tauri-app"
-          args: "--bundles nsis,zip"
+          args: "--bundles nsis"
           tagName: ${{ github.ref_name }}
           releaseName: "WorkBuddy Account Hub v__VERSION__"
           releaseDraft: true
           prerelease: false
+
+      - name: Package Windows portable (green) zip
+        shell: pwsh
+        run: |
+          $rel = "tauri-app/src-tauri/target/release"
+          $ver = "${{ github.ref_name }}"
+          $zip = "WorkBuddy-Account-Hub_${ver}_portable-x64.zip"
+          $items = @()
+          $items += Get-Item "$rel/WorkBuddy Account Hub.exe"
+          $items += Get-ChildItem "$rel" -Filter *.dll
+          Compress-Archive -Path $items -DestinationPath $zip -Force
+          echo "created $zip"
+
+      - name: Upload portable zip to Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          files: "WorkBuddy-Account-Hub_${{ github.ref_name }}_portable-x64.zip"
+          draft: true
