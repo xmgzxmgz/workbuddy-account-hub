@@ -670,6 +670,8 @@ async function loadBuddy() {
         };
       }).filter(l => l.id !== '' && l.id !== null && l.id !== undefined);
       renderBuddyLocs();
+      const sel = $('all-loc-sel');
+      if (sel) sel.innerHTML = buddyLocations.map(l => `<option value="${l.id}">${escapeHtml(l.name)}（约${l.hour}h / +${l.reward}）</option>`).join('');
     }
     // 状态
     if (st.status === 200) {
@@ -677,6 +679,7 @@ async function loadBuddy() {
       const d = buddyData(sBody);
       renderBuddy(d);
       ok = true;
+      refreshBuddyAll();   // 当前账号宠物加载完后，顺带拉取全部账号宠物状态
     } else if (st.status && st.status !== 200) {
       buddyLogAdd('状态接口返回 ' + st.status, 'err');
     }
@@ -781,6 +784,122 @@ async function buddyClaim() {
     }
   } catch (e) { buddyLogAdd('领取出错: ' + e, 'err'); toast('领取出错: ' + e); }
   btn.disabled = true; btn.textContent = '🎁 领取奖励';
+}
+
+// ===== 多账号批量：签到 + 宠物（每个账号用各自 vault 快照登录态分别请求） =====
+
+async function doCheckinAll() {
+  toast('正在签到所有已登录账号…');
+  const r = await invoke('checkin_all').catch(e => ({ error: String(e) }));
+  if (r && r.error) { toast('批量签到失败: ' + r.error); return; }
+  renderCheckinAll(r.results || []);
+  const s = r.summary || {};
+  toast(`批量签到完成：成功 ${s.ok || 0} · 已签 ${s.skipped || 0} · 失败 ${s.fail || 0}`);
+}
+
+function renderCheckinAll(results) {
+  const tb = $('ck-all-tbody'); if (!tb) return;
+  if (!results.length) { tb.innerHTML = '<tr><td colspan="4" class="empty">无已登录账号</td></tr>'; return; }
+  tb.innerHTML = results.map(r => {
+    const nick = r.nickname ? privacy(r.nickname, { head: 3, tail: 4 }) : '';
+    const uid = r.uid;
+    const skipped = r.skipped;
+    const state = r.error ? '<span class="soon">失败</span>'
+      : (skipped ? '<span class="pill">已签到</span>'
+      : (r.ok ? '<span class="ok">成功</span>' : '<span class="soon">未成功</span>'));
+    const statusTxt = r.error ? '—' : (skipped ? '已签' : (r.ok ? '新签' : '—'));
+    const msg = r.error ? escapeHtml(r.error) : (r.message || (skipped ? '今日已签到' : '签到成功'));
+    return `<tr>
+      <td><b>${escapeHtml(nick || uid)}</b><br><span style="font-size:10px;color:var(--muted)">${privacy(uid, { head: 4, tail: 4 })}</span></td>
+      <td>${state}</td>
+      <td>${statusTxt}</td>
+      <td style="color:var(--muted)">${msg}</td>
+    </tr>`;
+  }).join('');
+}
+
+async function refreshBuddyAll() {
+  const r = await invoke('buddy_all_status').catch(e => ({ error: String(e) }));
+  if (r && r.error) { buddyLogAdd('批量宠物状态失败: ' + r.error, 'err'); return; }
+  renderBuddyAll(r.accounts || []);
+}
+
+function renderBuddyAll(accounts) {
+  const tb = $('buddy-all-tbody'); if (!tb) return;
+  if (!accounts.length) { tb.innerHTML = '<tr><td colspan="6" class="empty">无账号</td></tr>'; return; }
+  tb.innerHTML = accounts.map(a => {
+    const nick = a.nickname ? privacy(a.nickname, { head: 3, tail: 4 }) : '';
+    const uid = a.uid;
+    const noLogin = !a.has_login;
+    const stateBadge = noLogin ? '<span class="soon">无登录态</span>'
+      : (a.error ? '<span class="soon">错误</span>'
+      : ({ idle: '<span class="pill">休息中</span>', traveling: '<span class="pill gift">旅行中</span>', arrived: '<span class="pill" style="background:rgba(39,192,138,.18);color:var(--green)">已到达</span>', unknown: '<span class="pill">未知</span>' }[a.state] || escapeHtml(a.state || '?')));
+    const loc = a.location ? escapeHtml(String(a.location)) : '—';
+    const reward = (a.reward_credit !== undefined && a.reward_credit !== null) ? (typeof a.reward_credit === 'object' ? JSON.stringify(a.reward_credit) : a.reward_credit) : '—';
+    const arrive = a.arrive_at ? new Date((a.arrive_at < 1e12 ? a.arrive_at * 1000 : a.arrive_at)).toLocaleString() : '—';
+    const idle = a.state === 'idle' && a.has_login && !a.error;
+    const arrived = a.state === 'arrived' && a.has_login && !a.error;
+    const departBtn = `<button class="mini" ${idle ? '' : 'disabled'} onclick="buddyDepartFor('${uid}')">派出</button>`;
+    const claimBtn = `<button class="mini" ${arrived ? '' : 'disabled'} onclick="buddyClaimFor('${uid}')">领取</button>`;
+    return `<tr>
+      <td><b>${escapeHtml(nick || uid)}</b><br><span style="font-size:10px;color:var(--muted)">${privacy(uid, { head: 4, tail: 4 })}</span></td>
+      <td>${stateBadge}</td>
+      <td>${loc}</td>
+      <td>${escapeHtml(String(reward))}</td>
+      <td class="num" style="font-size:10px;">${arrive}</td>
+      <td style="white-space:nowrap;">${departBtn} ${claimBtn}</td>
+    </tr>`;
+  }).join('');
+}
+
+function allLocId() {
+  const sel = $('all-loc-sel');
+  if (sel && sel.value) return sel.value;
+  return buddyLocations.length ? buddyLocations[0].id : '';
+}
+
+async function buddyDepartAll() {
+  const lid = allLocId();
+  if (!lid) { toast('请先选择派出地点'); return; }
+  const btn = $('btn-buddy-depart-all'); if (btn) btn.disabled = true;
+  buddyLogAdd('开始一键派出全部账号宠物 → ' + lid, 'info');
+  const r = await invoke('buddy_all_depart', { locationId: String(lid) }).catch(e => ({ error: String(e) }));
+  if (btn) btn.disabled = false;
+  if (r && r.error) { toast('批量派出失败: ' + r.error); buddyLogAdd('批量派出失败: ' + r.error, 'err'); return; }
+  const s = r.summary || {};
+  toast(`派出完成：成功 ${s.ok || 0} · 失败 ${s.fail || 0}`);
+  buddyLogAdd(`一键派出全部：成功 ${s.ok || 0} / 失败 ${s.fail || 0}`, 'ok');
+  setTimeout(refreshBuddyAll, 1800);
+}
+
+async function buddyClaimAll() {
+  const btn = $('btn-buddy-claim-all'); if (btn) btn.disabled = true;
+  buddyLogAdd('开始一键领取全部账号奖励', 'info');
+  const r = await invoke('buddy_all_claim').catch(e => ({ error: String(e) }));
+  if (btn) btn.disabled = false;
+  if (r && r.error) { toast('批量领取失败: ' + r.error); buddyLogAdd('批量领取失败: ' + r.error, 'err'); return; }
+  const s = r.summary || {};
+  toast(`领取完成：成功 ${s.ok || 0} · 失败 ${s.fail || 0}`);
+  buddyLogAdd(`一键领取全部：成功 ${s.ok || 0} / 失败 ${s.fail || 0}`, 'ok');
+  setTimeout(refreshBuddyAll, 1800);
+}
+
+async function buddyDepartFor(uid) {
+  const lid = allLocId();
+  if (!lid) { toast('请先选择派出地点'); return; }
+  buddyLogAdd('派出账号 ' + privacy(uid, { head: 4, tail: 4 }) + ' → ' + lid, 'info');
+  const r = await invoke('buddy_depart_for', { uid: uid, locationId: String(lid) }).catch(e => ({ error: String(e) }));
+  if (r && r.error) { toast('派出失败: ' + r.error); buddyLogAdd('派出失败: ' + r.error, 'err'); return; }
+  buddyLogAdd('账号 ' + privacy(uid, { head: 4, tail: 4 }) + ' 派出: ' + (r.message || JSON.stringify(r.body || '')).slice(0, 80), r.status === 200 ? 'ok' : 'err');
+  setTimeout(refreshBuddyAll, 1200);
+}
+
+async function buddyClaimFor(uid) {
+  buddyLogAdd('领取账号 ' + privacy(uid, { head: 4, tail: 4 }) + ' 奖励', 'info');
+  const r = await invoke('buddy_claim_for', { uid: uid }).catch(e => ({ error: String(e) }));
+  if (r && r.error) { toast('领取失败: ' + r.error); buddyLogAdd('领取失败: ' + r.error, 'err'); return; }
+  buddyLogAdd('账号 ' + privacy(uid, { head: 4, tail: 4 }) + ' 领取: ' + (r.message || JSON.stringify(r.body || '')).slice(0, 80), r.status === 200 ? 'ok' : 'err');
+  setTimeout(refreshBuddyAll, 1200);
 }
 
 // 自动轮询：旅行中每 20s 同步状态，到达后自动领取
