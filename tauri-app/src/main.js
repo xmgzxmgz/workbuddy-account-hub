@@ -1093,22 +1093,23 @@ function refreshAll() { loadAll(); loadBuddy(); }
 // 方案：分阶段自动加载 + 失败自动重试，保证用户打开即见全部数据，无需手动操作。
 function bootBootstrap() {
   let allTries = 0, buddyTries = 0;
-  // Tauri 全局 API（withGlobalTauri:true 时同步注入 window.__TAURI__）可能晚于本脚本就绪，
-  // 未就绪时 invoke 必失败。先探测就绪再开始加载，未就绪则持续重试（最多 12 次/400ms）。
+  // 关键：直接检测全局 invoke 函数是否可用（Tauri 注入 window.invoke 后才可调用），
+  // 之前误检测 window.__TAURI__ 在运行时不存在，导致启动加载永远卡在「未就绪」分支。
   function ready() {
-    try { return !!(window.__TAURI__ || window.__TAURI_INTERNALS__); } catch { return false; }
+    try { return typeof invoke === 'function'; } catch { return false; }
   }
   async function tryLoadAll() {
-    if (!ready()) { if (allTries < 12) { allTries++; setTimeout(tryLoadAll, 400); } return; }
     allTries++;
-    try { await loadAll(); } catch (e) { /* 记录但不打断 */ }
-    if (allTries < 6) setTimeout(tryLoadAll, 1000); // 前 6 秒重试，覆盖后端冷启动
+    if (!ready()) { if (allTries < 30) setTimeout(tryLoadAll, 250); return; } // 等 Tauri 注入（最多 ~7.5s）
+    try { await loadAll(); } catch (e) { /* 冷启动 invoke 可能短暂失败，下方重试 */ }
+    if (allTries < 8) setTimeout(tryLoadAll, 800); // 后端冷启动兜底重试（覆盖 ~6.4s）
   }
   async function tryBuddy() {
-    if (!ready()) { if (buddyTries < 12) { buddyTries++; setTimeout(tryBuddy, 400); } return; }
     buddyTries++;
-    const ok = await loadBuddy();   // loadBuddy 返回是否成功拉起有效状态
-    if (!ok && buddyTries < 5) { setTimeout(tryBuddy, 1500); }
+    if (!ready()) { if (buddyTries < 30) setTimeout(tryBuddy, 250); return; }
+    let ok = false;
+    try { ok = await loadBuddy(); } catch (e) { /* 同上 */ }
+    if (!ok && buddyTries < 8) setTimeout(tryBuddy, 1200);
   }
   tryLoadAll();
   setTimeout(tryBuddy, 600);
