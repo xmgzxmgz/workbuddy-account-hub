@@ -320,7 +320,14 @@ pub fn buddy_config() -> Value {
 
 /// 派出宠物前往指定地点（幂等原因：每天限 1 次；traveling/arrived 时返回对应错误）
 pub fn buddy_depart(location_id: &str) -> Value {
-    let body = json!({ "location_id": location_id }).to_string();
+    // WorkBuddy 官方 depart 接口要求 location_id 为整数；前端统一传字符串 "1"，
+    // 这里智能解析为数字（解析失败则退回原字符串，保持向后兼容）。
+    let lid: serde_json::Value = location_id
+        .trim()
+        .parse::<i64>()
+        .map(serde_json::Value::from)
+        .unwrap_or_else(|_| serde_json::Value::from(location_id));
+    let body = json!({ "location_id": lid }).to_string();
     call_api(&format!("{}{}/depart", API_BASE, BUDDY_TRAVEL), "POST", &body)
         .unwrap_or_else(|e| json!({ "error": e }))
 }

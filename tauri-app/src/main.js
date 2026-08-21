@@ -1084,23 +1084,31 @@ window.loadBuddy = loadBuddy;
 window.buddyDepart = buddyDepart;
 window.buddyClaim = buddyClaim;
 
+// 一键「刷新全部」：本地信息 + 网络部分 + 宠物面板一次性全部刷新（含宠物，避免只点宠物按钮才出）
+function refreshAll() { loadAll(); loadBuddy(); }
+
 // ==== 启动时序优化 ====
 // 问题：webview 首次初始化时 invoke 可能偶发失败 / 后端刚就绪，导致
 // 本地信息、网络部分（额度/签到/记忆）、宠物面板不自动显示，要点「刷新全部」或再点宠物才出来。
 // 方案：分阶段自动加载 + 失败自动重试，保证用户打开即见全部数据，无需手动操作。
 function bootBootstrap() {
   let allTries = 0, buddyTries = 0;
-  // 阶段1：立即加载本地信息（昵称/账号/环境/JWT）+ 独立拉取网络部分
+  // Tauri 全局 API（withGlobalTauri:true 时同步注入 window.__TAURI__）可能晚于本脚本就绪，
+  // 未就绪时 invoke 必失败。先探测就绪再开始加载，未就绪则持续重试（最多 12 次/400ms）。
+  function ready() {
+    try { return !!(window.__TAURI__ || window.__TAURI_INTERNALS__); } catch { return false; }
+  }
   async function tryLoadAll() {
+    if (!ready()) { if (allTries < 12) { allTries++; setTimeout(tryLoadAll, 400); } return; }
     allTries++;
     try { await loadAll(); } catch (e) { /* 记录但不打断 */ }
-    if (allTries < 3) setTimeout(tryLoadAll, 1200); // 前 3 秒内重试，覆盖后端冷启动
+    if (allTries < 6) setTimeout(tryLoadAll, 1000); // 前 6 秒重试，覆盖后端冷启动
   }
-  // 阶段2：宠物面板 —— 比主面板稍晚，且失败/空数据自动重试直到拿到有效状态
   async function tryBuddy() {
+    if (!ready()) { if (buddyTries < 12) { buddyTries++; setTimeout(tryBuddy, 400); } return; }
     buddyTries++;
     const ok = await loadBuddy();   // loadBuddy 返回是否成功拉起有效状态
-    if (!ok && buddyTries < 3) { setTimeout(tryBuddy, 1500); }
+    if (!ok && buddyTries < 5) { setTimeout(tryBuddy, 1500); }
   }
   tryLoadAll();
   setTimeout(tryBuddy, 600);
