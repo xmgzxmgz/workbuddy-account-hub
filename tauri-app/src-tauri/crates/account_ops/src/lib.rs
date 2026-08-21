@@ -593,7 +593,7 @@ fn materialize_snapshot_for(vault: &Path, uid: &str) -> Result<(), String> {
     let snap = vault.join(uid).join("snapshot");
     std::fs::create_dir_all(&snap).map_err(|e| e.to_string())?;
     let full = json!({
-        "account": entry,
+        "account": entry.clone(),
         "accounts": [entry.clone()],
         "allAccounts": [entry],
     });
