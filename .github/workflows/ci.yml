@@ -1,0 +1,37 @@
+name: CI Guard
+
+# 守卫：每次向 main 推送 / 提 PR 时跑，尽早拦住：
+#  - 前端 JS 语法错误（避免「未定义变量废掉启动」类静默故障）
+#  - 后端 Rust 编译错误
+# 注意：node --check 只校验语法，不校验运行时 ReferenceError；
+#       真正的「启动是否自动加载」仍需在 macOS 客户端实测。
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  guard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Frontend syntax check (node --check)
+        run: node --check tauri-app/src/main.js
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Tauri Linux build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libssl-dev pkg-config
+
+      - name: Rust build guard (cargo build)
+        run: cd tauri-app/src-tauri && cargo build
