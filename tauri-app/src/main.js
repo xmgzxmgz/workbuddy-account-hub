@@ -1,5 +1,14 @@
 // WorkBuddy 账户中枢 — Tauri 桌面前端（调用 Rust Command 替代 fetch）
 // 网络/账号操作全部走 Tauri invoke（无 Web 版）。
+(function(){
+  try { const el = document.getElementById('boot-log'); if (el) { el.textContent = '脚本入口已执行…'; el.className = 'show'; } }
+  catch (e) {}
+})();
+window.onerror = function(msg, src, line, col, err) {
+  const el = document.getElementById('boot-log');
+  if (el) { el.textContent = '脚本错误 L' + line + ': ' + msg; el.className = 'show err'; }
+  console.error('window.onerror', msg, 'line', line, err);
+};
 function rawInvoke(cmd, args = {}) {
   if (!window.__TAURI__ || !window.__TAURI__.core || typeof window.__TAURI__.core.invoke !== 'function') {
     return Promise.reject(new Error('Tauri API 尚未注入'));
@@ -17,8 +26,14 @@ const invoke = rawInvoke;
 
 function $(id) { return document.getElementById(id); }
 function bootLog(msg, cls = '') {
-  const el = $('boot-log');
-  if (!el) return;
+  let el = $('boot-log');
+  if (!el) {
+    // 若 index.html 未就绪，动态创建一个可见条
+    el = document.createElement('div');
+    el.id = 'boot-log';
+    el.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:9999;padding:6px 10px;background:#1b212b;color:#e6e6e6;font-size:12px;border-bottom:1px solid #2a2f3a;';
+    document.body.appendChild(el);
+  }
   el.textContent = msg;
   el.className = 'show ' + cls;
   console.log('[boot]', msg);
@@ -1168,4 +1183,6 @@ function bootBootstrap() {
     if (ready()) startBuddyPoll(); // 自动轮询 + 到达自动领奖
   }, 3000);
 }
+bootLog('脚本末尾：准备调用 bootBootstrap');
 bootBootstrap();
+bootLog('脚本末尾：bootBootstrap 已调用');
