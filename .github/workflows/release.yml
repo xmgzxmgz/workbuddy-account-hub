@@ -89,11 +89,13 @@ jobs:
           $rel = "tauri-app/src-tauri/target/release"
           $ver = "${{ github.ref_name }}"
           $zip = "WorkBuddy-Account-Hub_${ver}_portable-x64.zip"
-          $items = @()
-          $items += Get-Item "$rel/WorkBuddy Account Hub.exe"
-          $items += Get-ChildItem "$rel" -Filter *.dll
+          # 真实二进制名由 Cargo package.name 决定（workbuddy-account-hub），不是 tauri.conf.json 的 productName
+          $exe = Get-Item "$rel/workbuddy-account-hub.exe" -ErrorAction Stop
+          $items = @($exe)
+          $dlls = Get-ChildItem "$rel" -Filter *.dll -ErrorAction SilentlyContinue
+          if ($dlls) { $items += $dlls }
           Compress-Archive -Path $items -DestinationPath $zip -Force
-          echo "created $zip"
+          echo "created $zip ($(($items).Count) file(s))"
 
       - name: Upload portable zip to Release
         uses: softprops/action-gh-release@v2
