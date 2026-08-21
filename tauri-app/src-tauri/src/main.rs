@@ -249,7 +249,7 @@ fn buddy_all_depart(location_id: String) -> Value {
             results.push(json!({"uid": a.uid, "nickname": a.nickname, "ok": false, "skipped": true, "reason": "登录态文件缺失或无效"}));
             skipped += 1; continue;
         };
-        let res = depart_one(&login, &location_id, &a.uid, &a.nickname);
+        let res = depart_one(&login, &location_id, &a.uid, a.nickname.as_deref().unwrap_or(""));
         let okf = res.get("ok").and_then(|x| x.as_bool()).unwrap_or(false);
         let skf = res.get("skipped").and_then(|x| x.as_bool()).unwrap_or(false);
         if okf { ok += 1; } else if skf { skipped += 1; } else { fail += 1; }
@@ -296,7 +296,7 @@ fn buddy_all_claim() -> Value {
             results.push(json!({"uid": a.uid, "nickname": a.nickname, "ok": false, "skipped": true, "reason": "登录态文件缺失或无效"}));
             skipped += 1; continue;
         };
-        let res = claim_one(&login, &a.uid, &a.nickname);
+        let res = claim_one(&login, &a.uid, a.nickname.as_deref().unwrap_or(""));
         let okf = res.get("ok").and_then(|x| x.as_bool()).unwrap_or(false);
         let skf = res.get("skipped").and_then(|x| x.as_bool()).unwrap_or(false);
         if okf { ok += 1; } else if skf { skipped += 1; } else { fail += 1; }
