@@ -1,8 +1,8 @@
 [package]
 name = "workbuddy-account-hub"
-version = "0.2.1"
+version = "0.3.0"
 edition = "2021"
-description = "WorkBuddy 账户中枢：多账号切换 + 跨设备同步 + 积分/签到"
+description = "WorkBuddy 账户中枢：秒切多账号且对话历史 100% 保留（本地 Tauri 2 + Rust）"
 authors = ["you"]
 
 [build-dependencies]
