@@ -1107,36 +1107,17 @@ async function restartWB() {
   catch (e) { toast('重启失败: ' + e); }
 }
 
-// 暴露给 inline onclick
-window.addModel = addModel;
-window.editModel = editModel;
-window.delModel = delModel;
-window.testModel = testModel;
-window.testCurrentForm = testCurrentForm;
-window.saveModel = saveModel;
-window.closeModelModal = closeModelModal;
-window.restartWB = restartWB;
-
-// 暴露给 inline onclick
-window.loadAll = loadAll;
-window.loadQuota = loadQuota;
-window.doCheckin = doCheckin;
-window.openReport = openReport;
-window.closeReport = closeReport;
-window.copyReport = copyReport;
-window.snapshotCurrent = snapshotCurrent;   // 兼容旧内联引用
-window.backupAll = backupAll;
-window.confirmSwitchYes = confirmSwitchYes;
-window.confirmSwitchNo = confirmSwitchNo;
-window.switchTo = switchTo;
-window.openBackups = openBackups;
-window.renderBackups = renderBackups;
-window.openBackupDetail = openBackupDetail;
-window.closeBackups = closeBackups;
-window.closeBackupDetail = closeBackupDetail;
-window.loadBuddy = loadBuddy;
-window.buddyDepart = buddyDepart;
-window.buddyClaim = buddyClaim;
+// 暴露给 inline onclick（安全：未定义的函数跳过，不影响其余，更不阻断 bootBootstrap）
+(function expose(){
+  const names = ['addModel','editModel','delModel','testModel','testCurrentForm','saveModel','closeModelModal','restartWB','loadAll','loadQuota','doCheckin','openReport','closeReport','copyReport','ensureSnapshot','backupAll','confirmSwitchYes','confirmSwitchNo','switchTo','openBackups','renderBackups','openBackupDetail','closeBackups','closeBackupDetail','loadBuddy','buddyDepart','buddyClaim'];
+  for (const n of names) {
+    try {
+      const fn = eval(n);
+      if (typeof fn === 'function') window[n] = fn;
+    } catch (e) { console.warn('[expose] skip', n, e && e.message); }
+  }
+  window.snapshotCurrent = ensureSnapshot; // 兼容旧内联引用（函数已重构为 ensureSnapshot）
+})();
 
 // 一键「刷新全部」：本地信息 + 网络部分 + 宠物面板一次性全部刷新（含宠物，避免只点宠物按钮才出）
 function refreshAll() { loadAll(); loadBuddy(); }
