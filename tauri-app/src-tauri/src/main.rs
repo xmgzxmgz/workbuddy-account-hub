@@ -158,108 +158,171 @@ fn buddy_all_status() -> Value {
     json!({ "ok": true, "accounts": accounts })
 }
 
-/// 一键派出所有「已保存登录态」账号的宠物到同一地点
+/// 判断宠物接口返回的 message 是否是「未激活宠物」类业务错误（无法派出）
+fn is_no_active_buddy(msg: &str) -> bool {
+    let m = msg.to_lowercase();
+    m.contains("no active buddy") || m.contains("未激活") || m.contains("激活宠物")
+        || (m.contains("buddy") && m.contains("active"))
+}
+
+/// 判断领取接口返回的 message 是否是「无待领取奖励」类幂等业务错误（忽略即可）
+fn is_already_claimed(msg: &str) -> bool {
+    let m = msg.to_lowercase();
+    m.contains("unclaimed") || m.contains("no unclaimed") || m.contains("未领取")
+        || m.contains("已领取") || m.contains("no active buddy") || m.contains("未激活")
+}
+
+/// 单账号宠物派出（含预检）：
+/// 仅当 state==idle 且未达每日上限且有激活宠物时才真正派出；
+/// 否则按原因归为「跳过」（非错误），避免把业务不可派出误算成失败。
+/// 返回 { uid, nickname, ok, skipped, status?, message?, reason, body? }
+fn depart_one(login: &wb_api::LoginInfo, location_id: &str, uid: &str, nickname: &str) -> Value {
+    // 预检 1：查该账号宠物当前状态
+    let st = api::buddy_status_as(login);
+    if let Some(err) = st.get("error") {
+        return json!({"uid": uid, "nickname": nickname, "ok": false, "skipped": false, "reason": err, "error": err});
+    }
+    let st_status = st.get("status").and_then(|x| x.as_u64()).unwrap_or(0);
+    if st_status != 200 {
+        return json!({"uid": uid, "nickname": nickname, "ok": false, "skipped": false, "reason": format!("状态查询 HTTP {}", st_status), "status": st_status});
+    }
+    let st_body = st.get("body");
+    let code = st_body.and_then(|b| b.get("code")).and_then(|x| x.as_i64());
+    let st_msg = st_body.and_then(|b| b.get("msg")).and_then(|x| x.as_str()).unwrap_or("").to_string();
+    let st_data = st_body.and_then(|b| b.get("data")).or(st_body);
+    // 预检 2：业务码非 0（如未激活宠物）
+    if code.map(|c| c != 0).unwrap_or(false) {
+        let reason = if is_no_active_buddy(&st_msg) {
+            "该账号未在官方激活宠物，请先在 WorkBuddy 客户端激活宠物".to_string()
+        } else {
+            format!("状态查询失败：{}", if st_msg.is_empty() { "未知业务错误".to_string() } else { st_msg.clone() })
+        };
+        return json!({"uid": uid, "nickname": nickname, "ok": false, "skipped": true, "reason": reason, "status": st_status});
+    }
+    let state = st_data.and_then(|d| d.get("state")).and_then(|x| x.as_str()).unwrap_or("").to_string();
+    let daily = st_data.and_then(|d| d.get("daily_limit_reached")).and_then(|x| x.as_bool()).unwrap_or(false);
+    if state.is_empty() {
+        return json!({"uid": uid, "nickname": nickname, "ok": false, "skipped": true, "reason": "无法获取宠物状态（可能未激活宠物）"});
+    }
+    if state == "traveling" {
+        return json!({"uid": uid, "nickname": nickname, "ok": false, "skipped": true, "reason": "宠物正在旅行中，无法派出"});
+    }
+    if state == "arrived" {
+        return json!({"uid": uid, "nickname": nickname, "ok": false, "skipped": true, "reason": "宠物已归来，请先领取奖励"});
+    }
+    if daily {
+        return json!({"uid": uid, "nickname": nickname, "ok": false, "skipped": true, "reason": "今日已派出达每日上限"});
+    }
+    // 真正派出
+    let r = api::buddy_depart_as(login, location_id);
+    if let Some(err) = r.get("error") {
+        return json!({"uid": uid, "nickname": nickname, "ok": false, "skipped": false, "reason": err, "error": err});
+    }
+    let status = r.get("status").and_then(|x| x.as_u64()).unwrap_or(0);
+    let body = r.get("body");
+    let d = body.and_then(|b| b.get("data")).or(body);
+    let msg = d.and_then(|x| x.get("message")).and_then(|x| x.as_str())
+        .or_else(|| body.and_then(|b| b.get("message")).and_then(|x| x.as_str()))
+        .unwrap_or("").to_string();
+    if status == 200 {
+        json!({"uid": uid, "nickname": nickname, "ok": true, "skipped": false, "status": status, "message": msg, "reason": "已派出", "body": body.cloned().unwrap_or(Value::Null)})
+    } else if is_no_active_buddy(&msg) {
+        json!({"uid": uid, "nickname": nickname, "ok": false, "skipped": true, "reason": "该账号未在官方激活宠物，请先激活", "status": status})
+    } else {
+        json!({"uid": uid, "nickname": nickname, "ok": false, "skipped": false, "reason": if msg.is_empty() { format!("HTTP {}", status) } else { msg.clone() }, "status": status, "message": msg, "body": body.cloned().unwrap_or(Value::Null)})
+    }
+}
+
+/// 一键派出所有「已保存登录态」账号的宠物到同一地点（预检 + 三级计数）
 #[tauri::command]
 fn buddy_all_depart(location_id: String) -> Value {
     let vault = ops::vault_dir();
     let accs = ops::list_accounts(&vault);
     let mut results = Vec::new();
-    let mut ok = 0u32; let mut fail = 0u32;
+    let mut ok = 0u32; let mut fail = 0u32; let mut skipped = 0u32;
     for a in accs {
         if !a.has_snapshot {
-            results.push(json!({"uid": a.uid, "nickname": a.nickname, "ok": false, "error": "无登录态快照"}));
-            fail += 1; continue;
+            results.push(json!({"uid": a.uid, "nickname": a.nickname, "ok": false, "skipped": true, "reason": "无登录态快照"}));
+            skipped += 1; continue;
         }
         let Some(login) = account_login(&vault, &a.uid) else {
-            results.push(json!({"uid": a.uid, "nickname": a.nickname, "ok": false, "error": "登录态文件缺失或无效"}));
-            fail += 1; continue;
+            results.push(json!({"uid": a.uid, "nickname": a.nickname, "ok": false, "skipped": true, "reason": "登录态文件缺失或无效"}));
+            skipped += 1; continue;
         };
-        let r = api::buddy_depart_as(&login, &location_id);
-        if let Some(err) = r.get("error") {
-            results.push(json!({"uid": a.uid, "nickname": a.nickname, "ok": false, "error": err}));
-            fail += 1; continue;
-        }
-        let status = r.get("status").and_then(|x| x.as_u64()).unwrap_or(0);
-        let body = r.get("body");
-        let d = body.and_then(|b| b.get("data")).or(body);
-        let msg = d.and_then(|x| x.get("message")).and_then(|x| x.as_str())
-            .or_else(|| r.get("body").and_then(|b| b.get("message")).and_then(|x| x.as_str()))
-            .unwrap_or("").to_string();
-        let success = status == 200;
-        if success { ok += 1; } else { fail += 1; }
-        results.push(json!({"uid": a.uid, "nickname": a.nickname, "ok": success, "status": status, "message": msg}));
+        let res = depart_one(&login, &location_id, &a.uid, &a.nickname);
+        let okf = res.get("ok").and_then(|x| x.as_bool()).unwrap_or(false);
+        let skf = res.get("skipped").and_then(|x| x.as_bool()).unwrap_or(false);
+        if okf { ok += 1; } else if skf { skipped += 1; } else { fail += 1; }
+        results.push(res);
     }
-    json!({ "ok": true, "results": results, "summary": { "total": results.len(), "ok": ok, "fail": fail } })
+    json!({ "ok": true, "results": results, "summary": { "total": results.len(), "ok": ok, "fail": fail, "skipped": skipped } })
 }
 
-/// 一键领取所有「已保存登录态」账号的宠物奖励
+/// 单账号宠物奖励领取（含幂等预检）：HTTP 200 算成功；
+/// 400「无待领取奖励 / 未激活宠物」等幂等情形归为「跳过」（非错误）。
+fn claim_one(login: &wb_api::LoginInfo, uid: &str, nickname: &str) -> Value {
+    let r = api::buddy_claim_as(login);
+    if let Some(err) = r.get("error") {
+        return json!({"uid": uid, "nickname": nickname, "ok": false, "skipped": false, "reason": err, "error": err});
+    }
+    let status = r.get("status").and_then(|x| x.as_u64()).unwrap_or(0);
+    let body = r.get("body");
+    let d = body.and_then(|b| b.get("data")).or(body);
+    let msg = d.and_then(|x| x.get("message")).and_then(|x| x.as_str())
+        .or_else(|| body.and_then(|b| b.get("message")).and_then(|x| x.as_str()))
+        .unwrap_or("").to_string();
+    if status == 200 {
+        json!({"uid": uid, "nickname": nickname, "ok": true, "skipped": false, "status": status, "message": msg, "reason": "已领取", "body": body.cloned().unwrap_or(Value::Null)})
+    } else if is_already_claimed(&msg) {
+        json!({"uid": uid, "nickname": nickname, "ok": false, "skipped": true, "reason": "无待领取奖励（已领取或宠物未归来）", "status": status})
+    } else {
+        json!({"uid": uid, "nickname": nickname, "ok": false, "skipped": false, "reason": if msg.is_empty() { format!("HTTP {}", status) } else { msg.clone() }, "status": status, "message": msg, "body": body.cloned().unwrap_or(Value::Null)})
+    }
+}
+
+/// 一键领取所有「已保存登录态」账号的宠物奖励（三级计数）
 #[tauri::command]
 fn buddy_all_claim() -> Value {
     let vault = ops::vault_dir();
     let accs = ops::list_accounts(&vault);
     let mut results = Vec::new();
-    let mut ok = 0u32; let mut fail = 0u32;
+    let mut ok = 0u32; let mut fail = 0u32; let mut skipped = 0u32;
     for a in accs {
         if !a.has_snapshot {
-            results.push(json!({"uid": a.uid, "nickname": a.nickname, "ok": false, "error": "无登录态快照"}));
-            fail += 1; continue;
+            results.push(json!({"uid": a.uid, "nickname": a.nickname, "ok": false, "skipped": true, "reason": "无登录态快照"}));
+            skipped += 1; continue;
         }
         let Some(login) = account_login(&vault, &a.uid) else {
-            results.push(json!({"uid": a.uid, "nickname": a.nickname, "ok": false, "error": "登录态文件缺失或无效"}));
-            fail += 1; continue;
+            results.push(json!({"uid": a.uid, "nickname": a.nickname, "ok": false, "skipped": true, "reason": "登录态文件缺失或无效"}));
+            skipped += 1; continue;
         };
-        let r = api::buddy_claim_as(&login);
-        if let Some(err) = r.get("error") {
-            results.push(json!({"uid": a.uid, "nickname": a.nickname, "ok": false, "error": err}));
-            fail += 1; continue;
-        }
-        let status = r.get("status").and_then(|x| x.as_u64()).unwrap_or(0);
-        let body = r.get("body");
-        let d = body.and_then(|b| b.get("data")).or(body);
-        let msg = d.and_then(|x| x.get("message")).and_then(|x| x.as_str())
-            .or_else(|| r.get("body").and_then(|b| b.get("message")).and_then(|x| x.as_str()))
-            .unwrap_or("").to_string();
-        let success = status == 200;
-        if success { ok += 1; } else { fail += 1; }
-        results.push(json!({"uid": a.uid, "nickname": a.nickname, "ok": success, "status": status, "message": msg}));
+        let res = claim_one(&login, &a.uid, &a.nickname);
+        let okf = res.get("ok").and_then(|x| x.as_bool()).unwrap_or(false);
+        let skf = res.get("skipped").and_then(|x| x.as_bool()).unwrap_or(false);
+        if okf { ok += 1; } else if skf { skipped += 1; } else { fail += 1; }
+        results.push(res);
     }
-    json!({ "ok": true, "results": results, "summary": { "total": results.len(), "ok": ok, "fail": fail } })
+    json!({ "ok": true, "results": results, "summary": { "total": results.len(), "ok": ok, "fail": fail, "skipped": skipped } })
 }
 
-/// 单个账号：派出宠物到指定地点（用于全部账号表格里的逐行操作）
+/// 单个账号：派出宠物到指定地点（用于全部账号表格里的逐行操作，含预检）
 #[tauri::command]
 fn buddy_depart_for(uid: String, location_id: String) -> Value {
     let vault = ops::vault_dir();
     let Some(login) = account_login(&vault, &uid) else {
-        return json!({"uid": uid, "ok": false, "error": "登录态文件缺失或无效"});
+        return json!({"uid": uid, "ok": false, "skipped": false, "error": "登录态文件缺失或无效"});
     };
-    let r = api::buddy_depart_as(&login, &location_id);
-    if let Some(err) = r.get("error") { return json!({"uid": uid, "ok": false, "error": err}); }
-    let status = r.get("status").and_then(|x| x.as_u64()).unwrap_or(0);
-    let body = r.get("body");
-    let d = body.and_then(|b| b.get("data")).or(body);
-    let msg = d.and_then(|x| x.get("message")).and_then(|x| x.as_str())
-        .or_else(|| r.get("body").and_then(|b| b.get("message")).and_then(|x| x.as_str()))
-        .unwrap_or("").to_string();
-    json!({"uid": uid, "ok": status == 200, "status": status, "message": msg, "body": r.get("body").cloned().unwrap_or(Value::Null)})
+    depart_one(&login, &location_id, &uid, "")
 }
 
-/// 单个账号：领取宠物奖励（用于全部账号表格里的逐行操作）
+/// 单个账号：领取宠物奖励（用于全部账号表格里的逐行操作，含幂等预检）
 #[tauri::command]
 fn buddy_claim_for(uid: String) -> Value {
     let vault = ops::vault_dir();
     let Some(login) = account_login(&vault, &uid) else {
-        return json!({"uid": uid, "ok": false, "error": "登录态文件缺失或无效"});
+        return json!({"uid": uid, "ok": false, "skipped": false, "error": "登录态文件缺失或无效"});
     };
-    let r = api::buddy_claim_as(&login);
-    if let Some(err) = r.get("error") { return json!({"uid": uid, "ok": false, "error": err}); }
-    let status = r.get("status").and_then(|x| x.as_u64()).unwrap_or(0);
-    let body = r.get("body");
-    let d = body.and_then(|b| b.get("data")).or(body);
-    let msg = d.and_then(|x| x.get("message")).and_then(|x| x.as_str())
-        .or_else(|| r.get("body").and_then(|b| b.get("message")).and_then(|x| x.as_str()))
-        .unwrap_or("").to_string();
-    json!({"uid": uid, "ok": status == 200, "status": status, "message": msg, "body": r.get("body").cloned().unwrap_or(Value::Null)})
+    claim_one(&login, &uid, "")
 }
 
 // ---------- 模型 / API 管理（wb_api::models） ----------
