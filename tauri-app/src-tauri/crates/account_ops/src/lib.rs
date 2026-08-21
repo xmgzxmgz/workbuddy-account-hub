@@ -116,6 +116,32 @@ fn find_registry() -> Vec<(String, Option<String>)> {
     out
 }
 
+/// 从当前登录态文件(workbuddy-desktop.info)的顶层 `allAccounts` 提取本机「所有登录过的账号」。
+/// 这是最权威的来源：只要某账号在此机登录过，就会出现在 allAccounts。
+/// 之前的枚举只依赖 local_storage 登记表 + vault 快照，当官方把登记表压缩成「仅当前账号」、
+/// 且该账号尚未快照时就会丢账号（表现为侧边栏「不显示所有账号」）。补上 allAccounts 来源可根治。
+fn auth_accounts() -> Vec<(String, Option<String>)> {
+    let Some(f) = auth_file() else { return Vec::new(); };
+    let Ok(s) = std::fs::read_to_string(&f) else { return Vec::new(); };
+    let Ok(v) = serde_json::from_str::<Value>(&s) else { return Vec::new(); };
+    let mut out = Vec::new();
+    if let Some(arr) = v.get("allAccounts").and_then(|x| x.as_array()) {
+        for item in arr {
+            let Some(uid) = item.get("uid").and_then(|u| u.as_str()) else { continue; };
+            let nick = item.get("nickname").and_then(|x| x.as_str()).map(|s| s.to_string());
+            out.push((uid.to_string(), nick));
+        }
+    }
+    // allAccounts 为空时兜底：至少保留当前 account
+    if out.is_empty() {
+        if let Some(uid) = v.get("account").and_then(|a| a.get("uid")).and_then(|u| u.as_str()) {
+            let nick = v.get("account").and_then(|a| a.get("nickname")).and_then(|x| x.as_str()).map(|s| s.to_string());
+            out.push((uid.to_string(), nick));
+        }
+    }
+    out
+}
+
 /// 从保险库(vault)目录枚举所有已保存账号的 uid（只要有 snapshot/history 目录就算）。
 /// 兜底来源：即使官方登记表被压缩丢失账号，只要之前快照过，这里就能找回并可切换。
 fn vault_account_uids(vault: &Path) -> Vec<String> {
@@ -177,6 +203,18 @@ pub fn list_accounts(vault: &Path) -> Vec<AccountInfo> {
     let cur = current_uid();
     let mut seen = std::collections::HashSet::new();
     let mut out = Vec::new();
+
+    // 0) 当前登录态文件里的 allAccounts（最权威：本机所有登录过的账号，含尚未快照的）
+    for (uid, nick) in auth_accounts() {
+        if seen.insert(uid.clone()) {
+            out.push(AccountInfo {
+                uid: uid.clone(),
+                nickname: nick.or_else(|| nickname_from_vault(vault, &uid)),
+                current: cur.as_deref() == Some(uid.as_str()),
+                has_snapshot: snapshot_exists(vault, &uid),
+            });
+        }
+    }
 
     // 1) 合并所有登记表
     for (uid, nick) in find_registry() {
@@ -537,16 +575,51 @@ fn chrono_now() -> String {
     ms.to_string()
 }
 
+/// 为「已在登录态 allAccounts 中、但尚无 vault 快照」的账号即时生成一份快照，
+/// 使「一键切换」对任意登录过的账号都可用（无需先手动快照）。
+/// 做法：用当前共享 local_storage 作为该账号的 local_storage（切换只换 auth，不动它），
+/// 用 allAccounts 中该账号的登录态条目构造 snapshot/auth.info。
+fn materialize_snapshot_for(vault: &Path, uid: &str) -> Result<(), String> {
+    let Some(af) = auth_file() else {
+        return Err("未找到当前登录态文件，无法生成快照".into());
+    };
+    let s = std::fs::read_to_string(&af).map_err(|e| format!("读取登录态失败: {e}"))?;
+    let v: Value = serde_json::from_str(&s).map_err(|e| format!("登录态解析失败: {e}"))?;
+    let entry = v.get("allAccounts").and_then(|a| a.as_array())
+        .and_then(|arr| arr.iter().find(|x| x.get("uid").and_then(|u| u.as_str()) == Some(uid)))
+        .or_else(|| v.get("account"))
+        .cloned()
+        .ok_or_else(|| format!("登录态中找不到账号 {uid} 的条目，无法生成快照"))?;
+    let snap = vault.join(uid).join("snapshot");
+    std::fs::create_dir_all(&snap).map_err(|e| e.to_string())?;
+    let full = json!({
+        "account": entry,
+        "accounts": [entry.clone()],
+        "allAccounts": [entry],
+    });
+    std::fs::write(snap.join("auth.info"), serde_json::to_string_pretty(&full).map_err(|e| e.to_string())?)
+        .map_err(|e| e.to_string())?;
+    let ls = local_storage_dir();
+    if ls.exists() {
+        copy_dir_all(&ls, &snap.join("local_storage")).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
 /// 切换账号：整体换入 vault/<uid>/snapshot/。切换前会先把当前账号**自动备份**到
 /// vault/<uid>/history/<ts>/（统一历史备份，替代旧 _rollback），以免丢失当前状态的增量，
 /// 然后在写回前用当前状态覆盖历史备份（已含）。返回 restart_required 提示重启。
 pub fn switch_account(vault: &Path, uid: &str) -> Result<SwitchResult, String> {
-    let src = vault.join(uid).join("snapshot");
-    if !src.exists() {
-        return Err(format!("账号 {} 尚未快照，请先对其执行「快照当前账号」", uid));
-    }
+    // 切换前若 WorkBuddy 在运行，先优雅退出（避免退出时回写覆盖 local_storage/登录态）
     if is_workbuddy_running() {
         quit_workbuddy()?;
+    }
+
+    // 目标账号快照缺失：若其在 allAccounts 中存在，则即时生成快照，使任意登录过的账号都可切换。
+    // 否则报错（理论上 allAccounts 已覆盖本机所有登录账号，不会走到这里）。
+    let src = vault.join(uid).join("snapshot");
+    if !src.exists() {
+        materialize_snapshot_for(vault, uid)?;
     }
 
     // 切换前自动保存当前账号：历史备份（可追溯）+ canonical snapshot/（切回源）。
