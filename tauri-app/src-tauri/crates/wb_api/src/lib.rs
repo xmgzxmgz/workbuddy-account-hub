@@ -10,6 +10,7 @@
 
 use serde::Serialize;
 use serde_json::{json, Value};
+use std::path::Path;
 
 pub mod models;
 
@@ -147,9 +148,8 @@ fn make_client() -> reqwest::blocking::Client {
     builder.build().unwrap_or_else(|_| reqwest::blocking::Client::new())
 }
 
-/// 统一代理官方接口；返回 { status, body(Value), login(脱敏) }
-pub fn call_api(endpoint: &str, method: &str, body: &str) -> Result<Value, String> {
-    let login = load_login().ok_or("未找到本机 WorkBuddy 登录态，请先登录 WorkBuddy 客户端".to_string())?;
+/// 统一代理官方接口（指定登录态）；返回 { status, body(Value), login(脱敏) }
+pub fn call_api_as(login: &LoginInfo, endpoint: &str, method: &str, body: &str) -> Result<Value, String> {
     let target = if endpoint.starts_with("http://") || endpoint.starts_with("https://") {
         endpoint.to_string()
     } else {
@@ -178,6 +178,28 @@ pub fn call_api(endpoint: &str, method: &str, body: &str) -> Result<Value, Strin
         "body": parsed,
         "login": { "uid": login.uid, "file": login.file, "token": mask(&login.token, 8) }
     }))
+}
+
+/// 统一代理官方接口（使用当前本机登录态）；返回 { status, body(Value), login(脱敏) }
+pub fn call_api(endpoint: &str, method: &str, body: &str) -> Result<Value, String> {
+    let login = load_login().ok_or("未找到本机 WorkBuddy 登录态，请先登录 WorkBuddy 客户端".to_string())?;
+    call_api_as(&login, endpoint, method, body)
+}
+
+/// 从指定登录态文件读取登录信息（供多账号批量操作：每个账号从自己的 vault 快照 auth.info 取 token）
+pub fn login_from_file(p: &Path) -> Option<LoginInfo> {
+    let s = std::fs::read_to_string(p).ok()?;
+    let d: Value = serde_json::from_str(&s).ok()?;
+    let token = d.get("auth").and_then(|a| a.get("accessToken")).and_then(|t| t.as_str()).unwrap_or("").to_string();
+    if token.is_empty() { return None; }
+    let uid = d.get("account")
+        .and_then(|a| a.get("uid"))
+        .and_then(|u| u.as_str())
+        .map(|s| s.to_string())
+        .or_else(|| jwt_payload(&token).and_then(|pl| pl.get("sub").and_then(|x| x.as_str()).map(|s| s.to_string())))
+        .unwrap_or_default();
+    if uid.is_empty() { return None; }
+    Some(LoginInfo { uid, token, file: p.to_string_lossy().into_owned(), account: d.get("account").cloned().unwrap_or(Value::Null) })
 }
 
 /// 解析 JWT 有效期 + 关键声明
@@ -271,9 +293,9 @@ pub fn get_memory() -> Value {
         .unwrap_or_else(|e| json!({ "error": e }))
 }
 
-/// 执行今日签到（幂等：已签则跳过）
-pub fn do_checkin() -> Value {
-    let st = call_api(&format!("{}{}/checkin-activity-status", API_BASE, BILLING_METER), "POST", "{}")
+/// 执行今日签到（幂等：已签则跳过）—— 指定登录态
+pub fn do_checkin_as(login: &LoginInfo) -> Value {
+    let st = call_api_as(login, &format!("{}{}/checkin-activity-status", API_BASE, BILLING_METER), "POST", "{}")
         .unwrap_or_else(|e| json!({ "error": e }));
     if st.get("error").is_some() { return st; }
     let status = st.get("status").and_then(|x| x.as_u64()).unwrap_or(0);
@@ -282,9 +304,17 @@ pub fn do_checkin() -> Value {
     if already {
         return json!({ "skipped": true, "message": "今日已签到，无需重复", "data": st.get("body").and_then(|b| b.get("data")).cloned().unwrap_or(Value::Null) });
     }
-    let r = call_api(&format!("{}{}/daily-checkin", API_BASE, V2_METER), "POST", "{}")
+    let r = call_api_as(login, &format!("{}{}/daily-checkin", API_BASE, V2_METER), "POST", "{}")
         .unwrap_or_else(|e| json!({ "error": e }));
     r
+}
+
+/// 执行今日签到（当前本机登录态）
+pub fn do_checkin() -> Value {
+    match load_login() {
+        Some(l) => do_checkin_as(&l),
+        None => json!({ "error": "未找到本机 WorkBuddy 登录态，请先登录 WorkBuddy 客户端" }),
+    }
 }
 
 /// 仅查询额度
@@ -304,22 +334,34 @@ pub fn get_checkin() -> Value {
 /// 宠物状态端点（所有 travel 接口共用的路径前缀）
 const BUDDY_TRAVEL: &str = "/activity/growth/buddy/travel";
 
-/// 查询宠物当前状态（idle / traveling / arrived）
-/// 返回 { status, body }，body.data.state: "idle"|"traveling"|"arrived"，
-/// 含 location_name / arrive_at / daily_limit_reached 等。
+/// 查询宠物当前状态（idle / traveling / arrived）—— 指定登录态
+pub fn buddy_status_as(login: &LoginInfo) -> Value {
+    call_api_as(login, &format!("{}{}/status", API_BASE, BUDDY_TRAVEL), "GET", "")
+        .unwrap_or_else(|e| json!({ "error": e }))
+}
+/// 查询宠物当前状态（当前本机登录态）
 pub fn buddy_status() -> Value {
-    call_api(&format!("{}{}/status", API_BASE, BUDDY_TRAVEL), "GET", "")
-        .unwrap_or_else(|e| json!({ "error": e }))
+    match load_login() {
+        Some(l) => buddy_status_as(&l),
+        None => json!({ "error": "未找到本机 WorkBuddy 登录态" }),
+    }
 }
 
-/// 查询可派出地点列表（location_id -> 名称/耗时/收益）
+/// 查询可派出地点列表 —— 指定登录态
+pub fn buddy_config_as(login: &LoginInfo) -> Value {
+    call_api_as(login, &format!("{}{}/config", API_BASE, BUDDY_TRAVEL), "GET", "")
+        .unwrap_or_else(|e| json!({ "error": e }))
+}
+/// 查询可派出地点列表（当前本机登录态）
 pub fn buddy_config() -> Value {
-    call_api(&format!("{}{}/config", API_BASE, BUDDY_TRAVEL), "GET", "")
-        .unwrap_or_else(|e| json!({ "error": e }))
+    match load_login() {
+        Some(l) => buddy_config_as(&l),
+        None => json!({ "error": "未找到本机 WorkBuddy 登录态" }),
+    }
 }
 
-/// 派出宠物前往指定地点（幂等原因：每天限 1 次；traveling/arrived 时返回对应错误）
-pub fn buddy_depart(location_id: &str) -> Value {
+/// 派出宠物前往指定地点 —— 指定登录态
+pub fn buddy_depart_as(login: &LoginInfo, location_id: &str) -> Value {
     // WorkBuddy 官方 depart 接口要求 location_id 为整数；前端统一传字符串 "1"，
     // 这里智能解析为数字（解析失败则退回原字符串，保持向后兼容）。
     let lid: serde_json::Value = location_id
@@ -328,14 +370,28 @@ pub fn buddy_depart(location_id: &str) -> Value {
         .map(serde_json::Value::from)
         .unwrap_or_else(|_| serde_json::Value::from(location_id));
     let body = json!({ "location_id": lid }).to_string();
-    call_api(&format!("{}{}/depart", API_BASE, BUDDY_TRAVEL), "POST", &body)
+    call_api_as(login, &format!("{}{}/depart", API_BASE, BUDDY_TRAVEL), "POST", &body)
         .unwrap_or_else(|e| json!({ "error": e }))
 }
+/// 派出宠物（当前本机登录态）
+pub fn buddy_depart(location_id: &str) -> Value {
+    match load_login() {
+        Some(l) => buddy_depart_as(&l, location_id),
+        None => json!({ "error": "未找到本机 WorkBuddy 登录态" }),
+    }
+}
 
-/// 领取已归来宠物的奖励（空闲时返回 400 "no unclaimed travel"，幂等安全）
-pub fn buddy_claim() -> Value {
-    call_api(&format!("{}{}/claim", API_BASE, BUDDY_TRAVEL), "POST", "{}")
+/// 领取已归来宠物的奖励 —— 指定登录态
+pub fn buddy_claim_as(login: &LoginInfo) -> Value {
+    call_api_as(login, &format!("{}{}/claim", API_BASE, BUDDY_TRAVEL), "POST", "{}")
         .unwrap_or_else(|e| json!({ "error": e }))
+}
+/// 领取已归来宠物的奖励（当前本机登录态）
+pub fn buddy_claim() -> Value {
+    match load_login() {
+        Some(l) => buddy_claim_as(&l),
+        None => json!({ "error": "未找到本机 WorkBuddy 登录态" }),
+    }
 }
 
 // ===== 本地信息 =====

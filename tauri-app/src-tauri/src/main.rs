@@ -68,6 +68,200 @@ fn buddy_claim() -> Value {
     api::buddy_claim()
 }
 
+// ---------- 多账号批量操作（每个账号用各自 vault 快照里的登录态 token 发起请求） ----------
+
+/// 从某账号的 vault 快照读取登录态（auth.info 含该账号 accessToken）
+fn account_login(vault: &std::path::Path, uid: &str) -> Option<wb_api::LoginInfo> {
+    let p = vault.join(uid).join("snapshot").join("auth.info");
+    if !p.exists() { return None; }
+    wb_api::login_from_file(&p)
+}
+
+/// 一键签到：对所有「已保存登录态」的账号执行今日签到，返回每个账号的结果
+#[tauri::command]
+fn checkin_all() -> Value {
+    let vault = ops::vault_dir();
+    let accs = ops::list_accounts(&vault);
+    let mut results = Vec::new();
+    let mut ok = 0u32; let mut fail = 0u32; let mut skipped = 0u32;
+    for a in accs {
+        if !a.has_snapshot {
+            results.push(json!({"uid": a.uid, "nickname": a.nickname, "ok": false, "skipped": false, "error": "无登录态快照"}));
+            fail += 1; continue;
+        }
+        let Some(login) = account_login(&vault, &a.uid) else {
+            results.push(json!({"uid": a.uid, "nickname": a.nickname, "ok": false, "skipped": false, "error": "登录态文件缺失或无效"}));
+            fail += 1; continue;
+        };
+        let r = api::do_checkin_as(&login);
+        if let Some(err) = r.get("error") {
+            results.push(json!({"uid": a.uid, "nickname": a.nickname, "ok": false, "skipped": false, "error": err}));
+            fail += 1; continue;
+        }
+        let status = r.get("status").and_then(|x| x.as_u64()).unwrap_or(0);
+        let sk = r.get("skipped").and_then(|x| x.as_bool()).unwrap_or(false);
+        let body = r.get("body");
+        let d = body.and_then(|b| b.get("data")).or(body);
+        let msg = d.and_then(|x| x.get("message")).and_then(|x| x.as_str())
+            .or_else(|| r.get("body").and_then(|b| b.get("message")).and_then(|x| x.as_str()))
+            .unwrap_or("").to_string();
+        if status == 200 && !sk { ok += 1; } else if sk { skipped += 1; } else { fail += 1; }
+        results.push(json!({
+            "uid": a.uid, "nickname": a.nickname, "ok": status == 200, "skipped": sk,
+            "status": status, "message": msg
+        }));
+    }
+    json!({ "ok": true, "results": results, "summary": { "total": results.len(), "ok": ok, "fail": fail, "skipped": skipped } })
+}
+
+/// 查询所有「已保存登录态」账号的宠物当前状态
+#[tauri::command]
+fn buddy_all_status() -> Value {
+    let vault = ops::vault_dir();
+    let accs = ops::list_accounts(&vault);
+    let mut accounts = Vec::new();
+    for a in accs {
+        if !a.has_snapshot {
+            accounts.push(json!({"uid": a.uid, "nickname": a.nickname, "has_login": false, "error": "无登录态快照"}));
+            continue;
+        }
+        let Some(login) = account_login(&vault, &a.uid) else {
+            accounts.push(json!({"uid": a.uid, "nickname": a.nickname, "has_login": false, "error": "登录态文件缺失或无效"}));
+            continue;
+        };
+        let r = api::buddy_status_as(&login);
+        if let Some(err) = r.get("error") {
+            accounts.push(json!({"uid": a.uid, "nickname": a.nickname, "has_login": true, "error": err}));
+            continue;
+        }
+        let status = r.get("status").and_then(|x| x.as_u64()).unwrap_or(0);
+        let body = r.get("body");
+        let d = body.and_then(|b| b.get("data")).or(body);
+        let state = d.and_then(|x| x.get("state")).and_then(|x| x.as_str()).unwrap_or("unknown").to_string();
+        let location = d.and_then(|x| {
+            let l = x.get("location");
+            if let Some(l) = l {
+                if l.is_string() { return l.as_str().map(|s| s.to_string()); }
+                if l.is_object() { return l.get("name").and_then(|s| s.as_str()).map(|s| s.to_string()); }
+            }
+            None
+        });
+        let reward = d.and_then(|x| x.get("reward_credit")).cloned();
+        let arrive_at = d.and_then(|x| x.get("arrive_at")).and_then(|x| x.as_u64()).unwrap_or(0);
+        let daily = d.and_then(|x| x.get("daily_limit_reached")).and_then(|x| x.as_bool()).unwrap_or(false);
+        accounts.push(json!({
+            "uid": a.uid, "nickname": a.nickname, "has_login": true, "status": status,
+            "state": state, "location": location, "reward_credit": reward,
+            "arrive_at": arrive_at, "daily_limit_reached": daily
+        }));
+    }
+    json!({ "ok": true, "accounts": accounts })
+}
+
+/// 一键派出所有「已保存登录态」账号的宠物到同一地点
+#[tauri::command]
+fn buddy_all_depart(location_id: String) -> Value {
+    let vault = ops::vault_dir();
+    let accs = ops::list_accounts(&vault);
+    let mut results = Vec::new();
+    let mut ok = 0u32; let mut fail = 0u32;
+    for a in accs {
+        if !a.has_snapshot {
+            results.push(json!({"uid": a.uid, "nickname": a.nickname, "ok": false, "error": "无登录态快照"}));
+            fail += 1; continue;
+        }
+        let Some(login) = account_login(&vault, &a.uid) else {
+            results.push(json!({"uid": a.uid, "nickname": a.nickname, "ok": false, "error": "登录态文件缺失或无效"}));
+            fail += 1; continue;
+        };
+        let r = api::buddy_depart_as(&login, &location_id);
+        if let Some(err) = r.get("error") {
+            results.push(json!({"uid": a.uid, "nickname": a.nickname, "ok": false, "error": err}));
+            fail += 1; continue;
+        }
+        let status = r.get("status").and_then(|x| x.as_u64()).unwrap_or(0);
+        let body = r.get("body");
+        let d = body.and_then(|b| b.get("data")).or(body);
+        let msg = d.and_then(|x| x.get("message")).and_then(|x| x.as_str())
+            .or_else(|| r.get("body").and_then(|b| b.get("message")).and_then(|x| x.as_str()))
+            .unwrap_or("").to_string();
+        let success = status == 200;
+        if success { ok += 1; } else { fail += 1; }
+        results.push(json!({"uid": a.uid, "nickname": a.nickname, "ok": success, "status": status, "message": msg}));
+    }
+    json!({ "ok": true, "results": results, "summary": { "total": results.len(), "ok": ok, "fail": fail } })
+}
+
+/// 一键领取所有「已保存登录态」账号的宠物奖励
+#[tauri::command]
+fn buddy_all_claim() -> Value {
+    let vault = ops::vault_dir();
+    let accs = ops::list_accounts(&vault);
+    let mut results = Vec::new();
+    let mut ok = 0u32; let mut fail = 0u32;
+    for a in accs {
+        if !a.has_snapshot {
+            results.push(json!({"uid": a.uid, "nickname": a.nickname, "ok": false, "error": "无登录态快照"}));
+            fail += 1; continue;
+        }
+        let Some(login) = account_login(&vault, &a.uid) else {
+            results.push(json!({"uid": a.uid, "nickname": a.nickname, "ok": false, "error": "登录态文件缺失或无效"}));
+            fail += 1; continue;
+        };
+        let r = api::buddy_claim_as(&login);
+        if let Some(err) = r.get("error") {
+            results.push(json!({"uid": a.uid, "nickname": a.nickname, "ok": false, "error": err}));
+            fail += 1; continue;
+        }
+        let status = r.get("status").and_then(|x| x.as_u64()).unwrap_or(0);
+        let body = r.get("body");
+        let d = body.and_then(|b| b.get("data")).or(body);
+        let msg = d.and_then(|x| x.get("message")).and_then(|x| x.as_str())
+            .or_else(|| r.get("body").and_then(|b| b.get("message")).and_then(|x| x.as_str()))
+            .unwrap_or("").to_string();
+        let success = status == 200;
+        if success { ok += 1; } else { fail += 1; }
+        results.push(json!({"uid": a.uid, "nickname": a.nickname, "ok": success, "status": status, "message": msg}));
+    }
+    json!({ "ok": true, "results": results, "summary": { "total": results.len(), "ok": ok, "fail": fail } })
+}
+
+/// 单个账号：派出宠物到指定地点（用于全部账号表格里的逐行操作）
+#[tauri::command]
+fn buddy_depart_for(uid: String, location_id: String) -> Value {
+    let vault = ops::vault_dir();
+    let Some(login) = account_login(&vault, &uid) else {
+        return json!({"uid": uid, "ok": false, "error": "登录态文件缺失或无效"});
+    };
+    let r = api::buddy_depart_as(&login, &location_id);
+    if let Some(err) = r.get("error") { return json!({"uid": uid, "ok": false, "error": err}); }
+    let status = r.get("status").and_then(|x| x.as_u64()).unwrap_or(0);
+    let body = r.get("body");
+    let d = body.and_then(|b| b.get("data")).or(body);
+    let msg = d.and_then(|x| x.get("message")).and_then(|x| x.as_str())
+        .or_else(|| r.get("body").and_then(|b| b.get("message")).and_then(|x| x.as_str()))
+        .unwrap_or("").to_string();
+    json!({"uid": uid, "ok": status == 200, "status": status, "message": msg, "body": r.get("body").cloned().unwrap_or(Value::Null)})
+}
+
+/// 单个账号：领取宠物奖励（用于全部账号表格里的逐行操作）
+#[tauri::command]
+fn buddy_claim_for(uid: String) -> Value {
+    let vault = ops::vault_dir();
+    let Some(login) = account_login(&vault, &uid) else {
+        return json!({"uid": uid, "ok": false, "error": "登录态文件缺失或无效"});
+    };
+    let r = api::buddy_claim_as(&login);
+    if let Some(err) = r.get("error") { return json!({"uid": uid, "ok": false, "error": err}); }
+    let status = r.get("status").and_then(|x| x.as_u64()).unwrap_or(0);
+    let body = r.get("body");
+    let d = body.and_then(|b| b.get("data")).or(body);
+    let msg = d.and_then(|x| x.get("message")).and_then(|x| x.as_str())
+        .or_else(|| r.get("body").and_then(|b| b.get("message")).and_then(|x| x.as_str()))
+        .unwrap_or("").to_string();
+    json!({"uid": uid, "ok": status == 200, "status": status, "message": msg, "body": r.get("body").cloned().unwrap_or(Value::Null)})
+}
+
 // ---------- 模型 / API 管理（wb_api::models） ----------
 
 #[tauri::command]
@@ -184,10 +378,16 @@ pub fn run() {
             get_checkin,
             get_memory,
             do_checkin,
+            checkin_all,
             buddy_status,
             buddy_config,
             buddy_depart,
             buddy_claim,
+            buddy_all_status,
+            buddy_all_depart,
+            buddy_all_claim,
+            buddy_depart_for,
+            buddy_claim_for,
             list_accounts,
             snapshot_current,
             ensure_snapshot,

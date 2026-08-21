@@ -253,7 +253,7 @@
       <div class="spacer"></div>
       <button onclick="refreshAll()">刷新全部</button>
       <button class="secondary" onclick="loadQuota()">仅查积分</button>
-      <button class="secondary" onclick="doCheckin()">一键签到</button>
+      <button class="secondary" onclick="doCheckinAll()">一键签到</button>
       <button class="secondary" onclick="loadBuddy()">🐾 宠物</button>
       <button class="secondary" onclick="openReport()">导出报告</button>
       <button class="secondary" onclick="openBackups()" title="查看每个账号的历史自动/手动备份">🕘 历史备份</button>
@@ -319,6 +319,14 @@
         </div>
         <div class="meta" style="color:var(--muted);font-size:12px;margin-bottom:6px;">最近签到记录</div>
         <div class="timeline" id="ck-timeline"></div>
+
+        <div class="section-title" style="margin:14px 4px 6px;">全部账号签到 🌐</div>
+        <div style="max-height:260px;overflow:auto;">
+          <table>
+            <thead><tr><th>账号</th><th>结果</th><th>状态</th><th>说明</th></tr></thead>
+            <tbody id="ck-all-tbody"><tr><td colspan="4" class="empty">点击「一键签到」查看全部账号签到情况</td></tr></tbody>
+          </table>
+        </div>
       </div>
     </div>
 
@@ -358,6 +366,21 @@
 
         <div class="section-title" style="margin:16px 4px 6px;">操作日志</div>
         <div class="buddy-log" id="buddy-log"><span class="empty">暂无记录</span></div>
+
+        <div class="section-title" style="margin:18px 4px 8px;">全部账号宠物 🌐 <span class="tag" style="font-size:10px;color:var(--muted);font-weight:400;">每个账号用各自登录态分别请求</span></div>
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:8px;">
+          <label style="font-size:12px;color:var(--muted);">派出地点</label>
+          <select id="all-loc-sel" style="background:#0b0e13;border:1px solid var(--line);border-radius:6px;color:var(--fg);padding:6px 8px;font-size:12px;"></select>
+          <button id="btn-buddy-depart-all" onclick="buddyDepartAll()">📤 一键派出全部</button>
+          <button id="btn-buddy-claim-all" class="secondary" style="background:var(--green);" onclick="buddyClaimAll()">🎁 一键领取全部</button>
+          <button class="secondary" onclick="refreshBuddyAll()">🔄 刷新</button>
+        </div>
+        <div style="max-height:320px;overflow:auto;">
+          <table>
+            <thead><tr><th>账号</th><th>状态</th><th>地点</th><th>收益</th><th class="num">到达</th><th>操作</th></tr></thead>
+            <tbody id="buddy-all-tbody"><tr><td colspan="6" class="empty">点击「🐾 宠物」加载全部账号宠物状态</td></tr></tbody>
+          </table>
+        </div>
       </div>
     </div>
 
