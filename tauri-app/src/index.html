@@ -43,6 +43,10 @@
     .topbar h1{font-size:18px;margin:0;}
     .topbar .sub{color:var(--muted);font-size:12px;}
     .topbar .spacer{flex:1;}
+    #boot-log{width:100%;font-size:11.5px;padding:6px 10px;border-radius:8px;background:#1b212b;border:1px solid var(--line);color:var(--muted);margin-bottom:12px;display:none;}
+    #boot-log.show{display:block;}
+    #boot-log.err{background:rgba(255,92,92,.12);border-color:rgba(255,92,92,.35);color:#ff9e9e;}
+    #boot-log.ok{background:rgba(39,192,138,.12);border-color:rgba(39,192,138,.35);color:#7eebb6;}
     button{padding:7px 12px;border:0;border-radius:8px;background:var(--blue);color:#fff;cursor:pointer;font-size:12px;font-weight:600;}
     button.secondary{background:var(--line);color:var(--fg);font-weight:500;}
     .links a{color:#7ea6ff;text-decoration:none;font-size:12px;}
@@ -255,6 +259,7 @@
       <button class="secondary" onclick="openBackups()" title="查看每个账号的历史自动/手动备份">🕘 历史备份</button>
       <button class="secondary eye-global off" id="eye-global" title="显示所有隐私数据中段（Key/UID/Token 等）" onclick="toggleAllKeys()">👁 隐私</button>
     </div>
+    <div id="boot-log"></div>
 
     <!-- 概览卡 -->
     <div class="cards" id="overview">
