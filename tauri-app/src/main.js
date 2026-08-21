@@ -627,7 +627,7 @@ async function loadBuddy() {
         const rMin = l.reward_credit_min ?? l.reward_min ?? l.reward_credit ?? 0;
         const rMax = l.reward_credit_max ?? l.reward_max ?? rMin;
         return {
-          id: l.location_id ?? l.id ?? '',
+          id: String(l.location_id ?? l.id ?? ''),
           name: l.name || l.location_name || '',
           hour: hMin, hourMax: hMax,
           reward: rMin, rewardMax: rMax,
@@ -703,7 +703,7 @@ function renderBuddyLocs() {
 
 async function buddyDepart(locationId, name) {
   const btn = $('btn-buddy-depart');
-  const id = locationId || (buddyLocations.length ? buddyLocations[0].id : '');
+  const id = String(locationId ?? (buddyLocations.length ? buddyLocations[0].id : ''));
   if (!id) { toast('无可派地点'); return; }
   const org = btn.textContent; btn.disabled = true; btn.textContent = '派出中…';
   try {
