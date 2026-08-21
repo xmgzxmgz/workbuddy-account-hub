@@ -64,25 +64,7 @@ function renderSidebar(j) {
   const al = $('acc-list'); al.innerHTML = '';
   const regs = j.registered_accounts || [];
   accountsCache = regs;
-  if (!regs.length) { al.innerHTML = '<div class="empty">无已登记账号</div>'; }
-  regs.forEach(a => {
-    const div = document.createElement('div');
-    div.className = 'acc' + (a.uid === cur ? ' active' : '');
-    const initial = (a.nickname || a.uid || '?').slice(0, 2);
-    const isCur = a.uid === cur;
-    const snapped = a.has_snapshot;
-    const badge = isCur
-      ? '<span class="cur">当前</span>'
-      : (snapped
-        ? `<button class="mini" onclick="event.stopPropagation();switchTo('${a.uid}')">切换</button>`
-        : '<span class="mini" style="background:var(--line);color:var(--muted);padding:3px 9px;border-radius:6px;font-size:10.5px;" title="该账号尚未在 WorkBuddy 中登录保存过登录态，无法直接切换">未登录</span>');
-    div.innerHTML = `
-      <div class="dot">${initial}</div>
-      <div class="info"><div class="n">${a.nickname ? privacy(a.nickname, { head: 3, tail: 4 }) : '(无昵称)'}</div><div class="s">${privacy(a.uid, { head: 4, tail: 4 })}</div></div>
-      ${badge}`;
-    div.onclick = () => selectAccount(a, regs);
-    al.appendChild(div);
-  });
+  showAccountList(regs, cur);
 
   const dl = $('dir-list'); dl.innerHTML = '';
   const dirs = (j.local_accounts && j.local_accounts.accounts) || [];
@@ -419,11 +401,59 @@ if ($('btn-restart')) $('btn-restart').addEventListener('click', async () => {
 async function refreshAccounts() {
   let data;
   try { data = await invoke('list_accounts'); } catch { return; }
-  // 把账号快照状态合并进侧边栏（list_accounts 不渲染 UI，这里只记录 has_snapshot）
-  accountsCache.forEach(a => {
-    const hit = (data.accounts || []).find(x => x.uid === a.uid);
-    if (hit) a.has_snapshot = hit.has_snapshot;
+  // list_accounts 返回完整账号清单（登记表 + vault 兜底 + 当前），
+  // 这里把 has_snapshot 合并进 accountsCache，并且如果清单比此前多出了账号
+  // （例如后端从此前"单账号"进阶到"双账号"枚举），主动重绘侧边栏让它们立即可见，
+  // 而不必等用户手动点「刷新全部」。
+  const freshAccs = data.accounts || [];
+  if (freshAccs.length) {
+    // 用新清单重算账号列表（保留旧 UI 数据，仅补齐 has_snapshot）
+    const merged = [];
+    const byUid = new Map();
+    accountsCache.forEach(a => byUid.set(a.uid, a));
+    freshAccs.forEach(f => {
+      const old = byUid.get(f.uid);
+      merged.push(old ? { ...old, has_snapshot: f.has_snapshot } : {
+        uid: f.uid, nickname: f.nickname, has_snapshot: f.has_snapshot,
+      });
+    });
+    // 当前账号保持 active（若在清单里）
+    const j = window.__login || {};
+    const cur = j.uid;
+    const changed = merged.length !== accountsCache.length
+      || merged.some(m => !accountsCache.find(x => x.uid === m.uid));
+    if (changed) { accountsCache = merged; showAccountList(merged, cur); }
+    else { accountsCache.forEach(a => {
+      const hit = freshAccs.find(x => x.uid === a.uid);
+      if (hit) a.has_snapshot = hit.has_snapshot;
+    }); }
+  }
+}
+
+// 复用 renderSidebar 里的账号侧栏绘制逻辑，但只重绘账号列表（不重设其它区块）
+function showAccountList(accs, cur) {
+  const al = $('acc-list'); if (!al) return;
+  al.innerHTML = '';
+  if (!accs.length) { al.innerHTML = '<div class="empty">无已登记账号</div>'; return; }
+  accs.forEach(a => {
+    const div = document.createElement('div');
+    div.className = 'acc' + (a.uid === cur ? ' active' : '');
+    const initial = (a.nickname || a.uid || '?').slice(0, 2);
+    const isCur = a.uid === cur;
+    const snapped = a.has_snapshot;
+    const badge = isCur
+      ? '<span class="cur">当前</span>'
+      : (snapped
+        ? `<button class="mini" onclick="event.stopPropagation();switchTo('${a.uid}')">切换</button>`
+        : '<span class="mini" style="background:var(--line);color:var(--muted);padding:3px 9px;border-radius:6px;font-size:10.5px;" title="该账号尚未在 WorkBuddy 中登录保存过登录态，无法直接切换">未登录</span>');
+    div.innerHTML = `
+      <div class="dot">${initial}</div>
+      <div class="info"><div class="n">${a.nickname ? privacy(a.nickname, { head: 3, tail: 4 }) : '(无昵称)'}</div><div class="s">${privacy(a.uid, { head: 4, tail: 4 })}</div></div>
+      ${badge}`;
+    div.onclick = () => selectAccount(a, accs);
+    al.appendChild(div);
   });
+  accountsCache = accs;
 }
 
 // ===== 历史备份页 =====
@@ -580,12 +610,13 @@ function buddyCountdownTick() {
 }
 
 async function loadBuddy() {
+  let ok = false;
   try {
     const [st, cfg] = await Promise.all([
       invoke('buddy_status').catch(e => ({ error: String(e) })),
       invoke('buddy_config').catch(e => ({ error: String(e) })),
     ]);
-    if (st && st.error) { buddyLogAdd('读取状态失败: ' + st.error, 'err'); toast('宠物状态读取失败'); return; }
+    if (st && st.error) { buddyLogAdd('读取状态失败: ' + st.error, 'err'); return false; }
     // 地点配置
     if (cfg && !cfg.error && cfg.status === 200) {
       const cfgBody = typeof cfg.body === 'string' ? JSON.parse(cfg.body) : cfg.body;
@@ -610,6 +641,7 @@ async function loadBuddy() {
       const sBody = typeof st.body === 'string' ? JSON.parse(st.body) : st.body;
       const d = buddyData(sBody);
       renderBuddy(d);
+      ok = true;
     } else if (st.status && st.status !== 200) {
       buddyLogAdd('状态接口返回 ' + st.status, 'err');
     }
@@ -617,6 +649,7 @@ async function loadBuddy() {
     buddyLogAdd('加载宠物失败: ' + e, 'err');
     toast('宠物加载失败: ' + e);
   }
+  return ok;
 }
 
 function renderBuddy(d) {
@@ -765,21 +798,28 @@ async function loadAll() {
 
 // 额度/签到/记忆分开独立拉取（后端各自带 15s 超时），
 // 任一部分慢/失败都不会卡住其余，更不会卡住本地昵称。
+// 启动初期网络/后端可能未就绪，失败时自动重试（最多 4 次，间隔递增），
+// 避免「打开软件后额度/签到/记忆空白，要点刷新全部才出来」。
 function loadNetworkParts() {
-  invoke('get_quota').then(j => {
-    if (j && j.status === 200) renderQuota(typeof j.body === 'string' ? JSON.parse(j.body) : j.body);
-    else if (j && j.error) toast('额度加载失败: ' + j.error);
-  }).catch(e => console.warn('quota err', e));
+  const retry = (fn, tries) => {
+    fn().then(ok => {
+      if (!ok && tries < 4) setTimeout(() => retry(fn, tries + 1), 800 * (tries + 1));
+    });
+  };
+  retry(() => invoke('get_quota').then(j => {
+    if (j && j.status === 200) { renderQuota(typeof j.body === 'string' ? JSON.parse(j.body) : j.body); return true; }
+    return false;   // 静默失败，交给重试兜底，避免启动时反复弹 toast
+  }).catch(e => { console.warn('quota err', e); return false; }), 0);
 
-  invoke('get_checkin').then(j => {
-    if (j && j.status === 200) { window.__checkin = j.body || {}; renderCheckin(typeof j.body === 'string' ? JSON.parse(j.body) : j.body); }
-    else if (j && j.error) toast('签到状态加载失败: ' + j.error);
-  }).catch(e => console.warn('checkin err', e));
+  retry(() => invoke('get_checkin').then(j => {
+    if (j && j.status === 200) { window.__checkin = j.body || {}; renderCheckin(typeof j.body === 'string' ? JSON.parse(j.body) : j.body); return true; }
+    return false;
+  }).catch(e => { console.warn('checkin err', e); return false; }), 0);
 
-  invoke('get_memory').then(j => {
-    if (j && j.status === 200) renderMemory(typeof j.body === 'string' ? JSON.parse(j.body) : j.body);
-    else if (j && j.error) toast('记忆画像加载失败: ' + j.error);
-  }).catch(e => console.warn('memory err', e));
+  retry(() => invoke('get_memory').then(j => {
+    if (j && j.status === 200) { renderMemory(typeof j.body === 'string' ? JSON.parse(j.body) : j.body); return true; }
+    return false;
+  }).catch(e => { console.warn('memory err', e); return false; }), 0);
 }
 async function loadQuota() {
   $('raw-out').textContent = '请求中…';
@@ -1044,6 +1084,26 @@ window.loadBuddy = loadBuddy;
 window.buddyDepart = buddyDepart;
 window.buddyClaim = buddyClaim;
 
-loadAll();
-setTimeout(loadBuddy, 800);   // 主面板加载后拉取宠物状态
-setTimeout(startBuddyPoll, 3000); // 自动轮询 + 到达自动领奖
+// ==== 启动时序优化 ====
+// 问题：webview 首次初始化时 invoke 可能偶发失败 / 后端刚就绪，导致
+// 本地信息、网络部分（额度/签到/记忆）、宠物面板不自动显示，要点「刷新全部」或再点宠物才出来。
+// 方案：分阶段自动加载 + 失败自动重试，保证用户打开即见全部数据，无需手动操作。
+function bootBootstrap() {
+  let allTries = 0, buddyTries = 0;
+  // 阶段1：立即加载本地信息（昵称/账号/环境/JWT）+ 独立拉取网络部分
+  async function tryLoadAll() {
+    allTries++;
+    try { await loadAll(); } catch (e) { /* 记录但不打断 */ }
+    if (allTries < 3) setTimeout(tryLoadAll, 1200); // 前 3 秒内重试，覆盖后端冷启动
+  }
+  // 阶段2：宠物面板 —— 比主面板稍晚，且失败/空数据自动重试直到拿到有效状态
+  async function tryBuddy() {
+    buddyTries++;
+    const ok = await loadBuddy();   // loadBuddy 返回是否成功拉起有效状态
+    if (!ok && buddyTries < 3) { setTimeout(tryBuddy, 1500); }
+  }
+  tryLoadAll();
+  setTimeout(tryBuddy, 600);
+  setTimeout(startBuddyPoll, 3000); // 自动轮询 + 到达自动领奖
+}
+bootBootstrap();
