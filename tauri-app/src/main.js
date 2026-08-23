@@ -450,44 +450,15 @@ function openOfficialLogin() {
 }
 function closeOfficialLogin() { $('official-login-modal').classList.remove('show'); }
 
-// ===== 「浏览器登录」：拉起 WorkBuddy 客户端走官方浏览器登录（手机号+验证码），
-// 登录成功后客户端会自动把登录态写回 auth.info，中枢轮询捕获并自动保存进 vault，可随时切换。=====
-let browserLoginPollTimer = null;
+// ===== 独立「浏览器登录」：不依赖 WorkBuddy 客户端，直接用浏览器打开官方登录页 =====
 function openBrowserLogin() {
-  if (browserLoginPollTimer) { clearInterval(browserLoginPollTimer); browserLoginPollTimer = null; }
-  // 拉起/聚焦客户端 → 客户端会自动打开系统浏览器到手机号登录页
-  invoke('launch_official_login').then(r => {
-    if (r && r.browser_fallback) {
-      // 没装客户端：只能开网页登录页，但网页登录态不落盘，引导手动粘 token
-      toast('未检测到 WorkBuddy 客户端，已打开网页登录页，请登录后手动粘贴 token');
-      setTimeout(() => openAddAccount(), 400);
-      return;
-    }
-    toast('已在浏览器打开 WorkBuddy 登录页，请用手机号+验证码登录…');
-    // 轮询捕获：客户端登录成功写回 auth.info 后，中枢自动读取并保存进 vault
-    let tries = 0;
-    const maxTries = 40; // 约 80s
-    browserLoginPollTimer = setInterval(async () => {
-      tries++;
-      try {
-        const cap = await invoke('capture_current_session');
-        if (cap && cap.success) {
-          clearInterval(browserLoginPollTimer); browserLoginPollTimer = null;
-          toast((cap.nickname ? cap.nickname + ' ' : '') + '已自动保存，可随时切换');
-          refreshAccounts();
-          setTimeout(() => loadAll(), 600);
-          return;
-        }
-      } catch (e) {
-        // 尚未登录（读不到会话），继续等待
-      }
-      if (tries >= maxTries) {
-        clearInterval(browserLoginPollTimer); browserLoginPollTimer = null;
-        toast('登录捕获超时，可稍后在「官方登录」里点「我已登录」手动刷新');
-      }
-    }, 2000);
+  invoke('open_browser_login').then(() => {
+    // 浏览器登录无法把 token 自动交回中枢，引导用户手动粘贴到「添加账号」
+    toast('已打开浏览器登录页，请用手机号+验证码登录');
+    setTimeout(() => openAddAccount(), 400);
   }).catch(e => {
-    alert('无法启动登录流程：' + e);
+    // 极端情况：连浏览器都打不开，直接提示用户手动去官网登录
+    alert('无法打开浏览器，请手动访问 https://www.workbuddy.cn/login 登录后，在「添加账号」中粘贴 accessToken。\n错误：' + e);
   });
 }
 async function officialLoginLaunched() {

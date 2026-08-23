@@ -58,35 +58,13 @@ pub fn local_storage_dir() -> PathBuf {
 
 /// 登录态文件（v5.3.8+ 明文 JSON，含 accessToken）。切换账号必须连它一起换。
 pub fn auth_file() -> Option<PathBuf> {
-    auth_candidates().into_iter().find(|p| p.exists())
-}
-
-/// 候选登录态文件路径（按优先级）。
-/// 覆盖两类来源：
-///   1. 中枢自己维护/旧版路径（LOCALAPPDATA/workbuddy-desktop.info、CodeBuddyExtension…）
-///   2. WorkBuddy 桌面客户端当前实际落盘路径：
-///      `<sharedDataPath>/auth/auth.info`（sharedDataPath 通常为本机 .workbuddy/app）
-///      本机实测客户端 userData 为 `%USERPROFILE%\.workbuddy\app`，故 auth 文件在
-///      `%USERPROFILE%\.workbuddy\app\auth\auth.info`。
-pub fn auth_candidates() -> Vec<PathBuf> {
-    let mut cands = Vec::new();
-    let home = home();
-    let local = std::env::var("LOCALAPPDATA").unwrap_or_else(|_| {
-        home.join("AppData").join("Local").to_string_lossy().into_owned()
-    });
-    if cfg!(target_os = "windows") {
-        // 旧/中枢路径
-        cands.push(PathBuf::from(&local).join("workbuddy-desktop.info"));
-        cands.push(PathBuf::from(&local).join("CodeBuddyExtension").join("Data").join("Public").join("auth").join("workbuddy-desktop.info"));
-        // 客户端当前实际路径（sharedDataPath = userData）
-        cands.push(home.join(".workbuddy").join("app").join("auth").join("auth.info"));
-        cands.push(home.join(".workbuddy").join("auth").join("auth.info"));
+    let base = if cfg!(target_os = "windows") {
+        PathBuf::from(std::env::var("LOCALAPPDATA").unwrap_or_else(|_| home().join("AppData").join("Local").to_string_lossy().into_owned()))
     } else {
-        cands.push(home.join("Library").join("Application Support").join("CodeBuddyExtension").join("Data").join("Public").join("auth").join("workbuddy-desktop.info"));
-        cands.push(home.join(".workbuddy").join("app").join("auth").join("auth.info"));
-        cands.push(home.join(".workbuddy").join("auth").join("auth.info"));
-    }
-    cands
+        home().join("Library").join("Application Support").join("CodeBuddyExtension").join("Data").join("Public").join("auth")
+    };
+    let p = base.join("workbuddy-desktop.info");
+    if p.exists() { Some(p) } else { None }
 }
 
 /// 保险库根目录（按 uid 分桶）
@@ -291,60 +269,6 @@ pub fn add_account(
         already_existed: existed,
         added_snapshot,
     })
-}
-
-/// 从 WorkBuddy 客户端实际登录态文件（`<sharedDataPath>/auth/auth.info`）读取「当前已登录会话」。
-/// 格式（v5.3.x）：`{ auth: { accessToken, domain, expiresAt }, account: { uid, nickname, enterpriseId } }`。
-/// 返回 (uid, nickname, accessToken)。找不到或格式不符返回 None。
-pub fn read_client_session() -> Option<(String, Option<String>, String)> {
-    for p in auth_candidates() {
-        let Ok(s) = std::fs::read_to_string(&p) else { continue };
-        let Ok(v) = serde_json::from_str::<Value>(&s) else { continue };
-        // 优先读新格式 auth.accessToken + account.uid
-        let token = v.get("auth")
-            .and_then(|a| a.get("accessToken"))
-            .and_then(|t| t.as_str())
-            .map(|s| s.to_string());
-        let uid = v.get("account")
-            .and_then(|a| a.get("uid"))
-            .and_then(|u| u.as_str())
-            .map(|s| s.to_string());
-        if let (Some(uid), Some(token)) = (uid, token) {
-            let nick = v.get("account")
-                .and_then(|a| a.get("nickname"))
-                .and_then(|x| x.as_str())
-                .map(|s| s.to_string());
-            return Some((uid, nick, token));
-        }
-        // 兜底：旧格式顶层 account + allAccounts
-        let token2 = v.get("auth")
-            .and_then(|a| a.get("accessToken"))
-            .and_then(|t| t.as_str())
-            .map(|s| s.to_string())
-            .or_else(|| v.get("account").and_then(|a| a.get("accessToken")).and_then(|t| t.as_str()).map(|s| s.to_string()));
-        let uid2 = v.get("account").and_then(|a| a.get("uid")).and_then(|u| u.as_str()).map(|s| s.to_string());
-        if let (Some(uid), Some(token)) = (uid2, token2) {
-            let nick = v.get("account").and_then(|a| a.get("nickname")).and_then(|x| x.as_str()).map(|s| s.to_string());
-            return Some((uid, nick, token));
-        }
-    }
-    None
-}
-
-/// 「浏览器/客户端登录后自动捕获」：读取 WorkBuddy 客户端当前已登录会话，
-/// 把它登记进中枢自己的登录态文件（workbuddy-desktop.info 的 allAccounts）并生成可切换的
-/// vault 快照，使该账号立即可在中枢侧边栏显示、且可一键切换。
-///
-/// 这是实现「在浏览器用手机号登录后，登录态自动保存在软件内、可随时切换」的核心：
-/// WorkBuddy 客户端的登录流程就是「拉起系统浏览器 → 手机号/微信验证 → 客户端通过
-/// 私有协议收回 token 写回 auth.info」，中枢只需读取该文件并捕获进自己的 vault 即可，
-/// 无需逆向登录接口、无合规风险。
-pub fn capture_current_session(vault: &Path) -> Result<AddAccountResult, String> {
-    let (uid, nick, token) = read_client_session()
-        .ok_or_else(|| "尚未检测到已登录会话。请先通过 WorkBuddy 客户端（或本软件「官方登录」）在浏览器完成手机号登录。".to_string())?;
-    // 复用 add_account 写入中枢登录态 + 生成 vault 快照（可切换）
-    let r = add_account(vault, &uid, nick.as_deref(), Some(&token), true)?;
-    Ok(r)
 }
 
 /// 读取某个账号快照中的昵称（vault/<uid>/snapshot/local_storage 登记表或 auth.info 兜底）
