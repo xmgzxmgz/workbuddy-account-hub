@@ -441,6 +441,15 @@ fn open_browser_login() -> Result<(), String> {
     ops::open_browser_login()
 }
 
+/// 「浏览器/客户端登录后自动捕获」：把 WorkBuddy 客户端当前已登录会话
+/// 捕获进中枢（写 allAccounts + 生成可切换 vault 快照）。
+#[tauri::command]
+fn capture_current_session() -> Result<Value, String> {
+    let vault = ops::vault_dir();
+    let r = ops::capture_current_session(&vault)?;
+    Ok(serde_json::to_value(r).unwrap_or(Value::Null))
+}
+
 #[tauri::command]
 fn app_running() -> bool {
     ops::is_workbuddy_running()
@@ -488,6 +497,7 @@ pub fn run() {
             add_account,
             launch_official_login,
             open_browser_login,
+            capture_current_session,
             restart_workbuddy,
             app_running,
             list_backups,
