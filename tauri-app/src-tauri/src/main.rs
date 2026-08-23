@@ -426,13 +426,6 @@ fn restart_workbuddy() -> Result<(), String> {
     ops::launch_workbuddy()
 }
 
-/// 「用 WorkBuddy 官方登录」：拉起/聚焦官方客户端，由用户在客户端里用手机号+验证码登录。
-#[tauri::command]
-fn launch_official_login() -> Result<Value, String> {
-    let r = ops::launch_official_login()?;
-    Ok(serde_json::to_value(r).unwrap_or(Value::Null))
-}
-
 #[tauri::command]
 fn app_running() -> bool {
     ops::is_workbuddy_running()
@@ -478,7 +471,6 @@ pub fn run() {
             backup_all,
             switch_account,
             add_account,
-            launch_official_login,
             restart_workbuddy,
             app_running,
             list_backups,
