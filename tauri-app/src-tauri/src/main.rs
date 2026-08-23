@@ -1,3 +1,6 @@
+// 隐藏 Windows 启动时的控制台（CLI）窗口：Tauri 是 GUI 程序，默认不带控制台子系统会弹黑框
+#![cfg_attr(windows, windows_subsystem = "windows")]
+
 // WorkBuddy 账户中枢 — Tauri 2 桌面端（纯 Rust 实现，无 Node 依赖）
 //
 // 职责：
@@ -434,6 +437,11 @@ fn launch_official_login() -> Result<Value, String> {
 }
 
 #[tauri::command]
+fn open_browser_login() -> Result<(), String> {
+    ops::open_browser_login()
+}
+
+#[tauri::command]
 fn app_running() -> bool {
     ops::is_workbuddy_running()
 }
@@ -479,6 +487,7 @@ pub fn run() {
             switch_account,
             add_account,
             launch_official_login,
+            open_browser_login,
             restart_workbuddy,
             app_running,
             list_backups,
