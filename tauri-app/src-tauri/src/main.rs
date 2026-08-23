@@ -414,6 +414,12 @@ fn restart_workbuddy() -> Result<(), String> {
     ops::launch_workbuddy()
 }
 
+/// 重启整个账户中枢（切换账号后由前端在确认 WorkBuddy 无任务运行时调用）
+#[tauri::command]
+fn restart_self(app: tauri::AppHandle) {
+    app.restart();
+}
+
 #[tauri::command]
 fn app_running() -> bool {
     ops::is_workbuddy_running()
@@ -459,6 +465,7 @@ pub fn run() {
             backup_all,
             switch_account,
             restart_workbuddy,
+            restart_self,
             app_running,
             list_backups,
             backup_detail,

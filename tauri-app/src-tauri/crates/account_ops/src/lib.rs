@@ -25,6 +25,8 @@ pub struct AccountInfo {
 #[derive(Serialize)]
 pub struct SwitchResult {
     pub restart_required: bool,
+    pub restart_workbuddy: bool,
+    pub aggregate_id: String,
     pub message: String,
     pub uid: String,
 }
@@ -101,6 +103,15 @@ pub fn auth_file() -> Option<PathBuf> {
 pub fn vault_dir() -> PathBuf {
     home().join(".workbuddy-account-hub").join("vault")
 }
+
+/// ⚠️ 历史警示（已彻底移除实现）：
+/// 曾有一个 `rewrite_sessions_to_aggregate` 函数会把 workbuddy.db 的 sessions.user_id
+/// 改写成某个 uid，用于「多账号会话合并」。该做法在 Windows 上会导致：
+///   1) 会话归属信息被永久混淆、无法还原「原属哪个账号」；
+///   2) 每次切换都把全部对话搬给目标账号，造成对话被改乱。
+/// WorkBuddy 在 Windows 上以登录态 token 的 `sub` 隔离会话，两个账号本就该各看各的对话。
+/// **切换 = 只换登录态（真实 token + 真实 uid），绝不改写会话库。** 故此处不再提供实现。
+
 
 /// 读取登录态文件中的当前 uid
 pub fn current_uid() -> Option<String> {
@@ -339,6 +350,28 @@ fn dir_size(p: &Path) -> u64 {
         }
     }
     total
+}
+
+/// 轻量备份：只复制登录态文件 auth.info 到 history/<ts>/（不复制整个 local_storage）。
+/// 用于「切换前备份当前账号」——切换本质是换 auth.info 里的 account 指向，
+/// local_storage 登记表与账号切换弱相关（整体覆盖反而会破坏登记表、丢对话），
+/// 因此切换前只需留一份登录态快照即可回滚，避免几十 MB 的整目录同步深拷贝拖慢切换。
+/// 真正的完整备份（含 local_storage）仍由 snapshot_current / backup_all 负责，不影响可追溯性。
+fn backup_auth_only(vault: &Path, uid: &str) -> Result<(), String> {
+    let Some(af) = auth_file() else {
+        return Err("未找到当前登录态文件，无法备份".into());
+    };
+    let ts = chrono_now();
+    let hist_dest = vault.join(uid).join("history").join(&ts);
+    std::fs::create_dir_all(&hist_dest).map_err(|e| e.to_string())?;
+    std::fs::copy(&af, hist_dest.join("auth.info")).map_err(|e| e.to_string())?;
+    // 同步刷新 canonical snapshot/ 供下次切回（仅 auth.info，不复制 local_storage）
+    let snap_dest = vault.join(uid).join("snapshot");
+    let _ = std::fs::remove_dir_all(&snap_dest);
+    std::fs::create_dir_all(&snap_dest).map_err(|e| e.to_string())?;
+    std::fs::copy(&af, snap_dest.join("auth.info")).map_err(|e| e.to_string())?;
+    cleanup_history(vault, uid);
+    Ok(())
 }
 
 /// 快照当前账号（local_storage + 登录态文件）到 vault/<uid>/history/<ts>/（多版本），
@@ -608,24 +641,46 @@ fn chrono_now() -> String {
 /// 为「已在登录态 allAccounts 中、但尚无 vault 快照」的账号即时生成一份快照，
 /// 使「一键切换」对任意登录过的账号都可用（无需先手动快照）。
 /// 做法：用当前共享 local_storage 作为该账号的 local_storage（切换只换 auth，不动它），
-/// 用 allAccounts 中该账号的登录态条目构造 snapshot/auth.info。
+/// 用 allAccounts 中该账号的【真实】登录态条目构造 snapshot/auth.info。
+///
+/// ⚠️ 关键修复（防止昵称串号）：生成快照时**只用官方 allAccounts 里匹配 uid 的真实条目**，
+/// 绝不回退到当前 `account`（那是另一个账号，用它造目标账号快照会把昵称也写成别的账号的）。
+/// 若 allAccounts 里找不到该 uid（官方压缩场景），仅保留 uid、昵称留空，由 list_accounts
+/// 用其他来源兜底，绝不编造错误昵称。
 fn materialize_snapshot_for(vault: &Path, uid: &str) -> Result<(), String> {
     let Some(af) = auth_file() else {
         return Err("未找到当前登录态文件，无法生成快照".into());
     };
     let s = std::fs::read_to_string(&af).map_err(|e| format!("读取登录态失败: {e}"))?;
     let v: Value = serde_json::from_str(&s).map_err(|e| format!("登录态解析失败: {e}"))?;
+
+    // 优先取官方 allAccounts 里匹配 uid 的真实条目（含真实昵称）
     let entry = v.get("allAccounts").and_then(|a| a.as_array())
         .and_then(|arr| arr.iter().find(|x| x.get("uid").and_then(|u| u.as_str()) == Some(uid)))
-        .or_else(|| v.get("account"))
-        .cloned()
-        .ok_or_else(|| format!("登录态中找不到账号 {uid} 的条目，无法生成快照"))?;
+        .cloned();
+
+    // 仅当 allAccounts 里确实没有该 uid 时，才用最小占位（uid 真实，昵称留空，不编造假昵称）
+    let entry = match entry {
+        Some(e) => e,
+        None => {
+            // 再试 account（仅当 account.uid 正好等于目标 uid）
+            if v.get("account").and_then(|a| a.get("uid")).and_then(|u| u.as_str()) == Some(uid) {
+                v.get("account").cloned().unwrap_or_else(|| json!({ "uid": uid }))
+            } else {
+                json!({ "uid": uid })
+            }
+        }
+    };
+
     let snap = vault.join(uid).join("snapshot");
     std::fs::create_dir_all(&snap).map_err(|e| e.to_string())?;
+    // 保留官方 allAccounts 里所有真实账号条目（带真实昵称），不丢、不串
+    let all_accounts = v.get("allAccounts").and_then(|a| a.as_array()).cloned()
+        .unwrap_or_else(|| vec![entry.clone()]);
     let full = json!({
         "account": entry.clone(),
         "accounts": [entry.clone()],
-        "allAccounts": [entry],
+        "allAccounts": all_accounts,
     });
     std::fs::write(snap.join("auth.info"), serde_json::to_string_pretty(&full).map_err(|e| e.to_string())?)
         .map_err(|e| e.to_string())?;
@@ -636,9 +691,17 @@ fn materialize_snapshot_for(vault: &Path, uid: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// 切换账号：整体换入 vault/<uid>/snapshot/。切换前会先把当前账号**自动备份**到
-/// vault/<uid>/history/<ts>/（统一历史备份，替代旧 _rollback），以免丢失当前状态的增量，
-/// 然后在写回前用当前状态覆盖历史备份（已含）。返回 restart_required 提示重启。
+/// 切换账号：切换前先【完整备份】当前账号，再换入目标登录态并合并目标登记表。
+///
+/// 三个动作（用户诉求：用别的账号积分继续原有对话，且切换前自动备份）：
+///   1. 切换前自动完整备份当前账号（local_storage 整目录 + 登录态）到
+///      vault/<cid>/history/<ts>/（多版本，可一键回滚），并刷新 canonical snapshot/ 作切回源；
+///   2. 合并式切换登录态（改 workbuddy-desktop.info 的 account/accounts/allAccounts 指向目标，
+///      保留所有账号登记），使额度/积分随目标 uid 走；
+///   3. 合并目标账号登记表(entry_*.info)进当前 local_storage（仅目标 uid 那条，不破坏其他账号）。
+///
+/// 会话/记忆(workbuddy.db、sessions、memory)是全局共享的，本函数不触碰——
+/// 切登录态后原对话自然可见，无需搬动，这正是"合并到一个 ID 下"的落地点。
 pub fn switch_account(vault: &Path, uid: &str) -> Result<SwitchResult, String> {
     // 切换前若 WorkBuddy 在运行，先优雅退出（避免退出时回写覆盖 local_storage/登录态）
     if is_workbuddy_running() {
@@ -652,16 +715,19 @@ pub fn switch_account(vault: &Path, uid: &str) -> Result<SwitchResult, String> {
         materialize_snapshot_for(vault, uid)?;
     }
 
-    // 切换前自动保存当前账号：历史备份（可追溯）+ canonical snapshot/（切回源）。
+    // 切换前自动【完整备份】当前账号：local_storage 整目录 + 登录态文件，
+    // 写入 vault/<cid>/history/<ts>/（多版本，可一键回滚），并同步刷新 canonical snapshot/
+    // 作为"切回源"。用户明确要求切换前完整备份，故此处用 take_snapshot_to 而非轻量版。
     // canonical snapshot/ 必须在每次切换时同步刷新，否则切到别处后原账号没有
     // 登录态源（vault/<uid>/snapshot），永远切不回来。这正是"一键切回"的关键。
     let cur_uid = current_uid();
     if let Some(cid) = &cur_uid {
         if cid != uid {
-            let hist_dest = vault.join(cid).join("history").join(chrono_now());
+            let ts = chrono_now();
+            let hist_dest = vault.join(cid).join("history").join(&ts);
             std::fs::create_dir_all(&hist_dest).map_err(|e| e.to_string())?;
             let _ = take_snapshot_to(cid, &hist_dest);
-            // 同步刷新 canonical snapshot/ 供下次切换使用（与 snapshot_current 行为一致）
+            // 同步刷新 canonical snapshot/（含完整 local_storage + auth.info）
             let snap_dest = vault.join(cid).join("snapshot");
             let _ = std::fs::remove_dir_all(&snap_dest);
             if std::fs::create_dir_all(&snap_dest).is_ok() {
@@ -679,48 +745,67 @@ pub fn switch_account(vault: &Path, uid: &str) -> Result<SwitchResult, String> {
     }
 
     // 写入目标登录态：合并式切换（保留 allAccounts 所有账号登记，只把 account 指向目标账号）
-    // 不再整体覆盖 local_storage（公共 leveldb export，与账号切换弱相关，覆盖会破坏登记表并丢对话）
     let src_auth = src.join("auth.info");
     if src_auth.exists() {
         switch_auth_to(&src_auth, uid)?;
     }
 
-    // 自动重启 WorkBuddy 使新登录态生效（等退出完全后再启动，避免冲突）
-    std::thread::sleep(std::time::Duration::from_millis(800));
-    let _ = launch_workbuddy();
+    // 合并目标账号的登记表(entry_*.info)进当前 local_storage：让"当前账号身份"真正换成目标账号
+    // （用它的积分/额度），同时保留其他账号的登记表条目（合并而非覆盖）。
+    if let Some(cid) = &cur_uid {
+        if cid != uid {
+            merge_local_storage_entries(&src.join("local_storage"), uid);
+        }
+    }
 
+    // ===== 会话库说明（重要，避免再次破坏数据）=====
+    // WorkBuddy 在 Windows 上以登录态 token 的 `sub` 识别身份，并以该 uid 查询会话库
+    // (workbuddy.db 的 sessions.user_id)。两个账号的对话**本就该各自隔离**，切换账号
+    // 只需换登录态（真实 token + 真实 uid），WorkBuddy 启动后即显示该账号自己的对话。
+    //
+    // 因此本函数【绝不改写 workbuddy.db 的 sessions.user_id】—— 任何把多账号会话
+    // 强行改写到同一 uid 的「合并」尝试，都会永久丢失会话归属信息、且切换时把全部
+    // 对话搬给目标账号，正是此前对话被改乱的根因。切换 = 换登录态，仅此而已。
+
+    // 切换后由前端在确认 WorkBuddy 无任务运行后，调用 restart_workbuddy 重启 WorkBuddy 生效
+    // （不是重启中枢——中枢重启会丢当前界面状态，且 WorkBuddy 自身需以新登录态重启）。
     Ok(SwitchResult {
-        restart_required: false,
-        message: "已切换到目标账号并自动重启 WorkBuddy".to_string(),
+        restart_required: true,
+        restart_workbuddy: true,
+        aggregate_id: String::new(),
+        message: format!("已切换到目标账号（{}），准备重启 WorkBuddy 生效", uid),
         uid: uid.to_string(),
     })
 }
 
 /// 把当前登录态切换为快照 auth（目标账号）。
-/// 采用**合并式**：只把 account/accounts 指向目标账号，并**保留/合并 allAccounts**
-/// 中所有曾出现过的账号（当前账号 + 目标账号都在列表里），防止切换后原账号消失无法切回。
-/// 保留无关字段（auth.token 等随目标快照整体带入，以激活目标登录态）。
+///
+/// ⚠️ 关键约束（修复「切换后还是原账号 / 昵称被覆盖」）：
+///   登录态文件里的 **uid 必须与 accessToken.sub 完全一致**（WorkBuddy 以 token.sub 认人）。
+///   因此本函数【绝不改写 uid】，只把 account/accounts/allAccounts 指向目标账号【真实 uid】，
+///   并保留 allAccounts 中其他账号的【真实 uid + 真实昵称】条目（合并而非覆盖），
+///   使两个账号在登录态里都真实存在、可互相切回，且昵称不被污染。
 fn switch_auth_to(src_auth: &Path, uid: &str) -> Result<(), String> {
     let src_s = std::fs::read_to_string(src_auth).map_err(|e| format!("读取目标登录态失败: {e}"))?;
-    let mut target: serde_json::Value =
+    let target: serde_json::Value =
         serde_json::from_str(&src_s).map_err(|e| format!("目标登录态 JSON 解析失败: {e}"))?;
 
-    // 目标账号身份（从快照 allAccounts/account 里提取，作为登记表条目）
+    // 目标账号真实身份（快照里的 account 条目，uid 保持真实值，不改写）
     let acc_entry = target.get("account")
         .cloned()
         .unwrap_or_else(|| json!({ "uid": uid }));
 
-    let mut target_uid = target.get("account").and_then(|a| a.get("uid")).and_then(|u| u.as_str())
+    // 目标账号真实 uid（来自快照，不修正、不聚合）
+    let target_uid = target.get("account").and_then(|a| a.get("uid")).and_then(|u| u.as_str())
         .unwrap_or(uid).to_string();
-    if target_uid.is_empty() { target_uid = uid.to_string(); }
 
-    // 目标账号在快照 allAccounts 中的条目（带昵称等）
+    // 目标账号在快照 allAccounts 中的完整条目（带真实昵称等）
     let target_entry = target.get("allAccounts").and_then(|a| a.as_array())
         .and_then(|arr| arr.iter().find(|x| x.get("uid").and_then(|u| u.as_str()) == Some(target_uid.as_str())))
         .cloned()
         .unwrap_or_else(|| acc_entry.clone());
 
-    // 读取当前登录态，取出它登记过的账号列表
+    // 读取【当前登录态】里已经登记过的所有账号条目（保留其他账号的真实 uid + 昵称）
     let mut all: Vec<serde_json::Value> = Vec::new();
     if let Some(af) = auth_file() {
         if let Ok(cur_s) = std::fs::read_to_string(&af) {
@@ -729,37 +814,64 @@ fn switch_auth_to(src_auth: &Path, uid: &str) -> Result<(), String> {
                     all = cur_arr.clone();
                 }
             }
-        } else if let Some(parent) = af.parent() {
-            std::fs::create_dir_all(parent).ok();
         }
     }
-    // 合并：去掉 uid 重复的旧条目，统一替换为目标/当前最新条目
-    let mut merge = |entry: &serde_json::Value| {
-        if let Some(uidv) = entry.get("uid").and_then(|u| u.as_str()) {
-            all.retain(|x| x.get("uid").and_then(|u| u.as_str()) != Some(uidv));
-            all.push(entry.clone());
-        }
-    };
-    // 先把当前登记的所有账号保留（除了目标外，其余沿用当前条目）
-    // 再放入目标账号条目
-    merge(&target_entry);
+    // 合并：按真实 uid 去重，目标账号用快照里的最新真实条目覆盖，其余账号原样保留
+    all.retain(|x| x.get("uid").and_then(|u| u.as_str()) != Some(target_uid.as_str()));
+    all.push(target_entry.clone());
 
-    target["allAccounts"] = Value::Array(all);
+    // 构造写回的登录态：以目标快照为骨架（含目标真实 token），仅 allAccounts 合并了其他账号
+    let mut out = target.clone();
+    out["allAccounts"] = Value::Array(all);
+    out["account"] = acc_entry.clone();
+    // accounts 数组：放目标账号真实条目（单元素；WorkBuddy 多账号切换实际看 allAccounts）
+    out["accounts"] = Value::Array(vec![target_entry.clone()]);
 
-    // 确保 account / accounts[0?] 指向目标账号。accounts 是数组，把当前账号条目也纳入。
-    target["account"] = acc_entry.clone();
-    // accounts 数组：替换为 [目标账号条目]（若快照里有则用快照的，否则用目标条目）
-    if target.get("accounts").is_none() || target["accounts"].as_array().map(|a| a.is_empty()).unwrap_or(true) {
-        target["accounts"] = Value::Array(vec![target_entry.clone()]);
-    }
-
-    // 写回当前登录态文件
+    // 写回当前登录态文件（uid 保持真实，token 为目标真实 token）
     if let Some(af) = auth_file() {
-        let s = serde_json::to_string_pretty(&target).map_err(|e| format!("序列化失败: {e}"))?;
+        let s = serde_json::to_string_pretty(&out).map_err(|e| format!("序列化失败: {e}"))?;
         std::fs::write(&af, s).map_err(|e| format!("写入登录态失败: {e}"))?;
         Ok(())
     } else {
         Err("未找到当前登录态文件".into())
+    }
+}
+
+/// 合并目标账号的登记表(entry_*.info)进当前 local_storage。
+///
+/// 行为（保守合并，绝不破坏其他账号）：
+///   - 遍历目标快照 `snapshot/local_storage` 下的 `entry_*.info`；
+///   - 仅挑出 `userId == uid`（目标账号）的条目复制进当前 local_storage（覆盖同名 hash 文件，新增则创建）；
+///   - 其他账号的 entry 不动；若目标快照里没有该 uid 的 entry（常见，因为快照是共享登记表），
+///     则跳过——交给 WorkBuddy 重启后以新登录态自建当前账号 entry。
+///
+/// 会话/记忆(workbuddy.db、sessions、memory)是全局共享的，本函数不触碰，切换登录态后自然可见，
+/// 这正是"用别的账号积分继续原对话"的实现路径（额度随登录态 uid 走，对话随共享库走）。
+fn merge_local_storage_entries(src_ls: &Path, uid: &str) {
+    let Some(target_uid) = Some(uid.to_string()) else { return; };
+    let dst = local_storage_dir();
+    if !src_ls.exists() { return; }
+    if let Ok(rd) = std::fs::read_dir(src_ls) {
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.extension().and_then(|s| s.to_str()) != Some("info") { continue; }
+            let name = p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+            // 只处理 entry_ 开头（账号登记表），跳过 wb_entry_ 等
+            if !name.starts_with("entry_") { continue; }
+            let Ok(s) = std::fs::read_to_string(&p) else { continue; };
+            let Ok(arr) = serde_json::from_str::<Vec<serde_json::Value>>(&s) else { continue; };
+            let mut is_target = false;
+            for item in &arr {
+                if item.get("userId").and_then(|x| x.as_str()) == Some(target_uid.as_str()) {
+                    is_target = true;
+                    break;
+                }
+            }
+            if is_target {
+                let _ = std::fs::create_dir_all(&dst);
+                let _ = std::fs::copy(&p, dst.join(&name));
+            }
+        }
     }
 }
 
@@ -843,14 +955,30 @@ pub fn workbuddy_exe() -> Option<PathBuf> {
 
 pub fn launch_workbuddy() -> Result<(), String> {
     if cfg!(target_os = "macos") {
-        Command::new("open").args(["-a", "WorkBuddy"]).output().map(|_| ()).map_err(|e| e.to_string())
+        // `open -a` 异步启动，不阻塞
+        Command::new("open").args(["-a", "WorkBuddy"]).spawn().map(|_| ()).map_err(|e| e.to_string())
     } else if cfg!(target_os = "windows") {
-        // 优先用精确 exe 路径启动（不依赖 PATH 是否注册 WorkBuddy）
+        // ⚠️ 关键修复：必须用 spawn() 异步启动，绝不能 .output()/.status() —— 后者会
+        // 同步等待 WorkBuddy 子进程退出，而 WorkBuddy 是常驻 GUI 不会退出，导致后端
+        // 命令卡死、整个中枢 IPC 无响应，表现为「点切换后 WorkBuddy 没启动」。
+        //
+        // 方案：优先用精确 exe 路径 + `cmd /c start "" "exe"` 启动（start 会立即返回，
+        // 真正把 WB 放到独立进程树里，不受本进程退出影响）；找不到路径时退回
+        // `cmd /c start WorkBuddy` 走系统关联。
         if let Some(exe) = workbuddy_exe() {
-            Command::new(&exe).output().map(|_| ()).map_err(|e| e.to_string())
+            let exe_str = exe.to_string_lossy().to_string();
+            Command::new("cmd")
+                .args(["/c", "start", "", &exe_str])
+                .spawn()
+                .map(|_| ())
+                .map_err(|e| format!("启动 WorkBuddy 失败（{}）: {}", exe_str, e))
         } else {
-            // 兜底：靠系统关联/ PATH 启动
-            Command::new("cmd").args(["/c", "start", "", "WorkBuddy"]).output().map(|_| ()).map_err(|e| e.to_string())
+            // 兜底：靠系统关联 / PATH 启动
+            Command::new("cmd")
+                .args(["/c", "start", "", "WorkBuddy"])
+                .spawn()
+                .map(|_| ())
+                .map_err(|e| format!("启动 WorkBuddy 失败（未找到安装路径）: {}", e))
         }
     } else {
         Err("当前平台不支持启动 WorkBuddy".into())
