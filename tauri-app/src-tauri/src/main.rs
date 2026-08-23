@@ -1,5 +1,9 @@
 // WorkBuddy 账户中枢 — Tauri 2 桌面端（纯 Rust 实现，无 Node 依赖）
 //
+// 隐藏 Windows 控制台窗口（GUI 程序默认若不加此属性会弹黑框）
+#![cfg_attr(windows, windows_subsystem = "windows")]
+//
+
 // 职责：
 //   - 账号枚举 / 快照 / 切换：account_ops（保留每个账号登录态，参考 CC Switch）
 //   - 仪表盘数据（额度/签到/记忆/JWT/环境/本地目录）：wb_api（直连官方接口）
@@ -9,8 +13,6 @@
 
 use account_ops as ops;
 use serde_json::{json, Value};
-use std::process::Command;
-use tauri::Manager;
 use wb_api as api;
 
 #[tauri::command]
@@ -407,20 +409,6 @@ fn switch_account(uid: String) -> Result<Value, String> {
     Ok(serde_json::to_value(r).unwrap_or(Value::Null))
 }
 
-/// 软件内「添加账号」：把账号登记写入本机 WorkBuddy 登录态文件 allAccounts，
-/// 可选附带 accessToken 并生成可切换的 vault 快照。
-#[tauri::command]
-fn add_account(
-    uid: String,
-    nickname: Option<String>,
-    token: Option<String>,
-    make_snapshot: Option<bool>,
-) -> Result<Value, String> {
-    let snap = make_snapshot.unwrap_or(true);
-    let r = ops::add_account(&ops::vault_dir(), &uid, nickname.as_deref(), token.as_deref(), snap)?;
-    Ok(serde_json::to_value(r).unwrap_or(Value::Null))
-}
-
 #[tauri::command]
 fn restart_workbuddy() -> Result<(), String> {
     ops::launch_workbuddy()
@@ -470,7 +458,6 @@ pub fn run() {
             ensure_snapshot,
             backup_all,
             switch_account,
-            add_account,
             restart_workbuddy,
             app_running,
             list_backups,
