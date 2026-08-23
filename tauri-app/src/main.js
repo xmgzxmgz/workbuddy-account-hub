@@ -426,33 +426,6 @@ async function saveAddAccount() {
     err.textContent = '添加失败: ' + e; err.style.display = 'block';
   }
 }
-// ===== 用 WorkBuddy 官方登录（拉起客户端 → 用户手机号登录 → 刷新发现新账号）=====
-function openOfficialLogin() {
-  $('ol-msg').textContent = '';
-  $('ol-err').style.display = 'none';
-  $('official-login-modal').classList.add('show');
-  // 立即拉起/聚焦 WorkBuddy 客户端
-  invoke('launch_official_login').then(r => {
-    if (r && r.message) $('ol-msg').textContent = r.message;
-  }).catch(e => {
-    $('ol-err').textContent = '拉起 WorkBuddy 失败: ' + e;
-    $('ol-err').style.display = 'block';
-  });
-}
-function closeOfficialLogin() { $('official-login-modal').classList.remove('show'); }
-async function officialLoginLaunched() {
-  // 用户确认已在客户端完成手机号登录：刷新列表，让新账号出现在侧边栏
-  closeOfficialLogin();
-  toast('正在刷新账号列表…');
-  try {
-    refreshAccounts();
-    // 多等一会，确保客户端已把登录态写回 workbuddy-desktop.info
-    setTimeout(() => loadAll(), 800);
-  } catch (e) {
-    toast('刷新失败: ' + e);
-  }
-}
-
 async function switchTo(uid) {
   // 一键切换：切换前自动备份当前账号 → 写入目标登录态 → 自动重启 WorkBuddy 生效。
   // 若 WorkBuddy 当前正在运行且有任务在跑，先弹软件内确认框提示「正在关闭，任务会被中断」。
@@ -1327,7 +1300,7 @@ async function restartWB() {
 
 // 暴露给 inline onclick（安全：未定义的函数跳过，不影响其余，更不阻断 bootBootstrap）
 (function expose(){
-  const names = ['addModel','editModel','delModel','testModel','testCurrentForm','saveModel','closeModelModal','restartWB','loadAll','loadQuota','doCheckin','openReport','closeReport','copyReport','ensureSnapshot','backupAll','confirmSwitchYes','confirmSwitchNo','switchTo','openBackups','renderBackups','openBackupDetail','closeBackups','closeBackupDetail','loadBuddy','buddyDepart','buddyClaim','openAddAccount','closeAddAccount','saveAddAccount','openOfficialLogin','closeOfficialLogin','officialLoginLaunched'];
+  const names = ['addModel','editModel','delModel','testModel','testCurrentForm','saveModel','closeModelModal','restartWB','loadAll','loadQuota','doCheckin','openReport','closeReport','copyReport','ensureSnapshot','backupAll','confirmSwitchYes','confirmSwitchNo','switchTo','openBackups','renderBackups','openBackupDetail','closeBackups','closeBackupDetail','loadBuddy','buddyDepart','buddyClaim','openAddAccount','closeAddAccount','saveAddAccount'];
   for (const n of names) {
     try {
       const fn = eval(n);
