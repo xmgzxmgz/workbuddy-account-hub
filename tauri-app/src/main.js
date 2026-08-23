@@ -394,6 +394,17 @@ async function ensureSnapshot() {
   try { await invoke('ensure_snapshot'); } catch (e) { /* 无登录态时忽略 */ }
 }
 
+// 手动保存「当前官方登录账号」的登录态（accessToken 等）到中枢保险库，
+// 使其可切换/可备份。适用于：在官方客户端刚登录某账号后，点一下即可固化。
+async function saveCurrentLogin() {
+  try {
+    const m = await invoke('snapshot_current');
+    if (!m || m.uid == null) { toast('未读取到当前登录账号'); return; }
+    toast('已保存当前账号登录态：' + (m.uid || '') + (m.auth_included ? '（含 token）' : ''));
+    refreshAccounts();
+  } catch (e) { toast('保存失败: ' + e); }
+}
+
 // ===== 账号切换 =====
 async function switchTo(uid) {
   // 一键切换：切换前自动备份当前账号 → 写入目标登录态 → 自动重启 WorkBuddy 生效。
@@ -1269,7 +1280,7 @@ async function restartWB() {
 
 // 暴露给 inline onclick（安全：未定义的函数跳过，不影响其余，更不阻断 bootBootstrap）
 (function expose(){
-  const names = ['addModel','editModel','delModel','testModel','testCurrentForm','saveModel','closeModelModal','restartWB','loadAll','loadQuota','doCheckin','openReport','closeReport','copyReport','ensureSnapshot','backupAll','confirmSwitchYes','confirmSwitchNo','switchTo','openBackups','renderBackups','openBackupDetail','closeBackups','closeBackupDetail','loadBuddy','buddyDepart','buddyClaim'];
+  const names = ['addModel','editModel','delModel','testModel','testCurrentForm','saveModel','closeModelModal','restartWB','loadAll','loadQuota','doCheckin','openReport','closeReport','copyReport','ensureSnapshot','backupAll','saveCurrentLogin','confirmSwitchYes','confirmSwitchNo','switchTo','openBackups','renderBackups','openBackupDetail','closeBackups','closeBackupDetail','loadBuddy','buddyDepart','buddyClaim'];
   for (const n of names) {
     try {
       const fn = eval(n);
