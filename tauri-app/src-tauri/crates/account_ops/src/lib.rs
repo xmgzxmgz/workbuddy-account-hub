@@ -42,8 +42,17 @@ pub struct BackupMeta {
     pub is_latest: bool,
 }
 
+/// 用户主目录。Windows 桌面 GUI 进程通常不设置 `$HOME`，故 Windows 优先用 `$USERPROFILE`
+/// （指向 C:\Users\<user>），否则会 fallback 成进程当前工作目录「.」，导致 vault / local_storage
+/// 被写到错误位置、快照与枚举全部失效。macOS 用 `$HOME`。
 fn home() -> PathBuf {
-    PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".into()))
+    if cfg!(target_os = "windows") {
+        PathBuf::from(
+            std::env::var("USERPROFILE").unwrap_or_else(|_| ".".into()),
+        )
+    } else {
+        PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".into()))
+    }
 }
 
 /// WorkBuddy 本地数据根
@@ -65,8 +74,11 @@ pub fn local_storage_dir() -> PathBuf {
 pub fn auth_file() -> Option<PathBuf> {
     let candidates: Vec<PathBuf> = if cfg!(target_os = "windows") {
         let local = PathBuf::from(
-            std::env::var("LOCALAPPDATA")
-                .unwrap_or_else(|_| home().join("AppData").join("Local").to_string_lossy().into_owned()),
+            std::env::var("LOCALAPPDATA").unwrap_or_else(|_| {
+                std::env::var("USERPROFILE")
+                    .map(|u| PathBuf::from(u).join("AppData").join("Local").to_string_lossy().into_owned())
+                    .unwrap_or_else(|_| ".".into())
+            }),
         );
         vec![
             local.join("CodeBuddyExtension").join("Data").join("Public").join("auth").join("workbuddy-desktop.info"),
@@ -809,8 +821,11 @@ pub fn workbuddy_exe() -> Option<PathBuf> {
         if p.exists() { Some(p) } else { None }
     } else if cfg!(target_os = "windows") {
         let local = PathBuf::from(
-            std::env::var("LOCALAPPDATA")
-                .unwrap_or_else(|_| home().join("AppData").join("Local").to_string_lossy().into_owned()),
+            std::env::var("LOCALAPPDATA").unwrap_or_else(|_| {
+                std::env::var("USERPROFILE")
+                    .map(|u| PathBuf::from(u).join("AppData").join("Local").to_string_lossy().into_owned())
+                    .unwrap_or_else(|_| ".".into())
+            }),
         );
         let program_files = std::env::var("ProgramFiles").unwrap_or_else(|_| "C:\\Program Files".into());
         let program_files_x86 =
