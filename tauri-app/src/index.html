@@ -156,8 +156,10 @@
     .banner{background:#1c2a1c;border:1px solid var(--green);color:#bff;padding:12px 14px;border-radius:10px;margin-bottom:14px;display:none;align-items:center;gap:12px;}
     .banner.show{display:flex;}
     .banner button{margin-left:auto;}
-    .toast{position:fixed;left:50%;bottom:24px;transform:translateX(-50%);background:#222a36;border:1px solid var(--line);padding:10px 16px;border-radius:10px;font-size:13px;opacity:0;transition:opacity .2s;pointer-events:none;z-index:60;}
-    .toast.show{opacity:1;}
+    .toast{position:fixed;right:18px;bottom:18px;max-width:340px;background:#222a36;border:1px solid var(--line);padding:11px 16px;border-radius:10px;font-size:13px;line-height:1.5;opacity:0;transform:translateY(8px);transition:opacity .25s,transform .25s;pointer-events:none;z-index:60;box-shadow:0 6px 24px rgba(0,0,0,.4);}
+    .toast.show{opacity:1;transform:translateY(0);}
+    .toast.ok{border-color:rgba(39,192,138,.5);}
+    .toast.err{border-color:rgba(255,92,92,.5);}
     /* 历史备份 */
     .bk-row{display:flex;align-items:center;gap:10px;padding:9px 10px;border:1px solid var(--line);border-radius:9px;margin-bottom:7px;background:#131820;}
     .bk-dot{width:8px;height:8px;border-radius:50%;background:var(--blue);flex-shrink:0;}
