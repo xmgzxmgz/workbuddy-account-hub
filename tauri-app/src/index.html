@@ -235,8 +235,11 @@
     <h3>已登记账号</h3>
     <div id="acc-list"><div class="empty">加载中…</div></div>
     <div style="margin:4px 6px 10px;display:flex;gap:8px;">
-      <button class="mini" style="flex:1;justify-content:center;" onclick="backupAll()">💾 备份所有账号</button>
+      <button class="mini" style="flex:1;justify-content:center;" onclick="saveCurrentLogin()" title="把官方客户端当前登录的账号登录态（含 token）保存到中枢，便于切换/备份">💾 保存当前登录态</button>
       <button class="mini secondary" style="justify-content:center;" onclick="openBackups()" title="查看历史备份">历史</button>
+    </div>
+    <div style="margin:0 6px 10px;display:flex;gap:8px;">
+      <button class="mini secondary" style="flex:1;justify-content:center;" onclick="backupAll()">📦 备份所有账号</button>
     </div>
 
     <h3>本地数据目录</h3>
