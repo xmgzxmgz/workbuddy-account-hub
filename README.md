@@ -46,6 +46,7 @@
 | AI 记忆画像 | 按 `## 标题` 折叠展示，整段隐私默认高斯模糊 | ✅ 稳定 |
 | 本机环境 | 客户端版本、构建号、安装大小、平台 / 架构 | ✅ 稳定 |
 | API 模型管理 | 自定义 key 增删改测 / 官方渠道 / 当前使用探测 / 重启生效 | ✅ 稳定 |
+| **软件内添加账号** | 侧边栏「＋ 添加」直接在中枢里登记 WorkBuddy 账号；填 accessToken 可立即可切换 | ✅ 新增 |
 | **全局隐私小眼睛** | 顶栏 👁 一键控制所有隐私字段（Key/UID/手机号/昵称/JWT/记忆画像/模型地址）中段模糊 | ✅ 稳定 |
 
 > 💡 **宠物自动探险**是本版新增亮点：复用 WorkBuddy「成长中心」的宠物旅行玩法，
@@ -126,11 +127,47 @@ open "/Applications/WorkBuddy Account Hub.app"
 2. 改完点顶部「重启 WorkBuddy」让配置生效
 3. 当前主程序正在使用哪个模型由顶栏探测条实时显示
 
+### 软件内添加账号
+1. 侧边栏「已登记账号」右上角点 **＋ 添加**
+2. 填 **账号 UID**（必填，唯一标识）；昵称可选
+3. **accessToken 可选**：
+   - 留空 → 仅登记到列表，切换前需先在 WorkBuddy 登录该账号
+   - 填写 → 立即生成可切换快照，**无需再登录即可一键切换**（token 通常取自另一台已登录设备的 `workbuddy-desktop.info` 里该账号条目）
+4. 添加后侧边栏立刻出现该账号；带 token 的账号会显示「切换」按钮，可直接切过去
+
+> ⚠️ 添加账号只写本机 `workbuddy-desktop.info` 的 `allAccounts`，不会向任何第三方上传凭证；
+> 不带 token 的账号若要真正使用，仍需在 WorkBuddy 客户端完成一次登录。
+
 ### 全局隐私眼睛
 - 默认状态：所有隐私字段**只露首尾 + 中段高斯模糊**
 - 点顶栏 👁 隐私 → 全部清晰（图标变 🙈），再点 → 恢复模糊
 
 ---
+
+## 🔨 从源码构建（开发 / 二次开发）
+
+> 本仓库为 Tauri 2 桌面应用，修改 Rust 或前端后需重新构建才能生效。
+
+###  prerequisites
+- Rust 工具链：`rustup` + `cargo`（<https://rustup.rs>）
+- Node.js ≥ 18（仅前端依赖）
+- Windows：系统 WebView2（通常已自带）；macOS：Xcode Command Line Tools
+
+### 构建 / 运行
+```bash
+cd tauri-app
+npm install            # 安装前端依赖（如需）
+npm run tauri dev      # 开发模式（热重载前端，Rust 改动自动重编）
+# 或打出安装包 / 便携版
+npm run tauri build
+```
+
+### 本次新增的「添加账号」涉及改动
+- `src-tauri/crates/account_ops/src/lib.rs`：新增 `add_account()`（合并写入 `allAccounts` + 可选生成 vault 快照）
+- `src-tauri/src/main.rs`：新增 `add_account` Tauri 命令并注册
+- `src/index.html` + `src/main.js`：侧边栏「＋ 添加」按钮 + 添加账号弹窗 + 前端调用
+
+
 
 ## 🔧 实现原理：为什么切换账号对话历史不丢
 
