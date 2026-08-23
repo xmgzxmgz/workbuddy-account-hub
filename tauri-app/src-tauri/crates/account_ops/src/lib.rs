@@ -901,3 +901,37 @@ pub fn launch_workbuddy() -> Result<(), String> {
         Err("当前平台不支持启动 WorkBuddy".into())
     }
 }
+
+/// 「用 WorkBuddy 官方登录」：拉起（或聚焦）WorkBuddy 桌面客户端，让用户在客户端里
+/// 用手机号+验证码 / 微信完成登录，中枢只负责把客户端拉起来并提示用户去登录。
+///
+/// 设计说明（为何不做"中枢自己发短信验证码"）：
+/// WorkBuddy 桌面客户端**没有**手机号+短信验证码的本地接口——它的登录是
+/// OAuth/外部链接流程（客户端拉起浏览器到 authUrl，用户在网页里完成手机号/微信登录，
+/// 客户端再轮询 `/auth/token` 拿 token）。发验证码的是腾讯网页服务端，不在客户端。
+/// 因此中枢不可能、也不应逆向该登录接口；正确做法是复用官方客户端自身的登录页。
+///
+/// 返回：
+/// - `was_running`：调用前 WorkBuddy 是否已在运行
+/// - `launched`：本次是否成功拉起/聚焦了客户端
+/// - `message`：给前端展示的提示
+#[derive(Serialize)]
+pub struct OfficialLoginResult {
+    pub was_running: bool,
+    pub launched: bool,
+    pub message: String,
+}
+
+pub fn launch_official_login() -> Result<OfficialLoginResult, String> {
+    let was_running = is_workbuddy_running();
+    // 先拉起/聚焦 WorkBuddy 客户端（用户在里面完成手机号登录）
+    let launched = launch_workbuddy().is_ok();
+    let message = if was_running {
+        "已聚焦 WorkBuddy，请在客户端中用手机号+验证码（或微信）登录，登录完成后点「我已登录」"
+    } else if launched {
+        "已启动 WorkBuddy，请在客户端中用手机号+验证码（或微信）登录，登录完成后点「我已登录」"
+    } else {
+        "未能自动启动 WorkBuddy，请手动打开客户端并用手机号登录，完成后点「我已登录」"
+    };
+    Ok(OfficialLoginResult { was_running, launched, message: message.to_string() })
+}
