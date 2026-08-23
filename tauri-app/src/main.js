@@ -427,22 +427,13 @@ async function saveAddAccount() {
   }
 }
 // ===== 用 WorkBuddy 官方登录（拉起客户端 → 用户手机号登录 → 刷新发现新账号）=====
-let officialLoginBrowserFallback = false;
 function openOfficialLogin() {
-  officialLoginBrowserFallback = false;
   $('ol-msg').textContent = '';
   $('ol-err').style.display = 'none';
-  const btn = $('ol-action-btn');
-  if (btn) { btn.textContent = '我已登录，刷新账号'; }
   $('official-login-modal').classList.add('show');
-  // 立即拉起/聚焦 WorkBuddy 客户端；若客户端不存在则 fallback 到浏览器登录页
+  // 立即拉起/聚焦 WorkBuddy 客户端
   invoke('launch_official_login').then(r => {
     if (r && r.message) $('ol-msg').textContent = r.message;
-    if (r && r.browser_fallback) {
-      officialLoginBrowserFallback = true;
-      const btn = $('ol-action-btn');
-      if (btn) { btn.textContent = '去添加账号（粘贴 token）'; }
-    }
   }).catch(e => {
     $('ol-err').textContent = '拉起 WorkBuddy 失败: ' + e;
     $('ol-err').style.display = 'block';
@@ -450,13 +441,8 @@ function openOfficialLogin() {
 }
 function closeOfficialLogin() { $('official-login-modal').classList.remove('show'); }
 async function officialLoginLaunched() {
-  closeOfficialLogin();
-  if (officialLoginBrowserFallback) {
-    // 浏览器登录页无法自动把 token 交回中枢，引导用户手动粘贴
-    openAddAccount();
-    return;
-  }
   // 用户确认已在客户端完成手机号登录：刷新列表，让新账号出现在侧边栏
+  closeOfficialLogin();
   toast('正在刷新账号列表…');
   try {
     refreshAccounts();
