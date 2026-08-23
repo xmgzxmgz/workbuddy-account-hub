@@ -449,18 +449,6 @@ function openOfficialLogin() {
   });
 }
 function closeOfficialLogin() { $('official-login-modal').classList.remove('show'); }
-
-// ===== 独立「浏览器登录」：不依赖 WorkBuddy 客户端，直接用浏览器打开官方登录页 =====
-function openBrowserLogin() {
-  invoke('open_browser_login').then(() => {
-    // 浏览器登录无法把 token 自动交回中枢，引导用户手动粘贴到「添加账号」
-    toast('已打开浏览器登录页，请用手机号+验证码登录');
-    setTimeout(() => openAddAccount(), 400);
-  }).catch(e => {
-    // 极端情况：连浏览器都打不开，直接提示用户手动去官网登录
-    alert('无法打开浏览器，请手动访问 https://www.workbuddy.cn/login 登录后，在「添加账号」中粘贴 accessToken。\n错误：' + e);
-  });
-}
 async function officialLoginLaunched() {
   closeOfficialLogin();
   if (officialLoginBrowserFallback) {
@@ -1353,7 +1341,7 @@ async function restartWB() {
 
 // 暴露给 inline onclick（安全：未定义的函数跳过，不影响其余，更不阻断 bootBootstrap）
 (function expose(){
-  const names = ['addModel','editModel','delModel','testModel','testCurrentForm','saveModel','closeModelModal','restartWB','loadAll','loadQuota','doCheckin','openReport','closeReport','copyReport','ensureSnapshot','backupAll','confirmSwitchYes','confirmSwitchNo','switchTo','openBackups','renderBackups','openBackupDetail','closeBackups','closeBackupDetail','loadBuddy','buddyDepart','buddyClaim','openAddAccount','closeAddAccount','saveAddAccount','openOfficialLogin','closeOfficialLogin','officialLoginLaunched','openBrowserLogin'];
+  const names = ['addModel','editModel','delModel','testModel','testCurrentForm','saveModel','closeModelModal','restartWB','loadAll','loadQuota','doCheckin','openReport','closeReport','copyReport','ensureSnapshot','backupAll','confirmSwitchYes','confirmSwitchNo','switchTo','openBackups','renderBackups','openBackupDetail','closeBackups','closeBackupDetail','loadBuddy','buddyDepart','buddyClaim','openAddAccount','closeAddAccount','saveAddAccount','openOfficialLogin','closeOfficialLogin','officialLoginLaunched'];
   for (const n of names) {
     try {
       const fn = eval(n);

@@ -943,12 +943,6 @@ fn open_browser_login_page() -> Result<(), String> {
     Err("当前平台不支持打开浏览器".into())
 }
 
-/// 独立「浏览器登录」：不依赖 WorkBuddy 客户端，直接用系统浏览器打开官方登录页。
-/// 用户登录后，登录态留在浏览器，但 accessToken 需手动复制回中枢的「添加账号」表单。
-pub fn open_browser_login() -> Result<(), String> {
-    open_browser_login_page()
-}
-
 /// 「用 WorkBuddy 官方登录」：拉起（或聚焦）WorkBuddy 桌面客户端，让用户在客户端里
 /// 用手机号+验证码 / 微信完成登录，中枢只负责把客户端拉起来并提示用户去登录。
 ///
