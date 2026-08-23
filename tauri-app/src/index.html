@@ -234,7 +234,10 @@
 
     <h3 style="display:flex;align-items:center;justify-content:space-between;">
       <span>已登记账号</span>
-      <button class="mini" style="font-size:10px;padding:2px 8px;" onclick="openAddAccount()" title="在软件内添加 WorkBuddy 账号">＋ 添加</button>
+      <span style="display:flex;gap:6px;">
+        <button class="mini" style="font-size:10px;padding:2px 8px;background:var(--green);" onclick="openOfficialLogin()" title="拉起 WorkBuddy 客户端，用手机号+验证码登录">📱 官方登录</button>
+        <button class="mini" style="font-size:10px;padding:2px 8px;" onclick="openAddAccount()" title="在软件内添加 WorkBuddy 账号">＋ 添加</button>
+      </span>
     </h3>
     <div id="acc-list"><div class="empty">加载中…</div></div>
     <div style="margin:4px 6px 10px;display:flex;gap:8px;">
@@ -492,6 +495,29 @@
       <div class="modal-foot">
         <button class="secondary" onclick="closeAddAccount()">取消</button>
         <button onclick="saveAddAccount()">添加</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 官方登录引导弹窗 -->
+  <div class="modal" id="official-login-modal">
+    <div class="modal-box" style="width:min(500px,92vw);">
+      <div class="modal-head"><span>用 WorkBuddy 官方登录</span><button onclick="closeOfficialLogin()">×</button></div>
+      <div class="modal-body" style="display:grid;grid-template-columns:1fr;gap:10px 14px;padding:14px 16px;">
+        <p style="margin:0;font-size:12.5px;line-height:1.6;color:var(--fg);">
+          账户中枢会拉起 WorkBuddy 桌面客户端。请在客户端中用
+          <b>手机号 + 验证码</b>（或微信）完成登录，登录成功后本机登录态会自动更新。
+        </p>
+        <p style="margin:0;font-size:11.5px;line-height:1.6;color:var(--muted);">
+          说明：WorkBuddy 客户端的登录走官方 OAuth 页面（验证码在腾讯网页服务端校验），
+          中枢无法、也不应复刻该登录接口，因此这里复用客户端自身的登录页。
+        </p>
+        <div id="ol-msg" style="font-size:12px;color:var(--blue);min-height:16px;"></div>
+        <div class="modal-err" id="ol-err" style="display:none;"></div>
+      </div>
+      <div class="modal-foot">
+        <button class="secondary" onclick="closeOfficialLogin()">取消</button>
+        <button onclick="officialLoginLaunched()">我已登录，刷新账号</button>
       </div>
     </div>
   </div>
