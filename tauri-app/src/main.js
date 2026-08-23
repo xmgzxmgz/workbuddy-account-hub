@@ -394,38 +394,7 @@ async function ensureSnapshot() {
   try { await invoke('ensure_snapshot'); } catch (e) { /* 无登录态时忽略 */ }
 }
 
-// ===== 软件内「添加账号」 =====
-function openAddAccount() {
-  $('aa-err').style.display = 'none';
-  ['aa-uid', 'aa-nick', 'aa-token'].forEach(i => $(i).value = '');
-  $('aa-snap').checked = true;
-  $('add-account-modal').classList.add('show');
-}
-function closeAddAccount() { $('add-account-modal').classList.remove('show'); }
-
-async function saveAddAccount() {
-  const err = $('aa-err');
-  err.style.display = 'none';
-  const uid = $('aa-uid').value.trim();
-  const nick = $('aa-nick').value.trim();
-  const token = $('aa-token').value.trim();
-  if (!uid) { err.textContent = '请填写账号 UID'; err.style.display = 'block'; return; }
-  const payload = { uid, nickname: nick || null, token: token || null, make_snapshot: $('aa-snap').checked };
-  try {
-    const r = await invoke('add_account', payload);
-    if (!r || r.success === false) {
-      err.textContent = (r && r.message) || '添加失败'; err.style.display = 'block';
-      return;
-    }
-    toast(r.message || '已添加账号');
-    closeAddAccount();
-    // 立即刷新侧边栏，让新账号可见
-    refreshAccounts();
-    setTimeout(() => loadAll(), 600);
-  } catch (e) {
-    err.textContent = '添加失败: ' + e; err.style.display = 'block';
-  }
-}
+// ===== 账号切换 =====
 async function switchTo(uid) {
   // 一键切换：切换前自动备份当前账号 → 写入目标登录态 → 自动重启 WorkBuddy 生效。
   // 若 WorkBuddy 当前正在运行且有任务在跑，先弹软件内确认框提示「正在关闭，任务会被中断」。
@@ -1300,7 +1269,7 @@ async function restartWB() {
 
 // 暴露给 inline onclick（安全：未定义的函数跳过，不影响其余，更不阻断 bootBootstrap）
 (function expose(){
-  const names = ['addModel','editModel','delModel','testModel','testCurrentForm','saveModel','closeModelModal','restartWB','loadAll','loadQuota','doCheckin','openReport','closeReport','copyReport','ensureSnapshot','backupAll','confirmSwitchYes','confirmSwitchNo','switchTo','openBackups','renderBackups','openBackupDetail','closeBackups','closeBackupDetail','loadBuddy','buddyDepart','buddyClaim','openAddAccount','closeAddAccount','saveAddAccount'];
+  const names = ['addModel','editModel','delModel','testModel','testCurrentForm','saveModel','closeModelModal','restartWB','loadAll','loadQuota','doCheckin','openReport','closeReport','copyReport','ensureSnapshot','backupAll','confirmSwitchYes','confirmSwitchNo','switchTo','openBackups','renderBackups','openBackupDetail','closeBackups','closeBackupDetail','loadBuddy','buddyDepart','buddyClaim'];
   for (const n of names) {
     try {
       const fn = eval(n);
