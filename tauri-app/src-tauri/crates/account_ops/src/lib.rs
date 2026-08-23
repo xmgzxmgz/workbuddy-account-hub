@@ -57,14 +57,32 @@ pub fn local_storage_dir() -> PathBuf {
 }
 
 /// 登录态文件（v5.3.8+ 明文 JSON，含 accessToken）。切换账号必须连它一起换。
+///
+/// 路径按平台对齐官方客户端落盘位置：
+///   - macOS:   ~/Library/Application Support/CodeBuddyExtension/Data/Public/auth/workbuddy-desktop.info
+///   - Windows: %LOCALAPPDATA%/CodeBuddyExtension/Data/Public/auth/workbuddy-desktop.info
+/// 旧版/个别环境会直放 LOCALAPPDATA 根目录，故 Windows 额外兜底该位置。
 pub fn auth_file() -> Option<PathBuf> {
-    let base = if cfg!(target_os = "windows") {
-        PathBuf::from(std::env::var("LOCALAPPDATA").unwrap_or_else(|_| home().join("AppData").join("Local").to_string_lossy().into_owned()))
+    let candidates: Vec<PathBuf> = if cfg!(target_os = "windows") {
+        let local = PathBuf::from(
+            std::env::var("LOCALAPPDATA")
+                .unwrap_or_else(|_| home().join("AppData").join("Local").to_string_lossy().into_owned()),
+        );
+        vec![
+            local.join("CodeBuddyExtension").join("Data").join("Public").join("auth").join("workbuddy-desktop.info"),
+            local.join("workbuddy-desktop.info"),
+        ]
     } else {
-        home().join("Library").join("Application Support").join("CodeBuddyExtension").join("Data").join("Public").join("auth")
+        vec![home()
+            .join("Library")
+            .join("Application Support")
+            .join("CodeBuddyExtension")
+            .join("Data")
+            .join("Public")
+            .join("auth")
+            .join("workbuddy-desktop.info")]
     };
-    let p = base.join("workbuddy-desktop.info");
-    if p.exists() { Some(p) } else { None }
+    candidates.into_iter().find(|p| p.exists())
 }
 
 /// 保险库根目录（按 uid 分桶）
@@ -781,11 +799,44 @@ pub fn quit_workbuddy() -> Result<(), String> {
 }
 
 /// 启动 WorkBuddy（切换后由用户点击「重启」触发）
+/// 定位 WorkBuddy 主程序可执行文件（用于切换后启动）。
+///   - macOS:   /Applications/WorkBuddy.app/Contents/MacOS/Electron（精确匹配，避免误杀 Hub 自身）
+///   - Windows: %LOCALAPPDATA%/Programs/WorkBuddy/WorkBuddy.exe（本机实际安装位置），
+///             候选回退到 ProgramFiles / ProgramFiles(x86) 下的 WorkBuddy/WorkBuddy.exe。
+pub fn workbuddy_exe() -> Option<PathBuf> {
+    if cfg!(target_os = "macos") {
+        let p = PathBuf::from(WB_EXE);
+        if p.exists() { Some(p) } else { None }
+    } else if cfg!(target_os = "windows") {
+        let local = PathBuf::from(
+            std::env::var("LOCALAPPDATA")
+                .unwrap_or_else(|_| home().join("AppData").join("Local").to_string_lossy().into_owned()),
+        );
+        let program_files = std::env::var("ProgramFiles").unwrap_or_else(|_| "C:\\Program Files".into());
+        let program_files_x86 =
+            std::env::var("ProgramFiles(x86)").unwrap_or_else(|_| "C:\\Program Files (x86)".into());
+        let candidates = vec![
+            local.join("Programs").join("WorkBuddy").join("WorkBuddy.exe"),
+            PathBuf::from(program_files).join("WorkBuddy").join("WorkBuddy.exe"),
+            PathBuf::from(program_files_x86).join("WorkBuddy").join("WorkBuddy.exe"),
+        ];
+        candidates.into_iter().find(|p| p.exists())
+    } else {
+        None
+    }
+}
+
 pub fn launch_workbuddy() -> Result<(), String> {
     if cfg!(target_os = "macos") {
         Command::new("open").args(["-a", "WorkBuddy"]).output().map(|_| ()).map_err(|e| e.to_string())
     } else if cfg!(target_os = "windows") {
-        Command::new("cmd").args(["/c", "start", "", "WorkBuddy"]).output().map(|_| ()).map_err(|e| e.to_string())
+        // 优先用精确 exe 路径启动（不依赖 PATH 是否注册 WorkBuddy）
+        if let Some(exe) = workbuddy_exe() {
+            Command::new(&exe).output().map(|_| ()).map_err(|e| e.to_string())
+        } else {
+            // 兜底：靠系统关联/ PATH 启动
+            Command::new("cmd").args(["/c", "start", "", "WorkBuddy"]).output().map(|_| ()).map_err(|e| e.to_string())
+        }
     } else {
         Err("当前平台不支持启动 WorkBuddy".into())
     }
