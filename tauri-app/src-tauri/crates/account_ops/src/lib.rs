@@ -891,15 +891,56 @@ pub fn quit_workbuddy() -> Result<(), String> {
     }
 }
 
+/// Windows 下常见 WorkBuddy 安装路径（用户级 / 系统级）
+#[cfg(target_os = "windows")]
+fn windows_workbuddy_paths() -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    if let Some(local_app_data) = std::env::var_os("LOCALAPPDATA") {
+        paths.push(PathBuf::from(&local_app_data).join("Programs").join("WorkBuddy").join("WorkBuddy.exe"));
+    }
+    if let Some(program_files) = std::env::var_os("PROGRAMFILES") {
+        paths.push(PathBuf::from(&program_files).join("WorkBuddy").join("WorkBuddy.exe"));
+    }
+    if let Some(program_files_x86) = std::env::var_os("PROGRAMFILES(X86)") {
+        paths.push(PathBuf::from(&program_files_x86).join("WorkBuddy").join("WorkBuddy.exe"));
+    }
+    paths
+}
+
 /// 启动 WorkBuddy（切换后由用户点击「重启」触发）
 pub fn launch_workbuddy() -> Result<(), String> {
     if cfg!(target_os = "macos") {
         Command::new("open").args(["-a", "WorkBuddy"]).output().map(|_| ()).map_err(|e| e.to_string())
     } else if cfg!(target_os = "windows") {
+        // 优先按已知安装路径启动，避免依赖 PATH 出现"找不到文件"
+        for path in windows_workbuddy_paths() {
+            if path.exists() {
+                return Command::new(&path).spawn().map(|_| ()).map_err(|e| e.to_string());
+            }
+        }
+        // fallback：尝试 start 命令（依赖 PATH/开始菜单）
         Command::new("cmd").args(["/c", "start", "", "WorkBuddy"]).output().map(|_| ()).map_err(|e| e.to_string())
     } else {
         Err("当前平台不支持启动 WorkBuddy".into())
     }
+}
+
+/// 用系统默认浏览器打开 WorkBuddy 登录页（客户端未安装时的 fallback）
+#[cfg(target_os = "windows")]
+fn open_browser_login_page() -> Result<(), String> {
+    let url = "https://www.workbuddy.cn/login";
+    Command::new("cmd").args(["/c", "start", "", url]).output().map(|_| ()).map_err(|e| e.to_string())
+}
+
+#[cfg(target_os = "macos")]
+fn open_browser_login_page() -> Result<(), String> {
+    let url = "https://www.workbuddy.cn/login";
+    Command::new("open").arg(url).output().map(|_| ()).map_err(|e| e.to_string())
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+fn open_browser_login_page() -> Result<(), String> {
+    Err("当前平台不支持打开浏览器".into())
 }
 
 /// 「用 WorkBuddy 官方登录」：拉起（或聚焦）WorkBuddy 桌面客户端，让用户在客户端里
@@ -919,6 +960,7 @@ pub fn launch_workbuddy() -> Result<(), String> {
 pub struct OfficialLoginResult {
     pub was_running: bool,
     pub launched: bool,
+    pub browser_fallback: bool,
     pub message: String,
 }
 
@@ -926,12 +968,18 @@ pub fn launch_official_login() -> Result<OfficialLoginResult, String> {
     let was_running = is_workbuddy_running();
     // 先拉起/聚焦 WorkBuddy 客户端（用户在里面完成手机号登录）
     let launched = launch_workbuddy().is_ok();
-    let message = if was_running {
-        "已聚焦 WorkBuddy，请在客户端中用手机号+验证码（或微信）登录，登录完成后点「我已登录」"
+    let (browser_fallback, message) = if was_running {
+        (false, "已聚焦 WorkBuddy，请在客户端中用手机号+验证码（或微信）登录，登录完成后点「我已登录」")
     } else if launched {
-        "已启动 WorkBuddy，请在客户端中用手机号+验证码（或微信）登录，登录完成后点「我已登录」"
+        (false, "已启动 WorkBuddy，请在客户端中用手机号+验证码（或微信）登录，登录完成后点「我已登录」")
     } else {
-        "未能自动启动 WorkBuddy，请手动打开客户端并用手机号登录，完成后点「我已登录」"
+        // 客户端找不到 / 启动失败 → fallback 到浏览器登录页，并提示用户复制 token
+        let browser_ok = open_browser_login_page().is_ok();
+        if browser_ok {
+            (true, "未找到 WorkBuddy 客户端，已打开浏览器登录页。请用手机号+验证码登录后，在「添加账号」中粘贴 accessToken。")
+        } else {
+            (false, "未能自动启动 WorkBuddy，请手动打开客户端或浏览器登录页，完成后点「我已登录」。")
+        }
     };
-    Ok(OfficialLoginResult { was_running, launched, message: message.to_string() })
+    Ok(OfficialLoginResult { was_running, launched, browser_fallback, message: message.to_string() })
 }
