@@ -15,6 +15,9 @@ tauri-app/dev-server.mjs
 *.app/
 WorkBuddy Account Hub.app/
 
+# 本地构建/下载产物（便携版 exe 不入库）
+dist/
+
 # Python
 __pycache__/
 *.pyc
