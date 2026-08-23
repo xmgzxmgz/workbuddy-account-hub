@@ -232,7 +232,10 @@
       <span class="badge" id="me-type"></span>
     </div>
 
-    <h3>已登记账号</h3>
+    <h3 style="display:flex;align-items:center;justify-content:space-between;">
+      <span>已登记账号</span>
+      <button class="mini" style="font-size:10px;padding:2px 8px;" onclick="openAddAccount()" title="在软件内添加 WorkBuddy 账号">＋ 添加</button>
+    </h3>
     <div id="acc-list"><div class="empty">加载中…</div></div>
     <div style="margin:4px 6px 10px;display:flex;gap:8px;">
       <button class="mini" style="flex:1;justify-content:center;" onclick="backupAll()">💾 备份所有账号</button>
@@ -460,6 +463,35 @@
         <button class="secondary" onclick="closeModelModal()">取消</button>
         <button class="secondary" onclick="testCurrentForm()">测试连接</button>
         <button onclick="saveModel()">保存</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 添加账号弹窗 -->
+  <div class="modal" id="add-account-modal">
+    <div class="modal-box" style="width:min(480px,92vw);">
+      <div class="modal-head"><span>添加 WorkBuddy 账号</span><button onclick="closeAddAccount()">×</button></div>
+      <div class="modal-body" style="display:grid;grid-template-columns:1fr;gap:10px 14px;padding:14px 16px;">
+        <label>账号 UID（必填，唯一标识）
+          <input id="aa-uid" placeholder="如 u_a1b2c3d4-xxxx">
+        </label>
+        <label>昵称（可选，留空后续可被 WorkBuddy 自动补全）
+          <input id="aa-nick" placeholder="如 小明">
+        </label>
+        <label>accessToken（可选）
+          <input id="aa-token" type="password" placeholder="粘贴该账号的 accessToken，可使其立即可切换">
+          <span style="font-size:10.5px;color:var(--muted);display:block;margin-top:4px;line-height:1.5;">
+            不填则仅登记到列表（切换前需先在 WorkBuddy 登录该账号）。填写则立即生成可切换快照，无需再登录。
+          </span>
+        </label>
+        <label style="font-size:12px;color:var(--fg);display:flex;align-items:center;gap:8px;">
+          <input id="aa-snap" type="checkbox" checked> 提供 token 时生成可切换快照
+        </label>
+        <div class="modal-err" id="aa-err" style="display:none;"></div>
+      </div>
+      <div class="modal-foot">
+        <button class="secondary" onclick="closeAddAccount()">取消</button>
+        <button onclick="saveAddAccount()">添加</button>
       </div>
     </div>
   </div>

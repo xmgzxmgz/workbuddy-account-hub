@@ -38,4 +38,5 @@ sync/data/
 
 # Embedded publish-* repos (each published separately)
 publish-checkin-qinglong/
-publish-dashboard/
+publish-dashboard/dist/
+*.zip

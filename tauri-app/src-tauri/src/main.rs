@@ -407,6 +407,20 @@ fn switch_account(uid: String) -> Result<Value, String> {
     Ok(serde_json::to_value(r).unwrap_or(Value::Null))
 }
 
+/// 软件内「添加账号」：把账号登记写入本机 WorkBuddy 登录态文件 allAccounts，
+/// 可选附带 accessToken 并生成可切换的 vault 快照。
+#[tauri::command]
+fn add_account(
+    uid: String,
+    nickname: Option<String>,
+    token: Option<String>,
+    make_snapshot: Option<bool>,
+) -> Result<Value, String> {
+    let snap = make_snapshot.unwrap_or(true);
+    let r = ops::add_account(&ops::vault_dir(), &uid, nickname.as_deref(), token.as_deref(), snap)?;
+    Ok(serde_json::to_value(r).unwrap_or(Value::Null))
+}
+
 #[tauri::command]
 fn restart_workbuddy() -> Result<(), String> {
     ops::launch_workbuddy()
@@ -456,6 +470,7 @@ pub fn run() {
             ensure_snapshot,
             backup_all,
             switch_account,
+            add_account,
             restart_workbuddy,
             app_running,
             list_backups,
