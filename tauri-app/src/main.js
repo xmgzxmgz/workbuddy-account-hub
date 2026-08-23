@@ -38,11 +38,28 @@ function bootLog(msg, cls = '') {
   el.className = 'show ' + cls;
   console.log('[boot]', msg);
 }
-function toast(msg) {
-  const t = $('toast');
-  if (!t) return;
-  t.textContent = msg; t.classList.add('show');
-  setTimeout(() => t.classList.remove('show'), 2400);
+function toast(msg, type) {
+  // 右下角动态弹窗：支持多条堆叠，停留更久（5000ms），可点击关闭
+  let box = $('toast-box');
+  if (!box) {
+    box = document.createElement('div');
+    box.id = 'toast-box';
+    box.style.cssText = 'position:fixed;right:18px;bottom:18px;z-index:60;display:flex;flex-direction:column;gap:10px;align-items:flex-end;pointer-events:none;';
+    document.body.appendChild(box);
+  }
+  const el = document.createElement('div');
+  el.className = 'toast show' + (type ? ' ' + type : '');
+  el.style.pointerEvents = 'auto';
+  el.textContent = msg;
+  box.appendChild(el);
+  const timer = setTimeout(() => {
+    el.style.opacity = '0';
+    el.style.transform = 'translateY(8px)';
+    setTimeout(() => el.remove(), 280);
+  }, 9000);
+  el.onclick = () => { clearTimeout(timer); el.remove(); };
+  // 最多保留 4 条，超出移除最旧
+  while (box.children.length > 4) box.firstChild.remove();
 }
 function shortUid(u) { return u ? u.slice(0, 8) + '…' : '(空)'; }
 
@@ -406,27 +423,47 @@ async function saveCurrentLogin() {
 }
 
 // ===== 账号切换 =====
+// 切换中的账号，防止重复点击（切换较慢，重复点会叠加 IPC）
+let switchingUid = null;
 async function switchTo(uid) {
-  // 一键切换：切换前自动备份当前账号 → 写入目标登录态 → 自动重启 WorkBuddy 生效。
-  // 若 WorkBuddy 当前正在运行且有任务在跑，先弹软件内确认框提示「正在关闭，任务会被中断」。
+  // 一键切换：切换前自动备份当前账号 → 写入目标登录态（真实 token + 真实 uid）
+  // → 重启 WorkBuddy 以新登录态生效。每个账号各自看各自的会话（WorkBuddy 按 token.sub 隔离），
+  // 中枢绝不改写 workbuddy.db 的会话归属。切换前若 WorkBuddy 正在运行，先弹确认框（避免中断任务）。
+  if (switchingUid) { toast('正在切换 ' + shortUid(switchingUid) + '，请稍候…'); return; }
   try {
+    // 复用最近一次 list_accounts 已带回的 workbuddy_running 状态，避免切换前再发一次 IPC。
     let wbRunning = false;
-    try { const s = await invoke('list_accounts'); wbRunning = !!(s && s.workbuddy_running); } catch (e) {}
+    const cached = window.__accountsMeta;
+    if (cached && typeof cached.workbuddy_running === 'boolean') {
+      wbRunning = cached.workbuddy_running;
+    } else {
+      try { wbRunning = await invoke('app_running'); } catch (e) {}
+    }
 
     if (wbRunning) {
-      // 软件内确认框（非系统 confirm）：提示关闭 WorkBuddy 会中断可能在跑的任务
+      // 软件内确认框：提示关闭 WorkBuddy 会中断可能在跑的任务
       const ok = await confirmSwitchRisk(uid);
       if (!ok) { toast('已取消切换'); return; }
     }
 
-    toast('正在切换 ' + shortUid(uid) + ' …');
+    switchingUid = uid;
+    try { showAccountList(accountsCache, (window.__login || {}).uid); } catch (e) {}
+    toast('正在切换 ' + shortUid(uid) + '…');
     const r = await invoke('switch_account', { uid });
     if (r) {
-      toast('已切换到 ' + shortUid(r.uid) + '，WorkBuddy 已自动重启生效');
+      toast('已切换到 ' + shortUid(r.uid) + ' ✅ 正在重启 WorkBuddy 生效…', 'ok');
+      // 切换成功且 WorkBuddy 当前无任务运行（已被后端优雅退出或本就未运行），则自动重启 WorkBuddy 生效
+      setTimeout(async () => {
+        try { await invoke('restart_workbuddy'); } catch (e) { toast('重启 WorkBuddy 失败: ' + e, 'err'); }
+      }, 1200);
       refreshAccounts();
-      setTimeout(() => loadAll(), 1800);
+      setTimeout(() => loadAll(), 1500);
     }
-  } catch (e) { toast('切换失败: ' + e); }
+  } catch (e) {
+    toast('切换失败: ' + e, 'err');
+  } finally {
+    switchingUid = null;
+  }
 }
 
 // 软件内确认弹窗（自定义样式，提示关闭 WorkBuddy 的中断风险）
@@ -449,6 +486,8 @@ if ($('btn-restart')) $('btn-restart').addEventListener('click', async () => {
 async function refreshAccounts() {
   let data;
   try { data = await invoke('list_accounts'); } catch { return; }
+  // 缓存 workbuddy_running 等元数据，供 switchTo 判断是否需要确认框（省一次 IPC）
+  if (data) window.__accountsMeta = data;
   // list_accounts 返回完整账号清单（登记表 + vault 兜底 + 当前），
   // 这里把 has_snapshot 合并进 accountsCache，并且如果清单比此前多出了账号
   // （例如后端从此前"单账号"进阶到"双账号"枚举），主动重绘侧边栏让它们立即可见，
@@ -489,10 +528,11 @@ function showAccountList(accs, cur) {
     const initial = (a.nickname || a.uid || '?').slice(0, 2);
     const isCur = a.uid === cur;
     const snapped = a.has_snapshot;
+    const isSwitching = switchingUid === a.uid;
     const badge = isCur
       ? '<span class="cur">当前</span>'
       : (snapped
-        ? `<button class="mini" onclick="event.stopPropagation();switchTo('${a.uid}')">切换</button>`
+        ? `<button class="mini" ${isSwitching ? 'disabled style="opacity:.5;cursor:default;"' : ''} onclick="event.stopPropagation();switchTo('${a.uid}')">${isSwitching ? '切换中…' : '切换'}</button>`
         : '<span class="mini" style="background:var(--line);color:var(--muted);padding:3px 9px;border-radius:6px;font-size:10.5px;" title="该账号尚未在 WorkBuddy 中登录保存过登录态，无法直接切换">未登录</span>');
     div.innerHTML = `
       <div class="dot">${initial}</div>
