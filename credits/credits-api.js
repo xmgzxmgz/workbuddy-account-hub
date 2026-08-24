@@ -1,5 +1,7 @@
 #!/usr/bin/env node
 'use strict';
+// ⚠️ 已废弃（2026-08-24）：本 CLI 的能力已由桌面端后端 Rust 层（tauri-app/src-tauri/crates/wb_api）完整替代，
+// 保留仅作参考 / 临时调试脚本，不再随主程序维护。日常使用请用桌面端。
 // WorkBuddy 积分 / 签到 —— 读取本机登录态直接调官方接口（无需抓包）
 // 参考: github.com/codeLong1024/workbuddy-checkin
 // 接口: https://copilot.tencent.com/v2/billing/meter/{checkin-activity-status,daily-checkin}
