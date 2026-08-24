@@ -88,12 +88,13 @@ fn checkin_all() -> Value {
     let mut ok = 0u32; let mut fail = 0u32; let mut skipped = 0u32;
     for a in accs {
         if !a.has_snapshot {
-            results.push(json!({"uid": a.uid, "nickname": a.nickname, "ok": false, "skipped": false, "error": "无登录态快照"}));
-            fail += 1; continue;
+            // 无登录态快照 = 未执行签到，归为「跳过」而非失败（与宠物批量操作口径一致）
+            results.push(json!({"uid": a.uid, "nickname": a.nickname, "ok": false, "skipped": true, "error": "无登录态快照"}));
+            skipped += 1; continue;
         }
         let Some(login) = account_login(&vault, &a.uid) else {
-            results.push(json!({"uid": a.uid, "nickname": a.nickname, "ok": false, "skipped": false, "error": "登录态文件缺失或无效"}));
-            fail += 1; continue;
+            results.push(json!({"uid": a.uid, "nickname": a.nickname, "ok": false, "skipped": true, "error": "登录态文件缺失或无效"}));
+            skipped += 1; continue;
         };
         let r = api::do_checkin_as(&login);
         if let Some(err) = r.get("error") {
