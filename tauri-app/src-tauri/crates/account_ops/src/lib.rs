@@ -13,6 +13,7 @@ use serde::Serialize;
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use rusqlite::Connection;
 
 #[derive(Serialize)]
 pub struct AccountInfo {
@@ -65,6 +66,15 @@ pub fn workbuddy_home() -> PathBuf {
 /// 本机 local_storage 目录（账号登记表 + 各账号配置所在）
 pub fn local_storage_dir() -> PathBuf {
     workbuddy_home().join("local_storage")
+}
+
+/// WorkBuddy 会话数据库路径（Windows/macOS 均落在 ~/.workbuddy/workbuddy.db）
+pub fn workbuddy_db_path() -> PathBuf {
+    workbuddy_home().join("workbuddy.db")
+}
+
+fn short_uid(uid: &str) -> String {
+    if uid.len() <= 12 { uid.to_string() } else { format!("{}…{}", &uid[..6], &uid[uid.len()-4..]) }
 }
 
 /// 登录态文件（v5.3.8+ 明文 JSON，含 accessToken）。切换账号必须连它一起换。
@@ -383,6 +393,11 @@ fn take_snapshot_to(uid: &str, dest_root: &Path) -> Result<BackupMeta, String> {
     if ls.exists() {
         copy_dir_all(&ls, &dest_root.join("local_storage")).map_err(|e| e.to_string())?;
     }
+    // 同时备份会话数据库，切换时才能恢复/迁移目标账号的历史对话
+    let db = workbuddy_db_path();
+    if db.exists() {
+        let _ = std::fs::copy(&db, dest_root.join("workbuddy.db"));
+    }
     let mut auth_included = false;
     if let Some(af) = auth_file() {
         if let Some(parent) = dest_root.join("auth.info").parent() {
@@ -443,6 +458,10 @@ pub fn snapshot_current(vault: &Path) -> Result<BackupMeta, String> {
     let ls_src = hist_dest.join("local_storage");
     if ls_src.exists() {
         copy_dir_all(&ls_src, &snap_dest.join("local_storage")).map_err(|e| e.to_string())?;
+    }
+    let db_src = hist_dest.join("workbuddy.db");
+    if db_src.exists() {
+        let _ = std::fs::copy(&db_src, snap_dest.join("workbuddy.db"));
     }
     let auth_src = hist_dest.join("auth.info");
     if auth_src.exists() {
@@ -727,13 +746,17 @@ pub fn switch_account(vault: &Path, uid: &str) -> Result<SwitchResult, String> {
             let hist_dest = vault.join(cid).join("history").join(&ts);
             std::fs::create_dir_all(&hist_dest).map_err(|e| e.to_string())?;
             let _ = take_snapshot_to(cid, &hist_dest);
-            // 同步刷新 canonical snapshot/（含完整 local_storage + auth.info）
+            // 同步刷新 canonical snapshot/（含完整 local_storage + workbuddy.db + auth.info）
             let snap_dest = vault.join(cid).join("snapshot");
             let _ = std::fs::remove_dir_all(&snap_dest);
             if std::fs::create_dir_all(&snap_dest).is_ok() {
                 let ls_src = hist_dest.join("local_storage");
                 if ls_src.exists() {
                     let _ = copy_dir_all(&ls_src, &snap_dest.join("local_storage"));
+                }
+                let db_src = hist_dest.join("workbuddy.db");
+                if db_src.exists() {
+                    let _ = std::fs::copy(&db_src, snap_dest.join("workbuddy.db"));
                 }
                 let auth_src = hist_dest.join("auth.info");
                 if auth_src.exists() {
@@ -758,14 +781,41 @@ pub fn switch_account(vault: &Path, uid: &str) -> Result<SwitchResult, String> {
         }
     }
 
-    // ===== 会话库说明（重要，避免再次破坏数据）=====
-    // WorkBuddy 在 Windows 上以登录态 token 的 `sub` 识别身份，并以该 uid 查询会话库
-    // (workbuddy.db 的 sessions.user_id)。两个账号的对话**本就该各自隔离**，切换账号
-    // 只需换登录态（真实 token + 真实 uid），WorkBuddy 启动后即显示该账号自己的对话。
-    //
-    // 因此本函数【绝不改写 workbuddy.db 的 sessions.user_id】—— 任何把多账号会话
-    // 强行改写到同一 uid 的「合并」尝试，都会永久丢失会话归属信息、且切换时把全部
-    // 对话搬给目标账号，正是此前对话被改乱的根因。切换 = 换登录态，仅此而已。
+    // ===== 会话迁移（修复 Windows 上"调用 sqlite3 失败: program not found"）=====
+    // WorkBuddy 启动时会检查 workbuddy.db 的 sessions.user_id 是否与登录态 uid 匹配；
+    // 不匹配时它会尝试用系统 sqlite3 CLI 迁移，Windows 通常没有该命令导致迁移失败。
+    // 我们用 Rust 内嵌 rusqlite 在切换时直接完成迁移，避免依赖外部 sqlite3。
+    let mut migrate_msg = String::new();
+    if let Some(cid) = &cur_uid {
+        if cid != uid {
+            let target_db = src.join("workbuddy.db");
+            let live_db = workbuddy_db_path();
+            if target_db.exists() {
+                // 目标快照有自己的会话库：优先恢复它（让目标账号看到它自己的历史）
+                if live_db.exists() {
+                    let _ = std::fs::copy(&live_db, live_db.with_extension(format!("pre-restore.{}", chrono_now())));
+                }
+                let _ = std::fs::copy(&target_db, &live_db);
+                migrate_msg = format!("已恢复 {} 的历史会话库", short_uid(uid));
+            } else if live_db.exists() {
+                // 无目标快照库：把当前库中旧 uid 的会话迁移给新 uid
+                match migrate_sessions_user_id(cid, uid) {
+                    Ok(0) => migrate_msg = "当前无需要迁移的会话".to_string(),
+                    Ok(n) => migrate_msg = format!("已迁移 {} 条会话到新账号", n),
+                    Err(e) => {
+                        // 迁移失败不阻断切换（登录态已写入），但把错误带回去提示用户
+                        return Ok(SwitchResult {
+                            restart_required: true,
+                            restart_workbuddy: true,
+                            aggregate_id: String::new(),
+                            message: format!("已切换登录态，但会话迁移失败: {}", e),
+                            uid: uid.to_string(),
+                        });
+                    }
+                }
+            }
+        }
+    }
 
     // 切换后由前端在确认 WorkBuddy 无任务运行后，调用 restart_workbuddy 重启 WorkBuddy 生效
     // （不是重启中枢——中枢重启会丢当前界面状态，且 WorkBuddy 自身需以新登录态重启）。
@@ -773,9 +823,57 @@ pub fn switch_account(vault: &Path, uid: &str) -> Result<SwitchResult, String> {
         restart_required: true,
         restart_workbuddy: true,
         aggregate_id: String::new(),
-        message: format!("已切换到目标账号（{}），准备重启 WorkBuddy 生效", uid),
+        message: if migrate_msg.is_empty() {
+            format!("已切换到目标账号（{}），准备重启 WorkBuddy 生效", uid)
+        } else {
+            format!("已切换到目标账号（{}）；{}。准备重启 WorkBuddy 生效", short_uid(uid), migrate_msg)
+        },
         uid: uid.to_string(),
     })
+}
+
+/// 用 Rust 内嵌 SQLite（rusqlite）把 workbuddy.db 中属于 from_uid 的会话改写到 to_uid。
+/// 避免 WorkBuddy 在 Windows 上自行调用系统 `sqlite3` CLI 导致"program not found"失败。
+/// 迁移前会备份原 db 到同目录 `.workbuddy.db.migrate-backup.<ts>`，失败不破坏原文件。
+pub fn migrate_sessions_user_id(from_uid: &str, to_uid: &str) -> Result<usize, String> {
+    let db = workbuddy_db_path();
+    if !db.exists() {
+        return Ok(0);
+    }
+
+    // 先备份（带时间戳，避免覆盖）
+    let ts = chrono_now();
+    let backup = db.with_extension(format!("migrate-backup.{}.{}", from_uid, ts));
+    std::fs::copy(&db, &backup).map_err(|e| format!("备份 workbuddy.db 失败: {e}"))?;
+
+    let conn = Connection::open(&db).map_err(|e| format!("打开 workbuddy.db 失败: {e}"))?;
+
+    // 检查 sessions 表是否存在（避免对新库报错）
+    let has_sessions: bool = conn
+        .query_row(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='sessions'",
+            [],
+            |_| Ok(true),
+        )
+        .unwrap_or(false);
+    if !has_sessions {
+        return Ok(0);
+    }
+
+    let changed = conn
+        .execute(
+            "UPDATE sessions SET user_id = ?1 WHERE user_id = ?2",
+            [to_uid, from_uid],
+        )
+        .map_err(|e| format!("更新 sessions.user_id 失败: {e}"))?;
+
+    // 同时迁移 memory 表（如果存在）
+    let _ = conn.execute(
+        "UPDATE memory SET user_id = ?1 WHERE user_id = ?2",
+        [to_uid, from_uid],
+    );
+
+    Ok(changed)
 }
 
 /// 把当前登录态切换为快照 auth（目标账号）。

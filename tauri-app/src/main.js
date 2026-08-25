@@ -38,8 +38,68 @@ function bootLog(msg, cls = '') {
   el.className = 'show ' + cls;
   console.log('[boot]', msg);
 }
+// ===== 右上角历史消息中心（保存最近 100 条 toast/通知） =====
+const NotifyCenter = {
+  key: 'acc_hub_notifications_v1',
+  max: 100,
+  list() {
+    try { return JSON.parse(localStorage.getItem(this.key)) || []; } catch (e) { return []; }
+  },
+  save(arr) {
+    try { localStorage.setItem(this.key, JSON.stringify(arr.slice(0, this.max))); } catch (e) {}
+    this.updateBadge();
+  },
+  push(msg, type) {
+    const arr = this.list();
+    arr.unshift({ t: Date.now(), msg: String(msg), type: type || '' });
+    this.save(arr);
+    this.render();
+  },
+  clear() {
+    this.save([]);
+    this.render();
+  },
+  updateBadge() {
+    const n = this.list().length;
+    const b = $('notify-badge');
+    if (b) { b.textContent = n > 99 ? '99+' : String(n); b.style.display = n ? 'flex' : 'none'; }
+  },
+  render() {
+    const list = $('notify-list'); if (!list) return;
+    const arr = this.list();
+    if (!arr.length) { list.innerHTML = '<div class="notify-empty">暂无消息</div>'; return; }
+    list.innerHTML = arr.map((it, i) => {
+      const time = new Date(it.t).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' });
+      const cls = 'notify-item' + (it.type === 'err' ? ' err' : it.type === 'ok' ? ' ok' : '');
+      return `<div class="${cls}" onclick="showNotifyDetail(${i})"><div class="t">${time}</div><div class="m">${escapeHtml(it.msg)}</div></div>`;
+    }).join('');
+  }
+};
+function escapeHtml(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+function toggleNotify() {
+  const d = $('notify-dropdown'); if (!d) return;
+  const show = d.classList.toggle('show');
+  if (show) NotifyCenter.render();
+}
+function clearNotify() { NotifyCenter.clear(); }
+function showNotifyDetail(i) {
+  const arr = NotifyCenter.list(); const it = arr[i]; if (!it) return;
+  $('notify-detail-time').textContent = new Date(it.t).toLocaleString('zh-CN');
+  $('notify-detail-body').textContent = it.msg;
+  $('notify-detail').classList.add('show');
+}
+function closeNotifyDetail() { $('notify-detail').classList.remove('show'); }
+// 点击页面其他区域关闭下拉
+document.addEventListener('click', function(e) {
+  const w = $('notify-wrap');
+  if (w && !w.contains(e.target)) { const d = $('notify-dropdown'); if (d) d.classList.remove('show'); }
+});
+
 function toast(msg, type) {
   // 右下角动态弹窗：支持多条堆叠，停留更久（5000ms），可点击关闭
+  NotifyCenter.push(msg, type);
   let box = $('toast-box');
   if (!box) {
     box = document.createElement('div');
@@ -1338,6 +1398,8 @@ function refreshAll() { loadAll(); loadBuddy(); }
 // 本地信息、网络部分（额度/签到/记忆）、宠物面板不自动显示，要点「刷新全部」或再点宠物才出来。
 // 方案：分阶段自动加载 + 失败自动重试，保证用户打开即见全部数据，无需手动操作。
 function bootBootstrap() {
+  // 初始化右上角消息徽标
+  try { NotifyCenter.updateBadge(); } catch (e) {}
   // 真正判断 Tauri IPC 是否就绪：window.__TAURI__.core.invoke 必须存在
   function ready() {
     try { return !!(window.__TAURI__ && window.__TAURI__.core && typeof window.__TAURI__.core.invoke === 'function'); }
