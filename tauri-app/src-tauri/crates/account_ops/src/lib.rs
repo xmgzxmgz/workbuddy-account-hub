@@ -848,7 +848,7 @@ pub fn switch_account(vault: &Path, uid: &str) -> Result<SwitchResult, String> {
                 uid, migrated_sessions, migrated_autos
             );
             if let Some(w) = &pin_warn {
-                m.push_str(&format!("（⚠️ 会话置顶状态迁移未完成: {w}）");
+                m.push_str(&format!("（⚠️ 会话置顶状态迁移未完成: {w}）"));
             }
             m
         },
