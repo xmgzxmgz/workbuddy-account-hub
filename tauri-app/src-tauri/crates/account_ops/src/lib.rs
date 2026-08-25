@@ -974,14 +974,14 @@ pub fn migrate_renderer_pin_state(from_uid: &str, to_uid: &str) -> Result<(), St
 
     // 遍历全部键，收集需要改名的（键以 :u:<from_uid> 结尾）
     let read_opts = ReadOptions::new();
-    let iter = db.iter(&read_opts);
+    let iter = db.iter(read_opts);
     iter.start();
     let mut to_rename: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
     for (key, val) in iter {
         if let Ok(kstr) = std::str::from_utf8(key.as_bytes()) {
             if let Some(base) = kstr.strip_suffix(&suffix_from) {
                 let new_key = format!("{base}{suffix_to}");
-                to_rename.push((BytesKey(new_key.into_bytes()), val));
+                to_rename.push((new_key.into_bytes(), val));
             }
         }
     }
