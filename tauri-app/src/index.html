@@ -203,6 +203,30 @@
     .buddy-log .line{word-break:break-all;}
     .buddy-log .t{color:var(--muted);font-family:ui-monospace,Menlo,monospace;font-size:10px;margin-right:6px;}
     .buddy-log .ok{color:var(--green);} .buddy-log .err{color:var(--red);} .buddy-log .info{color:#7ea6ff;}
+    /* ===== 右上角历史消息提示 ===== */
+    .notify-wrap{position:relative;display:inline-block;}
+    .notify-btn{padding:6px 10px;font-size:16px;line-height:1;background:transparent;border:1px solid var(--line);border-radius:8px;cursor:pointer;transition:.15s;}
+    .notify-btn:hover{border-color:var(--blue);background:rgba(43,108,255,.1);}
+    .notify-badge{position:absolute;top:-4px;right:-4px;min-width:16px;height:16px;padding:0 4px;border-radius:8px;background:var(--red);color:#fff;font-size:10px;font-weight:700;display:flex;align-items:center;justify-content:center;}
+    .notify-badge:empty,.notify-badge[data-count="0"]{display:none;}
+    .notify-dropdown{display:none;position:absolute;top:calc(100% + 8px);right:0;width:min(360px,92vw);max-height:420px;background:var(--panel);border:1px solid var(--line);border-radius:12px;box-shadow:0 10px 36px rgba(0,0,0,.45);z-index:70;overflow:hidden;flex-direction:column;}
+    .notify-dropdown.show{display:flex;}
+    .notify-head{display:flex;align-items:center;justify-content:space-between;padding:10px 12px;border-bottom:1px solid var(--line);font-size:12px;font-weight:700;color:var(--fg);}
+    .notify-clear{color:var(--muted);cursor:pointer;font-weight:500;}
+    .notify-clear:hover{color:var(--red);}
+    .notify-list{flex:1;overflow-y:auto;padding:6px;}
+    .notify-item{padding:8px 10px;border-radius:8px;cursor:pointer;font-size:12px;line-height:1.5;border-bottom:1px solid rgba(255,255,255,.04);}
+    .notify-item:hover{background:#1c2330;}
+    .notify-item .t{color:var(--muted);font-size:10px;margin-bottom:2px;font-family:ui-monospace,Menlo,monospace;}
+    .notify-item .m{color:var(--fg);display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;}
+    .notify-item.err .m{color:#ff9e9e;}
+    .notify-item.ok .m{color:#7eebb6;}
+    .notify-empty{padding:24px 12px;text-align:center;color:var(--muted);font-size:12px;}
+    .notify-detail{position:fixed;inset:0;background:rgba(0,0,0,.62);z-index:80;display:none;align-items:center;justify-content:center;}
+    .notify-detail.show{display:flex;}
+    .notify-detail-box{width:min(520px,92vw);max-height:80vh;background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:14px 16px;display:flex;flex-direction:column;}
+    .notify-detail-head{display:flex;justify-content:space-between;align-items:center;font-size:13px;font-weight:700;margin-bottom:8px;}
+    .notify-detail-body{white-space:pre-wrap;word-break:break-all;font-size:12px;line-height:1.7;color:#c9d2e3;overflow:auto;max-height:60vh;}
   </style>
 </head>
 <body>
@@ -263,6 +287,14 @@
       <button class="secondary" onclick="openReport()">导出报告</button>
       <button class="secondary" onclick="openBackups()" title="查看每个账号的历史自动/手动备份">🕘 历史备份</button>
       <button class="secondary eye-global off" id="eye-global" title="显示所有隐私数据中段（Key/UID/Token 等）" onclick="toggleAllKeys()">👁 隐私</button>
+      <div class="notify-wrap" id="notify-wrap">
+        <button class="secondary notify-btn" id="notify-btn" title="历史消息" onclick="toggleNotify()">🔔</button>
+        <span class="notify-badge" id="notify-badge">0</span>
+        <div class="notify-dropdown" id="notify-dropdown">
+          <div class="notify-head">历史消息 <span class="notify-clear" onclick="clearNotify()">清空</span></div>
+          <div class="notify-list" id="notify-list"><div class="notify-empty">暂无消息</div></div>
+        </div>
+      </div>
     </div>
     <div id="boot-log"></div>
 
@@ -500,6 +532,14 @@
       <div class="modal-head"><span id="bk-detail-head">备份详情</span><button onclick="closeBackupDetail()">×</button></div>
       <div id="bk-detail-kv"></div>
       <div id="bk-detail-tree"></div>
+    </div>
+  </div>
+
+  <!-- 消息详情弹窗 -->
+  <div class="notify-detail" id="notify-detail" onclick="if(event.target===this)closeNotifyDetail()">
+    <div class="notify-detail-box">
+      <div class="notify-detail-head"><span id="notify-detail-time">详情</span><button class="secondary" onclick="closeNotifyDetail()">×</button></div>
+      <div class="notify-detail-body" id="notify-detail-body"></div>
     </div>
   </div>
 
