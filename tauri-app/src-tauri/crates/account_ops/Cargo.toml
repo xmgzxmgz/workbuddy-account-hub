@@ -12,3 +12,6 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 # `wb:conversation-list:*:u:<旧uid>` 键复制为 `u:<新uid>`。用 leveldb crate 读写该库。
 # default-features=false 关掉 snappy，避免额外原生依赖。
 leveldb = { version = "0.8", default-features = false }
+# db-key 0.0.5 的 Key trait 只为 i32 实现，需自行为新类型实现 Key；
+# 显式 pin 同一版本，确保与 leveldb 内部使用的 db-key 是同一个 trait。
+db-key = "0.0.5"

@@ -22,6 +22,7 @@ use leveldb::database::Database;
 use leveldb::iterator::{Iterable, LevelDBIterator};
 use leveldb::kv::KV;
 use leveldb::options::{Options, ReadOptions, WriteOptions};
+use db_key::Key;
 
 #[derive(Serialize)]
 pub struct AccountInfo {
@@ -928,12 +929,29 @@ pub fn migrate_sessions_user_id(from_uid: &str, to_uid: &str) -> Result<(i64, i6
 ///
 /// ⚠️ 设计为 best-effort：任何错误返回 Err(String) 作为【警告】，由调用方决定是否中止切换
 ///    （默认不中止——置顶丢失只是体验问题，不应阻断账号切换）。
-/// 把字符串键转为 leveldb 可用的 `&'static [u8]` 键。
-/// leveldb 内部会拷贝键，这里用 Box::leak 拿到 'static 引用（一次性迁移、键数量极少，可接受）。
-/// 注意：leveldb 0.8.6 依赖 db-key 0.0.5，其 `Key` trait 仅实现于 `i32` / `&[u8]`，
-/// 不支持 `Vec<u8>` / `String`，故键类型必须是 `&[u8]`。
-fn static_key(s: &str) -> &'static [u8] {
-    Box::leak(s.as_bytes().to_vec().into_boxed_slice())
+/// 渲染层 leveldb 的字符串键包装类型。
+///
+/// leveldb 0.8.6 依赖 db-key 0.0.5，其 `Key` trait **只**为 `i32` 实现，
+/// 不为 `&[u8]` / `Vec<u8>` / `String` 实现；因此不能用 `Database<&[u8]>` 当键类型，
+/// 必须自己定义拥有 `Vec<u8>` 的新类型并为它实现 `db_key::Key`
+/// （`from_u8` 拷贝字节入库、`as_slice` 把内部字节借给闭包读出）。
+#[derive(Clone)]
+struct BytesKey(Vec<u8>);
+
+impl BytesKey {
+    /// 取内部字节切片（inherent 方法，便于在遍历时读取键内容）
+    fn as_bytes(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl Key for BytesKey {
+    fn from_u8(key: &[u8]) -> Self {
+        BytesKey(key.to_vec())
+    }
+    fn as_slice<T, F: Fn(&[u8]) -> T>(&self, f: F) -> T {
+        f(&self.0)
+    }
 }
 
 pub fn migrate_renderer_pin_state(from_uid: &str, to_uid: &str) -> Result<(), String> {
@@ -951,19 +969,19 @@ pub fn migrate_renderer_pin_state(from_uid: &str, to_uid: &str) -> Result<(), St
     }
 
     // 打开 leveldb（只读校验 + 可写）。若被占用（理论上不会，因已 quit），给少量重试窗口。
-    // 键类型必须是 &'static [u8]（db-key 0.0.5 只认 &[u8] / i32）。
-    let db: Database<&'static [u8]> = open_leveldb_with_retry(&dir)?;
+    // 键类型必须是 BytesKey（db-key 0.0.5 只实现 Key for i32，必须自定义字节键）。
+    let db: Database<BytesKey> = open_leveldb_with_retry(&dir)?;
 
     // 遍历全部键，收集需要改名的（键以 :u:<from_uid> 结尾）
     let read_opts = ReadOptions::new();
     let iter = db.iter(&read_opts);
     iter.start();
-    let mut to_rename: Vec<(&'static [u8], Vec<u8>)> = Vec::new();
+    let mut to_rename: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
     for (key, val) in iter {
-        if let Ok(kstr) = std::str::from_utf8(key) {
+        if let Ok(kstr) = std::str::from_utf8(key.as_bytes()) {
             if let Some(base) = kstr.strip_suffix(&suffix_from) {
                 let new_key = format!("{base}{suffix_to}");
-                to_rename.push((static_key(&new_key), val));
+                to_rename.push((BytesKey(new_key.into_bytes()), val));
             }
         }
     }
@@ -978,11 +996,11 @@ pub fn migrate_renderer_pin_state(from_uid: &str, to_uid: &str) -> Result<(), St
         // 旧键 = 新键去掉 suffix_to 再拼回 suffix_from
         if let Ok(nstr) = std::str::from_utf8(new_key) {
             if let Some(base) = nstr.strip_suffix(&suffix_to) {
-                let old_key = static_key(&format!("{base}{suffix_from}"));
+                let old_key = format!("{base}{suffix_from}").into_bytes();
                 let write_opts = WriteOptions::new();
-                if db.put(write_opts, *new_key, val).is_ok() {
+                if db.put(write_opts, BytesKey(new_key.clone()), val).is_ok() {
                     let del_opts = WriteOptions::new();
-                    let _ = db.delete(del_opts, old_key);
+                    let _ = db.delete(del_opts, BytesKey(old_key));
                     done += 1;
                 }
             }
@@ -999,7 +1017,7 @@ pub fn migrate_renderer_pin_state(from_uid: &str, to_uid: &str) -> Result<(), St
 }
 
 /// 带重试地打开渲染层 leveldb（应对 WorkBuddy 刚退出、文件锁释放的极小时间窗）。
-fn open_leveldb_with_retry(dir: &Path) -> Result<Database<&'static [u8]>, String> {
+fn open_leveldb_with_retry(dir: &Path) -> Result<Database<BytesKey>, String> {
     let mut last_err = String::new();
     for _ in 0..15 {
         let mut opts = Options::new();
