@@ -15,6 +15,14 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use rusqlite::Connection;
 
+// 渲染层会话置顶状态存储在 Electron localStorage（leveldb）里，键名形如
+// `wb:conversation-list:expanded-state:u:<uid>`，值 JSON 含 `{"pinned":true,...}`。
+// 切换账号时需把 `u:<旧uid>` 键复制为 `u:<新uid>`（见 migrate_renderer_pin_state）。
+use leveldb::database::Database;
+use leveldb::iterator::{Iterable, LevelDBIterator};
+use leveldb::kv::KV;
+use leveldb::options::{Options, ReadOptions, WriteOptions};
+
 #[derive(Serialize)]
 pub struct AccountInfo {
     pub uid: String,
@@ -817,16 +825,33 @@ pub fn switch_account(vault: &Path, uid: &str) -> Result<SwitchResult, String> {
         }
     }
 
+    // 会话置顶（Pinned）状态迁移：把渲染层 localStorage 里 `u:<旧uid>` 键复制为 `u:<新uid>`。
+    // best-effort：失败时仅记录警告，不阻断账号切换（置顶丢失只是体验问题，可手动重新置顶）。
+    let mut pin_warn: Option<String> = None;
+    if let Some(cid) = &cur_uid {
+        if cid != uid {
+            if let Err(e) = migrate_renderer_pin_state(cid, uid) {
+                pin_warn = Some(e);
+            }
+        }
+    }
+
     // 切换后由前端在确认 WorkBuddy 无任务运行后，调用 restart_workbuddy 重启 WorkBuddy 生效
     // （不是重启中枢——中枢重启会丢当前界面状态，且 WorkBuddy 自身需以新登录态重启）。
     Ok(SwitchResult {
         restart_required: true,
         restart_workbuddy: true,
         aggregate_id: String::new(),
-        message: format!(
-            "已切换到目标账号（{}）：搬迁会话 {} 条、自动化 {} 条，准备重启 WorkBuddy 生效",
-            uid, migrated_sessions, migrated_autos
-        ),
+        message: {
+            let mut m = format!(
+                "已切换到目标账号（{}）：搬迁会话 {} 条、自动化 {} 条，准备重启 WorkBuddy 生效",
+                uid, migrated_sessions, migrated_autos
+            );
+            if let Some(w) = &pin_warn {
+                m.push_str(&format!("（⚠️ 会话置顶状态迁移未完成: {w}）");
+            }
+            m
+        },
         uid: uid.to_string(),
     })
 }
@@ -885,6 +910,101 @@ pub fn migrate_sessions_user_id(from_uid: &str, to_uid: &str) -> Result<(i64, i6
     );
 
     Ok((s_changed as i64, a_changed as i64))
+}
+
+/// 迁移渲染层「会话置顶」状态（修复 v0.5.1 用户反馈：切账号后置顶会话不再置顶）。
+///
+/// 背景：WorkBuddy 的会话置顶（置顶/Pinned）状态**不**存在 workbuddy.db（sessions 表没有
+/// pin 列），而是存在渲染层 Electron localStorage（leveldb），路径：
+///   `~/.workbuddy/app/session/Local Storage/leveldb`
+/// 键名形如 `wb:conversation-list:expanded-state:u:<uid>`，值 JSON 含 `{"pinned":true,...}`，
+/// 且 `<uid>` 与 `sessions.user_id` 同 ID 空间。
+///
+/// 切换账号时 `migrate_sessions_user_id` 只改写了 workbuddy.db 的 user_id，没动这个
+/// localStorage → 置顶映射仍挂在旧 `u:<from_uid>` 键下，新登录读 `u:<to_uid>`（空）→ 置顶丢失。
+///
+/// 本函数把**所有**以 `:u:<from_uid>` 结尾的渲染层键复制为 `:u:<to_uid>` 并删除旧键。
+/// 必须在 WorkBuddy 已退出（leveldb 锁释放）后调用（switch_account 开头已 quit_workbuddy）。
+///
+/// ⚠️ 设计为 best-effort：任何错误返回 Err(String) 作为【警告】，由调用方决定是否中止切换
+///    （默认不中止——置顶丢失只是体验问题，不应阻断账号切换）。
+pub fn migrate_renderer_pin_state(from_uid: &str, to_uid: &str) -> Result<(), String> {
+    let suffix_from = format!(":u:{from_uid}");
+    let suffix_to = format!(":u:{to_uid}");
+
+    let mut dir = workbuddy_home();
+    dir.push("app");
+    dir.push("session");
+    dir.push("Local Storage");
+    dir.push("leveldb");
+    if !dir.exists() {
+        // 渲染层存储不存在（极少见，如从未启动过会话界面），视为无需迁移
+        return Ok(());
+    }
+
+    // 打开 leveldb（只读校验 + 可写）。若被占用（理论上不会，因已 quit），给少量重试窗口。
+    let db: Database<Vec<u8>> = open_leveldb_with_retry(&dir)?;
+
+    // 遍历全部键，收集需要改名的（键以 :u:<from_uid> 结尾）
+    let read_opts = ReadOptions::new();
+    let iter = db.iter(&read_opts);
+    iter.start();
+    let mut to_rename: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
+    for (key, val) in iter {
+        if let Ok(s) = std::str::from_utf8(&key) {
+            if s.ends_with(&suffix_from) {
+                // 复制键体，仅替换末尾的 uid 后缀
+                let base_len = key.len().saturating_sub(suffix_from.len());
+                let mut new_key = key[..base_len].to_vec();
+                new_key.extend_from_slice(suffix_to.as_bytes());
+                to_rename.push((new_key, val));
+            }
+        }
+    }
+
+    if to_rename.is_empty() {
+        return Ok(());
+    }
+
+    // 写新键 + 删旧键（best-effort：单条失败记日志但继续）
+    let mut done = 0usize;
+    for (new_key, val) in &to_rename {
+        // 旧键 = 新键去掉 suffix_to 再拼回 suffix_from
+        let base_len = new_key.len().saturating_sub(suffix_to.len());
+        let mut old_key = new_key[..base_len].to_vec();
+        old_key.extend_from_slice(suffix_from.as_bytes());
+        let write_opts = WriteOptions::new();
+        if db.put(write_opts, new_key, val).is_ok() {
+            let del_opts = WriteOptions::new();
+            let _ = db.delete(del_opts, &old_key);
+            done += 1;
+        }
+    }
+
+    if done == 0 {
+        return Err(format!(
+            "渲染层置顶键已找到 {} 个但写入失败（leveldb 可能无法写入）",
+            to_rename.len()
+        ));
+    }
+    Ok(())
+}
+
+/// 带重试地打开渲染层 leveldb（应对 WorkBuddy 刚退出、文件锁释放的极小时间窗）。
+fn open_leveldb_with_retry(dir: &Path) -> Result<Database<Vec<u8>>, String> {
+    let mut last_err = String::new();
+    for _ in 0..15 {
+        let mut opts = Options::new();
+        opts.create_if_missing = false;
+        match Database::open(dir, opts) {
+            Ok(db) => return Ok(db),
+            Err(e) => {
+                last_err = e.to_string();
+                std::thread::sleep(std::time::Duration::from_millis(200));
+            }
+        }
+    }
+    Err(format!("打开渲染层 localStorage 失败（已重试）: {last_err}"))
 }
 
 /// 把当前登录态切换为快照 auth（目标账号）。
