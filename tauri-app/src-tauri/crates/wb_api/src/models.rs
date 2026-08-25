@@ -67,7 +67,9 @@ pub fn list_custom() -> Value {
     })
 }
 
-/// 掩码 apiKey（只留前 6 后 4）
+/// 掩码 apiKey（只留前 6 后 4）。
+/// ⚠️ 不再返回 apiKeyFull 明文——本地 IPC 也按「掩码即掩码」处理，明文 key 仅存于
+/// ~/.workbuddy/models.json 源文件，前端展示一律用掩码（旧版返回明文字段与掩码设计矛盾）。
 fn mask_model(m: &Value) -> Value {
     let mut out = m.clone();
     let key = out
@@ -77,7 +79,6 @@ fn mask_model(m: &Value) -> Value {
         .unwrap_or_default();
     if !key.is_empty() {
         out["apiKey"] = json!(mask_key(&key));
-        out["apiKeyFull"] = json!(key);
         out["_hasKey"] = json!(true);
     } else {
         out["_hasKey"] = json!(false);
@@ -221,20 +222,26 @@ fn civil_from_days(z: i64) -> (i64, i64, i64) {
 /// 测试模型连通性：POST /chat/completions（短超时、max_tokens=8）
 pub fn test_model(m: &Value) -> Value {
     let url = m.get("url").and_then(|v| v.as_str()).unwrap_or("").to_string();
-    let key = m.get("apiKey").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let mut key = m.get("apiKey").and_then(|v| v.as_str()).unwrap_or("").to_string();
     let id = m.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    // ⚠️ 修复：列表「测试」传入的是掩码后的模型（apiKey 为 "sk-xxx…yyyy"），直接用它请求必 401。
+    // 若 key 缺失或仍是掩码形态，按 id 从 models.json 读完整 key 再测（表单测试传的是完整 key，不受影响）。
+    if !id.is_empty() && (key.is_empty() || key.contains('…') || key == "****") {
+        if let Ok(list) = read_raw() {
+            if let Some(full) = list.iter().find(|x| x.get("id").and_then(|v| v.as_str()) == Some(id.as_str())) {
+                if let Some(k) = full.get("apiKey").and_then(|v| v.as_str()) {
+                    key = k.to_string();
+                }
+            }
+        }
+    }
     if url.is_empty() || key.is_empty() {
-        return json!({"ok": false, "error": "缺少 url 或 apiKey"});
+        return json!({"ok": false, "error": "缺少 url 或 apiKey（该模型未保存完整 key，请在编辑表单中填写后再测试）"});
     }
     let t = std::time::Instant::now();
-    let client = reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(12))
-        .build()
-        .map_err(|e| e.to_string());
-    let client = match client {
-        Ok(c) => c,
-        Err(e) => return json!({"ok": false, "error": format!("客户端初始化失败: {}", e)}),
-    };
+    // 复用 lib.rs 的统一客户端（含 15s 超时 + HTTPS_PROXY/HTTP_PROXY 代理），
+    // 与其它官方接口请求行为一致——旧版在此自建裸 client，外网模型在代理环境下测不通。
+    let client = super::make_client();
     // url 可能是完整 chat/completions 或 base（如 /v1）
     let endpoint = if url.ends_with("/chat/completions") {
         url.clone()
@@ -277,8 +284,9 @@ pub fn test_model(m: &Value) -> Value {
     }
 }
 
-/// WorkBuddy 官方渠道模型清单（内置，WorkBuddy 自带不可编辑）
-/// 来源：从本机 WorkBuddy localStorage 探测到的官方模型 id（deepseek-v4-flash 等）
+/// WorkBuddy 官方渠道模型清单（内置展示，WorkBuddy 服务端提供、本地不可编辑）。
+/// ⚠️ 此清单为**内置静态列表**（旧注释误称"从 localStorage 探测"，实际为硬编码，
+/// 探测仅用于 current_model 判断"当前使用的是哪个"）。
 pub fn official_list() -> Value {
     json!([
         {"id":"deepseek-v4-flash","name":"DeepSeek V4 Flash","vendor":"官方 · direct","builtin":true},
@@ -292,34 +300,45 @@ pub fn official_list() -> Value {
 }
 
 /// 探测「当前使用模型」：扫描 WorkBuddy localStorage leveldb 二进制，返回命中的官方模型 id
-/// （只读，尽力而为；找不到返回 null）
+/// （只读，尽力而为；找不到返回 null）。跨平台候选目录：
+///   - macOS:   ~/.workbuddy/app/session/Local Storage/leveldb
+///   - Windows: %APPDATA%/WorkBuddy/app/session/Local Storage/leveldb 等
 pub fn current_model() -> Value {
-    let home = std::env::var("HOME").unwrap_or_default();
-    let dir = PathBuf::from(&home)
-        .join(".workbuddy")
-        .join("app")
-        .join("session")
-        .join("Local Storage")
-        .join("leveldb");
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    if let Ok(home) = std::env::var("HOME") {
+        dirs.push(PathBuf::from(&home).join(".workbuddy").join("app").join("session"));
+    }
+    if cfg!(target_os = "windows") {
+        for env in ["APPDATA", "LOCALAPPDATA"] {
+            if let Ok(d) = std::env::var(env) {
+                let base = PathBuf::from(&d);
+                dirs.push(base.join("WorkBuddy").join("app").join("session"));
+                dirs.push(base.join("CodeBuddyExtension").join("app").join("session"));
+            }
+        }
+    }
     let officials: Vec<&str> = vec![
         "deepseek-v4-flash", "gemini-2.5-pro", "claude-opus-4-8", "gpt-5.6",
         "glm-5.2.1", "qwen-max", "qwen-plus",
     ];
     let mut hit: Option<String> = None;
-    if let Ok(rd) = std::fs::read_dir(&dir) {
-        for ent in rd.flatten() {
-            let name = ent.file_name().to_string_lossy().to_string();
-            if !name.ends_with(".ldb") && !name.ends_with(".log") {
-                continue;
-            }
-            let Ok(buf) = std::fs::read(ent.path()) else { continue };
-            for o in &officials {
-                if buf.windows(o.len()).any(|w| w == o.as_bytes()) {
-                    hit = Some(o.to_string());
-                    break;
+    'outer: for base in dirs {
+        let dir = base.join("Local Storage").join("leveldb");
+        if let Ok(rd) = std::fs::read_dir(&dir) {
+            for ent in rd.flatten() {
+                let name = ent.file_name().to_string_lossy().to_string();
+                if !name.ends_with(".ldb") && !name.ends_with(".log") {
+                    continue;
                 }
+                let Ok(buf) = std::fs::read(ent.path()) else { continue };
+                for o in &officials {
+                    if buf.windows(o.len()).any(|w| w == o.as_bytes()) {
+                        hit = Some(o.to_string());
+                        break;
+                    }
+                }
+                if hit.is_some() { break 'outer; }
             }
-            if hit.is_some() { break; }
         }
     }
     match hit {
