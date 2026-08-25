@@ -213,7 +213,11 @@ function selectDir(d, all) {
 }
 
 function showAccountDetail(a, all) {
-  const isCur = a.uid === (all.find(x => x.lastLogin)?.uid || shortUid(a.uid));
+  // 修复：AccountInfo 无 lastLogin 字段（旧逻辑 `all.find(x => x.lastLogin)` 恒为 undefined，
+  // 且 `shortUid(a.uid)` 与全量 uid 永不相等 → isCur 恒 false，当前账号也误显示"需切换"）。
+  // 改判：AccountInfo.current 字段（后端 list_accounts 已带）或当前登录 uid。
+  const curUid = (window.__login && window.__login.uid) || ((all.find(x => x.current) || {}).uid);
+  const isCur = a.current === true || (curUid && a.uid === curUid);
   const items = [
     ['昵称', a.nickname ? privacy(a.nickname, { head: 3, tail: 4 }) : '—'],
     ['UID', privacy(a.uid, { head: 4, tail: 4 })],
@@ -355,7 +359,9 @@ function renderCheckin(body) {
   $('ck-streak').textContent = (d.streak_days || 0) + ' 天';
   $('ck-credit').textContent = (d.today_credit || 0);
   const dates = (d.checkin_dates || []).slice(-16);
-  const today = new Date().toISOString().slice(0, 10);
+  // 修复：旧代码用 toISOString()（UTC 日期），北京时间 0-8 点会与本地日期错位一天。
+  const now = new Date();
+  const today = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
   $('ck-timeline').innerHTML = dates.length ? dates.map(dt => {
     const isToday = dt === today;
     return `<span class="chip ${isToday ? 'today' : 'done'}">${dt.slice(5)}</span>`;
@@ -462,7 +468,7 @@ async function backupAll() {
     if (!rows || !rows.length) { toast('未发现可备份的账号'); return; }
     const okN = rows.filter(r => r.ok).length;
     const fails = rows.filter(r => !r.ok);
-    toast('已备份 ' + okN + '/' + rows.length + ' 个账号' + (fails.length ? '，' + fails.length + ' 个未保存过登录态' : ''));
+    toast('已备份 ' + okN + '/' + rows.length + ' 个账号' + (fails.length ? '，' + fails.length + ' 个失败（多为未保存过登录态）' : ''));
   } catch (e) { toast('备份失败: ' + e); }
 }
 
@@ -486,9 +492,9 @@ async function saveCurrentLogin() {
 // 切换中的账号，防止重复点击（切换较慢，重复点会叠加 IPC）
 let switchingUid = null;
 async function switchTo(uid) {
-  // 一键切换：切换前自动备份当前账号 → 写入目标登录态（真实 token + 真实 uid）
-  // → 重启 WorkBuddy 以新登录态生效。每个账号各自看各自的会话（WorkBuddy 按 token.sub 隔离），
-  // 中枢绝不改写 workbuddy.db 的会话归属。切换前若 WorkBuddy 正在运行，先弹确认框（避免中断任务）。
+  // 一键切换：切换前自动备份当前账号（含 workbuddy.db 会话库）→ 写入目标登录态（真实 token + 真实 uid）
+  // → 把源账号在 workbuddy.db 里的会话/自动化归属搬迁到目标账号名下（"搬"语义，用户核心诉求）
+  // → 重启 WorkBuddy 以新登录态生效。切换前若 WorkBuddy 正在运行，先弹确认框（避免中断任务）。
   if (switchingUid) { toast('正在切换 ' + shortUid(switchingUid) + '，请稍候…'); return; }
   try {
     // 复用最近一次 list_accounts 已带回的 workbuddy_running 状态，避免切换前再发一次 IPC。
@@ -531,17 +537,14 @@ let switchResolve = null;
 function confirmSwitchRisk(uid) {
   return new Promise(res => {
     $('sw-risk-uid').textContent = shortUid(uid);
-    $('sw-risk-status').textContent = '检测到 WorkBuddy 正在运行。切换将先关闭 WorkBuddy（如有任务正在生成/下载会被中断），再自动重启切换账号。';
+    $('sw-risk-status').textContent = '检测到 WorkBuddy 正在运行。切换将先关闭 WorkBuddy（如有任务正在生成/下载会被中断），再自动重启切换账号。\n\n⚠️ 切换会把「当前账号」在会话库里的对话/自动化搬迁到目标账号名下（"搬"语义）：切过去后能看到并继续原对话，但源账号视角下这些内容不再可见；来回切换会让会话在两个账号间流动。';
     $('sw-risk-modal').classList.add('show');
     switchResolve = res;
   });
 }
 function confirmSwitchYes() { $('sw-risk-modal').classList.remove('show'); if (switchResolve) { switchResolve(true); switchResolve = null; } }
 function confirmSwitchNo() { $('sw-risk-modal').classList.remove('show'); if (switchResolve) { switchResolve(false); switchResolve = null; } }
-if ($('btn-restart')) $('btn-restart').addEventListener('click', async () => {
-  try { await invoke('restart_workbuddy'); $('banner').classList.remove('show'); toast('已发送启动 WorkBuddy'); }
-  catch (e) { toast('启动失败: ' + e); }
-});
+// （banner 死 UI 已移除：切换后由 switchTo 自动调 restart_workbuddy，无需手动入口）
 
 async function refreshAccounts() {
   let data;
@@ -726,6 +729,12 @@ function buddyData(body, field) {
   const d = (typeof body === 'object' && 'data' in body) ? body.data : body;
   return d && field ? d[field] : d;
 }
+// 安全解析 body：可能已是对象，也可能是 JSON 字符串；解析失败原样返回，不抛异常
+// （旧代码在多处裸 JSON.parse，后端返回非 JSON 文本时会直接 throw 使整个面板报错）
+function parseBody(b) {
+  if (typeof b === 'string') { try { return JSON.parse(b); } catch { return b; } }
+  return b;
+}
 function setBuddyState(state, loc, desc, arriveAt) {
   const tag = $('buddy-state-tag'); if (!tag) return;
   const av = $('buddy-avatar');
@@ -767,7 +776,7 @@ async function loadBuddy() {
     if (st && st.error) { buddyLogAdd('读取状态失败: ' + st.error, 'err'); return false; }
     // 地点配置
     if (cfg && !cfg.error && cfg.status === 200) {
-      const cfgBody = typeof cfg.body === 'string' ? JSON.parse(cfg.body) : cfg.body;
+      const cfgBody = parseBody(cfg.body);
       const rawLocs = buddyData(cfgBody, 'locations') || buddyData(cfgBody, 'config') || [];
       buddyLocations = (Array.isArray(rawLocs) ? rawLocs : []).map(l => {
         const hMin = l.duration_hours_min ?? l.hour_min ?? l.duration_hour ?? 0;
@@ -786,7 +795,7 @@ async function loadBuddy() {
     }
     // 状态
     if (st.status === 200) {
-      const sBody = typeof st.body === 'string' ? JSON.parse(st.body) : st.body;
+      const sBody = parseBody(st.body);
       const d = buddyData(sBody);
       renderBuddy(d);
       ok = true;
@@ -857,7 +866,7 @@ async function buddyDepart(locationId, name) {
   const org = btn.textContent; btn.disabled = true; btn.textContent = '派出中…';
   try {
     const r = await invoke('buddy_depart', { locationId: id });
-    const b = typeof r.body === 'string' ? JSON.parse(r.body) : r.body;
+    const b = parseBody(r.body);
     if (r.error) { buddyLogAdd('派出失败: ' + r.error, 'err'); toast('派出失败: ' + r.error); }
     else if (r.status === 200) {
       buddyLogAdd(`已派出到「${name || id}」`, 'ok');
@@ -877,7 +886,7 @@ async function buddyClaim() {
   btn.disabled = true;
   try {
     const r = await invoke('buddy_claim');
-    const b = typeof r.body === 'string' ? JSON.parse(r.body) : r.body;
+    const b = parseBody(r.body);
     if (r.error) { buddyLogAdd('领取失败: ' + r.error, 'err'); toast('领取失败: ' + r.error); }
     else if (r.status === 200) {
       const got = b && (b.credit || b.reward || b.amount);
@@ -888,13 +897,16 @@ async function buddyClaim() {
       const em = (b && (b.msg || b.message)) || '暂无待领取的奖励';
       buddyLogAdd('领取未成功: ' + em, 'info');
       toast(em);
+      loadBuddy();   // 刷新按钮/状态（避免 400 后按钮状态滞留）
     } else {
       const em = (b && (b.message || b.msg)) || ('HTTP ' + r.status);
       buddyLogAdd('领取失败(' + r.status + '): ' + em, 'err');
       toast('领取失败: ' + em);
     }
-  } catch (e) { buddyLogAdd('领取出错: ' + e, 'err'); toast('领取出错: ' + e); }
-  btn.disabled = true; btn.textContent = '🎁 领取奖励';
+  } catch (e) { buddyLogAdd('领取出错: ' + e, 'err'); toast('领取出错: ' + e); loadBuddy(); }
+  // 修复：失败/无奖励可领时不再永久禁用按钮（旧代码末尾恒 `disabled=true`，400/异常后按钮
+  // 永远灰掉，必须手动刷新才恢复）。统一恢复后交由 setBuddyState 按 state 决定可用性。
+  btn.disabled = false; btn.textContent = '🎁 领取奖励';
 }
 
 // ===== 多账号批量：签到 + 宠物（每个账号用各自 vault 快照登录态分别请求） =====
@@ -905,7 +917,7 @@ async function doCheckinAll() {
   if (r && r.error) { toast('批量签到失败: ' + r.error); return; }
   renderCheckinAll(r.results || []);
   const s = r.summary || {};
-  toast(`批量签到完成：成功 ${s.ok || 0} · 已签 ${s.skipped || 0} · 失败 ${s.fail || 0}`);
+  toast(`批量签到完成：成功 ${s.ok || 0} · 跳过 ${s.skipped || 0} · 失败 ${s.fail || 0}`);
 }
 
 function renderCheckinAll(results) {
@@ -915,10 +927,13 @@ function renderCheckinAll(results) {
     const nick = r.nickname ? privacy(r.nickname, { head: 3, tail: 4 }) : '';
     const uid = r.uid;
     const skipped = r.skipped;
-    const state = r.error ? '<span class="soon">失败</span>'
+    // 修复：无登录态快照等「未执行」情形后端标记 skipped=true（与宠物批量口径一致），
+    // 渲染为「跳过」而非「失败」，并显示具体原因
+    const state = r.error
+      ? (r.skipped ? '<span class="pill" style="background:rgba(138,147,166,.18);color:var(--muted)">跳过</span>' : '<span class="soon">失败</span>')
       : (skipped ? '<span class="pill">已签到</span>'
       : (r.ok ? '<span class="ok">成功</span>' : '<span class="soon">未成功</span>'));
-    const statusTxt = r.error ? '—' : (skipped ? '已签' : (r.ok ? '新签' : '—'));
+    const statusTxt = r.error ? (r.skipped ? '跳过' : '—') : (skipped ? '已签' : (r.ok ? '新签' : '—'));
     const msg = r.error ? escapeHtml(r.error) : (r.message || (skipped ? '今日已签到' : '签到成功'));
     return `<tr>
       <td><b>${escapeHtml(nick || uid)}</b><br><span style="font-size:10px;color:var(--muted)">${privacy(uid, { head: 4, tail: 4 })}</span></td>
@@ -1062,7 +1077,7 @@ function startBuddyPoll() {
       const r = await invoke('buddy_status');
       if (r && r.error) return;
       if (r && r.status === 200) {
-        const b = typeof r.body === 'string' ? JSON.parse(r.body) : r.body;
+        const b = parseBody(r.body);
         const d = buddyData(b);
         if (d && d.state === 'arrived') {
           buddyLogAdd('检测到宠物已到达，自动领取奖励…', 'ok');
@@ -1132,17 +1147,17 @@ function loadNetworkParts() {
     });
   };
   retry(() => invoke('get_quota').then(j => {
-    if (j && j.status === 200) { renderQuota(typeof j.body === 'string' ? JSON.parse(j.body) : j.body); return true; }
+    if (j && j.status === 200) { renderQuota(parseBody(j.body)); return true; }
     return false;   // 静默失败，交给重试兜底，避免启动时反复弹 toast
   }).catch(e => { console.warn('quota err', e); return false; }), 0);
 
   retry(() => invoke('get_checkin').then(j => {
-    if (j && j.status === 200) { window.__checkin = j.body || {}; renderCheckin(typeof j.body === 'string' ? JSON.parse(j.body) : j.body); return true; }
+    if (j && j.status === 200) { window.__checkin = j.body || {}; renderCheckin(parseBody(j.body)); return true; }
     return false;
   }).catch(e => { console.warn('checkin err', e); return false; }), 0);
 
   retry(() => invoke('get_memory').then(j => {
-    if (j && j.status === 200) { renderMemory(typeof j.body === 'string' ? JSON.parse(j.body) : j.body); return true; }
+    if (j && j.status === 200) { renderMemory(parseBody(j.body)); return true; }
     return false;
   }).catch(e => { console.warn('memory err', e); return false; }), 0);
 }
@@ -1151,7 +1166,7 @@ async function loadQuota() {
   try {
     const j = await invoke('get_quota');
     $('raw-out').textContent = JSON.stringify(j, null, 2);
-    if (j.status === 200) renderQuota(typeof j.body === 'string' ? JSON.parse(j.body) : j.body);
+    if (j.status === 200) renderQuota(parseBody(j.body));
   } catch (e) { $('raw-out').textContent = '错误：' + e; }
 }
 async function doCheckin() {
@@ -1212,7 +1227,7 @@ function renderApiPanel() {
     // Key 属于隐私数据，统一走 privacy()（中段高斯模糊，全局眼睛控制）
     let keyHtml;
     if (m._hasKey) {
-      const fullKey = m.apiKeyFull || m.apiKey || '****';
+      const fullKey = m.apiKey || '****';
       keyHtml = `<span class="key-sec">${privacy(fullKey, { head: 6, tail: 4 })}</span>`;
     } else {
       keyHtml = `<span class="key-sec"><span class="psec"><span class="pre">无 Key</span></span></span>`;
@@ -1349,6 +1364,8 @@ async function saveModel() {
     provider = $('mf-provider').value.trim(), label = $('mf-label').value.trim(),
     ctx = parseInt($('mf-ctx').value) || 128000, max = parseInt($('mf-max').value) || 8192;
   if (!id || !url) { err.textContent = '请填写 模型 ID 和 API 地址'; err.style.display = 'block'; return; }
+  // 修复：新增时必须填 API Key（否则会存出永远测不通的模型）；编辑留空 = 保持原 key
+  if (!editingId && !key) { err.textContent = '新增模型必须填写 API Key'; err.style.display = 'block'; return; }
   const payload = {
     name: name || id, id,
     url, apiKey: key,
@@ -1380,7 +1397,7 @@ async function restartWB() {
 
 // 暴露给 inline onclick（安全：未定义的函数跳过，不影响其余，更不阻断 bootBootstrap）
 (function expose(){
-  const names = ['addModel','editModel','delModel','testModel','testCurrentForm','saveModel','closeModelModal','restartWB','loadAll','loadQuota','doCheckin','openReport','closeReport','copyReport','ensureSnapshot','backupAll','saveCurrentLogin','confirmSwitchYes','confirmSwitchNo','switchTo','openBackups','renderBackups','openBackupDetail','closeBackups','closeBackupDetail','loadBuddy','buddyDepart','buddyClaim'];
+  const names = ['addModel','editModel','delModel','testModel','testCurrentForm','saveModel','closeModelModal','restartWB','loadAll','loadQuota','doCheckin','openReport','closeReport','copyReport','ensureSnapshot','backupAll','saveCurrentLogin','confirmSwitchYes','confirmSwitchNo','switchTo','openBackups','renderBackups','openBackupDetail','closeBackups','closeBackupDetail','loadBuddy','buddyDepart','buddyClaim','buddyDepartAll','buddyClaimAll','buddyDepartFor','buddyClaimFor','refreshBuddyAll','doCheckinAll','toggleAllKeys','refreshAll'];
   for (const n of names) {
     try {
       const fn = eval(n);
@@ -1416,6 +1433,8 @@ function bootBootstrap() {
     try {
       await loadAll();
       bootLog('启动加载完成', 'ok');
+      // 诊断条常驻会遮挡 UI，加载成功后 4 秒自动隐藏（失败时保留便于排查）
+      setTimeout(() => { const el = $('boot-log'); if (el) el.classList.remove('show'); }, 4000);
     } catch (e) {
       bootLog('启动加载失败，5秒后重试：' + e.message, 'err');
       if (retries < 8) setTimeout(() => tryLoadAll(retries + 1), 5000);
