@@ -441,6 +441,18 @@ fn backup_detail(uid: String, ts: String) -> Result<Value, String> {
     Ok(serde_json::to_value(m).unwrap_or(Value::Null))
 }
 
+/// 诊断会话存储一致性（只读，返回 JSON 报告），供高级用户排查"会话不见了"类问题。
+#[tauri::command]
+fn diagnose_sessions() -> String {
+    ops::diagnose_sessions()
+}
+
+/// 恢复一条被软删的会话（清空 deleted_at）。调用前应确保 WorkBuddy 已退出。
+#[tauri::command]
+fn restore_deleted_session(id: String) -> Result<(), String> {
+    ops::restore_deleted_session(&id)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -477,7 +489,9 @@ pub fn run() {
             test_custom_model,
             official_models,
             current_model,
-            models_path
+            models_path,
+            diagnose_sessions,
+            restore_deleted_session
         ])
         .run(tauri::generate_context!())
         .expect("error while running WorkBuddy Account Hub");

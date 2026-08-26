@@ -845,7 +845,7 @@ pub fn switch_account(vault: &Path, uid: &str) -> Result<SwitchResult, String> {
         aggregate_id: String::new(),
         message: {
             let mut m = format!(
-                "已切换到目标账号（{}）：搬迁会话 {} 条、自动化 {} 条，准备重启 WorkBuddy 生效",
+                "已切换到目标账号（{}）：搬迁会话 {} 条、自动化 {} 条（归属为【搬移】而非复制，切回原账号时这些会话将不再显示），准备重启 WorkBuddy 生效",
                 uid, migrated_sessions, migrated_autos
             );
             if let Some(w) = &pin_warn {
@@ -924,7 +924,11 @@ pub fn migrate_sessions_user_id(from_uid: &str, to_uid: &str) -> Result<(i64, i6
 /// 切换账号时 `migrate_sessions_user_id` 只改写了 workbuddy.db 的 user_id，没动这个
 /// localStorage → 置顶映射仍挂在旧 `u:<from_uid>` 键下，新登录读 `u:<to_uid>`（空）→ 置顶丢失。
 ///
-/// 本函数把**所有**以 `:u:<from_uid>` 结尾的渲染层键复制为 `:u:<to_uid>` 并删除旧键。
+/// 本函数精确匹配两类渲染层键并 re-key 到 to_uid：
+///   - `workbuddy-pinned-conversations:<uid>`（置顶会话列表，键以 `:<uid>` 结尾）
+///   - `wb:conversation-list:expanded-state:u:<uid>`（面板展开状态，键以 `:u:<uid>` 结尾）
+/// 注意：v0.5.2 曾只用 `:u:<uid>` 后缀，导致**只迁了 expanded-state、漏迁真正的置顶列表**；
+/// 这里用两个精确前缀分别匹配，确保切账号后置顶会话真正随之迁移。
 /// 必须在 WorkBuddy 已退出（leveldb 锁释放）后调用（switch_account 开头已 quit_workbuddy）。
 ///
 /// ⚠️ 设计为 best-effort：任何错误返回 Err(String) 作为【警告】，由调用方决定是否中止切换
@@ -955,8 +959,10 @@ impl Key for BytesKey {
 }
 
 pub fn migrate_renderer_pin_state(from_uid: &str, to_uid: &str) -> Result<(), String> {
-    let suffix_from = format!(":u:{from_uid}");
-    let suffix_to = format!(":u:{to_uid}");
+    let pat_pin_from = format!("workbuddy-pinned-conversations:{from_uid}");
+    let pat_pin_to = format!("workbuddy-pinned-conversations:{to_uid}");
+    let pat_exp_from = format!("wb:conversation-list:expanded-state:u:{from_uid}");
+    let pat_exp_to = format!("wb:conversation-list:expanded-state:u:{to_uid}");
 
     let mut dir = workbuddy_home();
     dir.push("app");
@@ -972,16 +978,22 @@ pub fn migrate_renderer_pin_state(from_uid: &str, to_uid: &str) -> Result<(), St
     // 键类型必须是 BytesKey（db-key 0.0.5 只实现 Key for i32，必须自定义字节键）。
     let db: Database<BytesKey> = open_leveldb_with_retry(&dir)?;
 
-    // 遍历全部键，收集需要改名的（键以 :u:<from_uid> 结尾）
+    // 遍历全部键，收集需要改名的（精确匹配 pinned 列表键 与 expanded-state 键，按 from_uid）
     let read_opts = ReadOptions::new();
     let iter = db.iter(read_opts);
     iter.start();
     let mut to_rename: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
     for (key, val) in iter {
         if let Ok(kstr) = std::str::from_utf8(key.as_bytes()) {
-            if let Some(base) = kstr.strip_suffix(&suffix_from) {
-                let new_key = format!("{base}{suffix_to}");
-                to_rename.push((new_key.into_bytes(), val));
+            let new_key: Option<String> = if let Some(base) = kstr.strip_suffix(&pat_pin_from) {
+                Some(format!("{base}{pat_pin_to}"))
+            } else if let Some(base) = kstr.strip_suffix(&pat_exp_from) {
+                Some(format!("{base}{pat_exp_to}"))
+            } else {
+                None
+            };
+            if let Some(nk) = new_key {
+                to_rename.push((nk.into_bytes(), val));
             }
         }
     }
@@ -993,16 +1005,24 @@ pub fn migrate_renderer_pin_state(from_uid: &str, to_uid: &str) -> Result<(), St
     // 写新键 + 删旧键（best-effort：单条失败记日志但继续）
     let mut done = 0usize;
     for (new_key, val) in &to_rename {
-        // 旧键 = 新键去掉 suffix_to 再拼回 suffix_from
-        if let Ok(nstr) = std::str::from_utf8(new_key) {
-            if let Some(base) = nstr.strip_suffix(&suffix_to) {
-                let old_key = format!("{base}{suffix_from}").into_bytes();
-                let write_opts = WriteOptions::new();
-                if db.put(write_opts, BytesKey(new_key.clone()), val).is_ok() {
-                    let del_opts = WriteOptions::new();
-                    let _ = db.delete(del_opts, BytesKey(old_key));
-                    done += 1;
-                }
+        // 旧键 = 新键把 to 模式换回 from 模式
+        let old_key: Option<Vec<u8>> = if let Ok(nstr) = std::str::from_utf8(new_key) {
+            if let Some(base) = nstr.strip_suffix(&pat_pin_to) {
+                Some(format!("{base}{pat_pin_from}").into_bytes())
+            } else if let Some(base) = nstr.strip_suffix(&pat_exp_to) {
+                Some(format!("{base}{pat_exp_from}").into_bytes())
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        if let Some(old) = old_key {
+            let write_opts = WriteOptions::new();
+            if db.put(write_opts, BytesKey(new_key.clone()), val).is_ok() {
+                let del_opts = WriteOptions::new();
+                let _ = db.delete(del_opts, BytesKey(old));
+                done += 1;
             }
         }
     }
@@ -1251,4 +1271,65 @@ pub fn launch_workbuddy() -> Result<(), String> {
     } else {
         Err("当前平台不支持启动 WorkBuddy".into())
     }
+}
+
+/// 诊断会话存储一致性（运维 / 自助修复用，best-effort，不修改任何数据）。
+///
+/// 返回 JSON 报告：
+///   - db_sessions_by_user: 各 user_id 的会话总数与软删数
+///   - deleted_sessions:    被软删（deleted_at 非空）的会话列表（最多 50 条）
+///   - renderer_leveldb_exists: 渲染层 leveldb 是否存在
+///
+/// 用途：用户遇到"会话不见了"时，先跑这个判断是「真删除 / 归属其他账号 / 仅是渲染层不显示」，
+/// 避免盲目改库。配合 `restore_deleted_session` 可一键恢复软删会话。
+pub fn diagnose_sessions() -> String {
+    let mut report = serde_json::Map::new();
+    if let Some(db) = workbuddy_db_path() {
+        if let Ok(conn) = Connection::open(&db) {
+            if let Ok(mut stmt) = conn.prepare("SELECT user_id, COUNT(*), COALESCE(SUM(CASE WHEN deleted_at IS NOT NULL THEN 1 ELSE 0 END),0) FROM sessions GROUP BY user_id") {
+                if let Ok(rows) = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, i64>(2)?))) {
+                    let mut by_user = serde_json::Map::new();
+                    for row in rows {
+                        if let Ok((uid, total, deleted)) = row {
+                            by_user.insert(uid, serde_json::json!({"total": total, "deleted": deleted}));
+                        }
+                    }
+                    report.insert("db_sessions_by_user".into(), serde_json::Value::Object(by_user));
+                }
+            }
+            if let Ok(mut stmt) = conn.prepare("SELECT id, title, deleted_at, user_id FROM sessions WHERE deleted_at IS NOT NULL ORDER BY deleted_at DESC LIMIT 50") {
+                if let Ok(rows) = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?, r.get::<_, i64>(2)?, r.get::<_, String>(3)?))) {
+                    let mut list = Vec::new();
+                    for row in rows {
+                        if let Ok((id, title, del, uid)) = row {
+                            list.push(serde_json::json!({"id": id, "title": title, "deleted_at": del, "user_id": uid}));
+                        }
+                    }
+                    report.insert("deleted_sessions".into(), serde_json::Value::Array(list));
+                }
+            }
+        }
+    }
+    let mut dir = workbuddy_home();
+    dir.push("app");
+    dir.push("session");
+    dir.push("Local Storage");
+    dir.push("leveldb");
+    report.insert("renderer_leveldb_exists".into(), serde_json::json!(dir.exists()));
+    serde_json::to_string_pretty(&serde_json::Value::Object(report)).unwrap_or_else(|_| "{}".to_string())
+}
+
+/// 恢复一条被软删的会话（清空 deleted_at，无损还原到会话列表）。
+///
+/// ⚠️ 调用前请确保 WorkBuddy 已退出（否则其回写可能再次覆盖 deleted_at）。
+pub fn restore_deleted_session(id: &str) -> Result<(), String> {
+    let Some(db) = workbuddy_db_path() else {
+        return Err("未找到会话库 workbuddy.db".into());
+    };
+    let conn = Connection::open(&db).map_err(|e| e.to_string())?;
+    let n = conn.execute("UPDATE sessions SET deleted_at = NULL WHERE id = ?1", [id]).map_err(|e| e.to_string())?;
+    if n == 0 {
+        return Err(format!("未找到会话 {id}（或该会话未被软删）"));
+    }
+    Ok(())
 }
