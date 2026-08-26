@@ -1308,6 +1308,40 @@ pub fn diagnose_sessions() -> String {
                     report.insert("deleted_sessions".into(), serde_json::Value::Array(list));
                 }
             }
+            // 空标题会话（标题为 NULL 或空串）：主程序列表里显示为空白条目，用户易误以为"丢失"。
+            if let Ok(mut stmt) = conn.prepare("SELECT id, user_id, last_activity_at, status FROM sessions WHERE (title IS NULL OR TRIM(title) = '') AND deleted_at IS NULL ORDER BY last_activity_at DESC LIMIT 100") {
+                if let Ok(rows) = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, i64>(2)?, r.get::<_, Option<String>>(3)?))) {
+                    let mut ids = Vec::new();
+                    let mut cnt = 0usize;
+                    for row in rows {
+                        if let Ok((id, uid, la, st)) = row {
+                            cnt += 1;
+                            if ids.len() < 60 {
+                                ids.push(serde_json::json!({"id": id, "user_id": uid, "last_activity_at": la, "status": st}));
+                            }
+                        }
+                    }
+                    report.insert("empty_title_count".into(), serde_json::json!(cnt));
+                    report.insert("empty_title_sessions".into(), serde_json::Value::Array(ids));
+                }
+            }
+            // 异常终止（status='terminated'）的会话：用户口中"说到一半不见了"的典型元凶。
+            if let Ok(mut stmt) = conn.prepare("SELECT id, title, user_id, last_activity_at FROM sessions WHERE status = 'terminated' AND deleted_at IS NULL ORDER BY last_activity_at DESC LIMIT 100") {
+                if let Ok(rows) = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?, r.get::<_, String>(2)?, r.get::<_, i64>(3)?))) {
+                    let mut ids = Vec::new();
+                    let mut cnt = 0usize;
+                    for row in rows {
+                        if let Ok((id, title, uid, la)) = row {
+                            cnt += 1;
+                            if ids.len() < 60 {
+                                ids.push(serde_json::json!({"id": id, "title": title, "user_id": uid, "last_activity_at": la}));
+                            }
+                        }
+                    }
+                    report.insert("terminated_count".into(), serde_json::json!(cnt));
+                    report.insert("terminated_sessions".into(), serde_json::Value::Array(ids));
+                }
+            }
         }
     }
     let mut dir = workbuddy_home();
@@ -1392,4 +1426,228 @@ pub fn add_pinned_session(uid: &str, sid: &str) -> Result<(), String> {
     db.put(write_opts, BytesKey(key.into_bytes()), &new_bytes)
         .map_err(|e| e.to_string())?;
     Ok(())
+}
+
+/// 导出某账号的全部会话清单（元数据）为 JSON 字符串，供用户留档 / 自助检索。
+///
+/// 只读取 workbuddy.db 的 sessions 表（含 id/标题/状态/时间），不涉及渲染层、不修改任何数据。
+/// 这是「会话防丢失」的底层保障：用户可随时导出一份可读清单，即使主程序某天显示异常，
+/// 也能凭此核对"会话是否真的还在库里"。`include_deleted=true` 时连软删会话一并导出。
+pub fn export_sessions(uid: &str, include_deleted: bool) -> String {
+    let mut out = serde_json::Map::new();
+    out.insert("uid".into(), serde_json::json!(uid));
+    out.insert("exported_at".into(), serde_json::json!(chrono_now()));
+    let mut list = Vec::new();
+    if let Some(db) = workbuddy_db_path() {
+        if let Ok(conn) = Connection::open(&db) {
+            let sql = if include_deleted {
+                "SELECT id, title, custom_title, status, created_at, updated_at, last_activity_at, deleted_at, user_id \
+                 FROM sessions WHERE user_id = ?1 ORDER BY last_activity_at DESC"
+            } else {
+                "SELECT id, title, custom_title, status, created_at, updated_at, last_activity_at, deleted_at, user_id \
+                 FROM sessions WHERE user_id = ?1 AND deleted_at IS NULL ORDER BY last_activity_at DESC"
+            };
+            if let Ok(mut stmt) = conn.prepare(sql) {
+                if let Ok(rows) = stmt.query_map([uid], |r| Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, Option<String>>(1)?,
+                    r.get::<_, Option<String>>(2)?,
+                    r.get::<_, Option<String>>(3)?,
+                    r.get::<_, i64>(4)?,
+                    r.get::<_, i64>(5)?,
+                    r.get::<_, i64>(6)?,
+                    r.get::<_, Option<i64>>(7)?,
+                    r.get::<_, String>(8)?,
+                ))) {
+                    for row in rows {
+                        if let Ok((id, title, custom_title, status, created, updated, last, deleted, _u)) = row {
+                            list.push(serde_json::json!({
+                                "id": id,
+                                "title": title,
+                                "custom_title": custom_title,
+                                "status": status,
+                                "created_at": created,
+                                "updated_at": updated,
+                                "last_activity_at": last,
+                                "deleted_at": deleted,
+                            }));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    out.insert("count".into(), serde_json::json!(list.len()));
+    out.insert("sessions".into(), serde_json::Value::Array(list));
+    serde_json::to_string_pretty(&serde_json::Value::Object(out)).unwrap_or_else(|_| "{}".to_string())
+}
+
+/// 从字节串中提取所有被双引号包裹的子串（用于从渲染层 value 里抽取会话 id 列表，
+/// 兼容可能的前导/包裹字节，不依赖 JSON 解析）。
+fn extract_quoted_strings(b: &[u8]) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'"' {
+            let mut j = i + 1;
+            let mut s: Vec<u8> = Vec::new();
+            while j < b.len() && b[j] != b'"' {
+                if b[j] == b'\\' && j + 1 < b.len() {
+                    s.push(b[j + 1]);
+                    j += 2;
+                    continue;
+                }
+                s.push(b[j]);
+                j += 1;
+            }
+            if j < b.len() {
+                let st = String::from_utf8_lossy(&s).to_string();
+                if !st.is_empty() {
+                    out.push(st);
+                }
+            }
+            i = j + 1;
+        } else {
+            i += 1;
+        }
+    }
+    out
+}
+
+/// 重建置顶列表字节：保持 `[` 之前与 `]` 之后的原始字节（包裹字节），中间重建为合法 JSON 数组。
+/// 若原值不含 `[`（极异常，不是数组），则直接覆盖为纯数组（等价于重建），仍可接受。
+fn rebuild_pinned_value(original: &[u8], keep: &[String]) -> Vec<u8> {
+    let open = original.iter().position(|&b| b == b'[').unwrap_or(0);
+    let close = original.iter().rposition(|&b| b == b']').unwrap_or(original.len());
+    let mut out = original[..open].to_vec();
+    out.extend_from_slice(b"[");
+    let body = keep
+        .iter()
+        .enumerate()
+        .map(|(i, s)| format!("{}\"{}\"", if i == 0 { "" } else { "," }, s))
+        .collect::<String>();
+    out.extend_from_slice(body.as_bytes());
+    out.extend_from_slice(&original[close..]); // 保留 ']' 及之后包裹字节
+    out
+}
+
+/// 诊断某账号的渲染层置顶列表（只读）：读取 `workbuddy-pinned-conversations:<uid>`，
+/// 比对会话库，标出"悬空置顶"（pinned 里引用了 db 中不存在 / 已软删的会话）。
+///
+/// ⚠️ 须在 WorkBuddy 退出后调用（否则 leveldb 锁导致只读打开也可能失败）。
+pub fn diagnose_pinned(uid: &str) -> String {
+    let mut report = serde_json::Map::new();
+    report.insert("uid".into(), serde_json::json!(uid));
+
+    // 1) 收集 db 中该 uid 的有效会话 id 与软删 id
+    let mut valid = std::collections::HashSet::new();
+    let mut soft_deleted = std::collections::HashSet::new();
+    if let Some(db) = workbuddy_db_path() {
+        if let Ok(conn) = Connection::open(&db) {
+            if let Ok(mut stmt) = conn.prepare("SELECT id, deleted_at FROM sessions WHERE user_id = ?1") {
+                if let Ok(rows) = stmt.query_map([uid], |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<i64>>(1)?))) {
+                    for row in rows {
+                        if let Ok((id, del)) = row {
+                            if del.is_some() {
+                                soft_deleted.insert(id);
+                            } else {
+                                valid.insert(id);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // 2) 读渲染层置顶列表（兼容可能的前导/包裹字节，用引号提取 sid）
+    let mut dir = workbuddy_home();
+    dir.push("app");
+    dir.push("session");
+    dir.push("Local Storage");
+    dir.push("leveldb");
+    let mut pinned: Vec<String> = Vec::new();
+    if dir.exists() {
+        if let Ok(db_lv) = open_leveldb_with_retry(&dir) {
+            let key = format!("workbuddy-pinned-conversations:{uid}");
+            if let Ok(Some(val)) = db_lv.get(ReadOptions::new(), BytesKey(key.into_bytes())) {
+                pinned = extract_quoted_strings(&val);
+            }
+        } else {
+            report.insert("leveldb_error".into(), serde_json::json!("渲染层 leveldb 打开失败（WorkBuddy 可能仍在运行，请先退出）"));
+        }
+    }
+
+    // 3) 比对
+    let mut orphan = Vec::new();
+    let mut ok_list = Vec::new();
+    for s in &pinned {
+        if valid.contains(s) {
+            ok_list.push(s.clone());
+        } else {
+            orphan.push(serde_json::json!({
+                "sid": s,
+                "reason": if soft_deleted.contains(s) { "已软删" } else { "db 中不存在" }
+            }));
+        }
+    }
+    report.insert("pinned_total".into(), serde_json::json!(pinned.len()));
+    report.insert("valid".into(), serde_json::json!(ok_list));
+    report.insert("orphan".into(), serde_json::Value::Array(orphan.clone()));
+    report.insert("orphan_count".into(), serde_json::json!(orphan.len()));
+    serde_json::to_string_pretty(&serde_json::Value::Object(report)).unwrap_or_else(|_| "{}".to_string())
+}
+
+/// 清理某账号置顶列表里的"悬空项"（pinned 引用了 db 中不存在 / 已软删的会话）。
+///
+/// 字节级安全：仅移除悬空 sid，保留合法项与原 `[` 前 / `]` 后的包裹字节；
+/// 须在 WorkBuddy 退出后调用。返回清理掉的条数。
+pub fn cleanup_orphan_pinned(uid: &str) -> Result<usize, String> {
+    let mut dir = workbuddy_home();
+    dir.push("app");
+    dir.push("session");
+    dir.push("Local Storage");
+    dir.push("leveldb");
+    if !dir.exists() {
+        return Err("渲染层 localStorage 不存在".into());
+    }
+    let db_lv: Database<BytesKey> = open_leveldb_with_retry(&dir)?;
+    let key = format!("workbuddy-pinned-conversations:{uid}");
+    let existing: Option<Vec<u8>> = db_lv
+        .get(ReadOptions::new(), BytesKey(key.clone().into_bytes()))
+        .map_err(|e| e.to_string())?;
+    let value = existing.ok_or_else(|| "该账号无置顶列表，无需清理".to_string())?;
+    if value.is_empty() {
+        return Ok(0);
+    }
+
+    // 收集 db 中该 uid 的有效（未软删）会话 id
+    let mut valid = std::collections::HashSet::new();
+    if let Some(db) = workbuddy_db_path() {
+        if let Ok(conn) = Connection::open(&db) {
+            if let Ok(mut stmt) = conn.prepare("SELECT id FROM sessions WHERE user_id = ?1 AND deleted_at IS NULL") {
+                if let Ok(rows) = stmt.query_map([uid], |r| Ok(r.get::<_, String>(0)?)) {
+                    for row in rows {
+                        if let Ok(id) = row {
+                            valid.insert(id);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let pinned = extract_quoted_strings(&value);
+    let keep: Vec<String> = pinned.iter().filter(|s| valid.contains(*s)).cloned().collect();
+    let removed = pinned.len() - keep.len();
+    if removed == 0 {
+        return Ok(0);
+    }
+
+    let new_bytes = rebuild_pinned_value(&value, &keep);
+    let write_opts = WriteOptions::new();
+    db_lv
+        .put(write_opts, BytesKey(key.into_bytes()), &new_bytes)
+        .map_err(|e| e.to_string())?;
+    Ok(removed)
 }

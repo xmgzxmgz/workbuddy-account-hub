@@ -1397,7 +1397,7 @@ async function restartWB() {
 
 // 暴露给 inline onclick（安全：未定义的函数跳过，不影响其余，更不阻断 bootBootstrap）
 (function expose(){
-  const names = ['addModel','editModel','delModel','testModel','testCurrentForm','saveModel','closeModelModal','restartWB','loadAll','loadQuota','doCheckin','openReport','closeReport','copyReport','ensureSnapshot','backupAll','saveCurrentLogin','confirmSwitchYes','confirmSwitchNo','switchTo','openBackups','renderBackups','openBackupDetail','closeBackups','closeBackupDetail','loadBuddy','buddyDepart','buddyClaim','buddyDepartAll','buddyClaimAll','buddyDepartFor','buddyClaimFor','refreshBuddyAll','doCheckinAll','toggleAllKeys','refreshAll'];
+  const names = ['addModel','editModel','delModel','testModel','testCurrentForm','saveModel','closeModelModal','restartWB','loadAll','loadQuota','doCheckin','openReport','closeReport','copyReport','ensureSnapshot','backupAll','saveCurrentLogin','confirmSwitchYes','confirmSwitchNo','switchTo','openBackups','renderBackups','openBackupDetail','closeBackups','closeBackupDetail','loadBuddy','buddyDepart','buddyClaim','buddyDepartAll','buddyClaimAll','buddyDepartFor','buddyClaimFor','refreshBuddyAll','doCheckinAll','toggleAllKeys','refreshAll','stAddPinned','stDiagnose','stDiagnosePinned','stCleanupPinned','stExport'];
   for (const n of names) {
     try {
       const fn = eval(n);
@@ -1409,6 +1409,55 @@ async function restartWB() {
 
 // 一键「刷新全部」：本地信息 + 网络部分 + 宠物面板一次性全部刷新（含宠物，避免只点宠物按钮才出）
 function refreshAll() { loadAll(); loadBuddy(); }
+
+// ===== 会话防丢失工具（运维面板） =====
+// 这些操作直接读写会话库 / 渲染层 leveldb；涉及置顶的须在关闭 WorkBuddy 后执行。
+async function stAddPinned() {
+  const uid = $('st-uid').value.trim(), sid = $('st-sid').value.trim();
+  if (!uid || !sid) { toast('请填写 UID 和会话 ID'); return; }
+  try {
+    await invoke('add_pinned_session', { uid, sid });
+    toast('已加置顶（若 WorkBuddy 在运行则写入可能失败，请先关闭）', 'ok');
+  } catch (e) { toast('加置顶失败: ' + e, 'err'); }
+}
+async function stDiagnose() {
+  try {
+    const r = await invoke('diagnose_sessions');
+    $('st-out').textContent = r;
+  } catch (e) { $('st-out').textContent = '诊断失败: ' + e; }
+}
+async function stDiagnosePinned() {
+  const uid = $('st-uid').value.trim();
+  if (!uid) { toast('请填写 UID'); return; }
+  try {
+    const r = await invoke('diagnose_pinned', { uid });
+    $('st-out').textContent = r;
+  } catch (e) { $('st-out').textContent = '诊断失败: ' + e; }
+}
+async function stCleanupPinned() {
+  const uid = $('st-uid').value.trim();
+  if (!uid) { toast('请填写 UID'); return; }
+  try {
+    const n = await invoke('cleanup_orphan_pinned', { uid });
+    toast('已清理悬空置顶 ' + n + ' 条（请确认已关闭 WorkBuddy）', 'ok');
+    stDiagnosePinned();
+  } catch (e) { toast('清理失败: ' + e, 'err'); }
+}
+async function stExport() {
+  const uid = $('st-uid').value.trim();
+  if (!uid) { toast('请填写 UID'); return; }
+  try {
+    const r = await invoke('export_sessions', { uid, include_deleted: false });
+    const blob = new Blob([r], { type: 'application/json' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'sessions_' + uid + '.json';
+    a.click();
+    URL.revokeObjectURL(a.href);
+    $('st-out').textContent = r;
+    toast('已导出会话清单（JSON 已下载）', 'ok');
+  } catch (e) { toast('导出失败: ' + e, 'err'); }
+}
 
 // ==== 启动时序优化 ====
 // 问题：webview 首次初始化时 invoke 可能偶发失败 / 后端刚就绪，导致

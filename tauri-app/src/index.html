@@ -448,6 +448,26 @@
       <div id="official-list"><span class="empty">加载中…</span></div>
     </div>
 
+    <div class="section-title">会话防丢失工具</div>
+    <div class="panel" style="margin-top:12px;">
+      <h2>会话防丢失工具 <span class="tag">运维 · 须先关闭 WorkBuddy</span></h2>
+      <div class="kv" style="margin-bottom:10px;">
+        <div class="item" style="border-bottom:none;"><span class="k">说明</span><span class="v" style="max-width:100%;white-space:normal;font-weight:400;">这些操作直接读写会话库 / 渲染层 leveldb。涉及置顶的须在<b>关闭 WorkBuddy 主程序</b>后执行，否则写入失败；「诊断」「导出」只读、随时可用。</span></div>
+      </div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:10px;">
+        <input id="st-uid" placeholder="账号 UID（如 4c6af085…）" style="max-width:260px;">
+        <input id="st-sid" placeholder="会话 ID（如 e42949bc…）" style="max-width:260px;">
+        <button class="mini" onclick="stAddPinned()">加置顶</button>
+      </div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px;">
+        <button class="mini secondary" onclick="stDiagnose()">诊断会话存储</button>
+        <button class="mini secondary" onclick="stDiagnosePinned()">诊断置顶(uid)</button>
+        <button class="mini secondary" onclick="stCleanupPinned()">清理悬空置顶(uid)</button>
+        <button class="mini secondary" onclick="stExport()">导出会话清单(uid)</button>
+      </div>
+      <pre id="st-out">点「诊断会话存储」查看报告（空标题 / 异常终止 / 软删会话一目了然）…</pre>
+    </div>
+
     <div class="panel" style="margin-top:12px;">
       <h2>原始返回（调试）</h2>
       <pre id="raw-out">点击「刷新全部」…</pre>
