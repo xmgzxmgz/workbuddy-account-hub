@@ -1333,3 +1333,63 @@ pub fn restore_deleted_session(id: &str) -> Result<(), String> {
     }
     Ok(())
 }
+
+/// 把一个会话追加进指定账号的「置顶会话列表」（渲染层 `workbuddy-pinned-conversations:<uid>`）。
+///
+/// 用途：当用户手动取消置顶、或希望把某个会话重新置顶时，无需打开主应用 UI，
+/// 由账号中枢直接改写渲染层 leveldb 即可（与 `migrate_renderer_pin_state` 共用同一套
+/// 已验证兼容的 Rust leveldb 读写逻辑）。本次即用于把 `e42949bc` 重新加回 `4c6af085` 置顶。
+///
+/// ⚠️ 必须在 WorkBuddy 已退出（leveldb 锁释放）后调用，否则打开会失败。
+///
+/// 实现采用「字节级安全插入」而非 JSON 解析：
+///   - 渲染层 value 是 JSON 数组（可能带前导/外层包裹字节）；
+///   - 不解析、不假设编码，只在最后一个 `]`（数组闭合）前插入 `"<sid>"`，
+///     若数组非空则补前导逗号，空数组则直接构造 `["<sid>"]`；
+///   - 保留 `]` 之前/之后的所有原始字节（包裹字节原样不动），避免破坏 Chromium/WorkBuddy 的存储格式；
+///   - 若 sid 已存在于置顶列表（字节级子串匹配）则幂等跳过。
+pub fn add_pinned_session(uid: &str, sid: &str) -> Result<(), String> {
+    let mut dir = workbuddy_home();
+    dir.push("app");
+    dir.push("session");
+    dir.push("Local Storage");
+    dir.push("leveldb");
+    if !dir.exists() {
+        return Err("渲染层 localStorage 不存在，无需置顶".into());
+    }
+    let db: Database<BytesKey> = open_leveldb_with_retry(&dir)?;
+    let key = format!("workbuddy-pinned-conversations:{uid}");
+    let read_opts = ReadOptions::new();
+    let existing: Option<Vec<u8>> = db
+        .get(read_opts, BytesKey(key.clone().into_bytes()))
+        .map_err(|e| e.to_string())?;
+    let value = existing.unwrap_or_default();
+
+    // 幂等：sid 已在该置顶列表中则跳过（字节级子串匹配，避免重复插入）
+    if value.len() >= sid.len() && value.windows(sid.len()).any(|w| w == sid.as_bytes()) {
+        return Ok(());
+    }
+
+    // 字节级插入：定位最后一个 ']'（数组闭合）
+    let new_bytes = if value.is_empty() {
+        format!("[\"{}\"]", sid).into_bytes()
+    } else if let Some(pos) = value.iter().rposition(|&b| b == b']') {
+        let mut out = value[..pos].to_vec();
+        // 若 ']' 前一个字节是 '['（空数组）则无需逗号
+        if pos > 0 && value[pos - 1] == b'[' {
+            out.extend_from_slice(format!("\"{}\"", sid).as_bytes());
+        } else {
+            out.extend_from_slice(format!(",\"{}\"", sid).as_bytes());
+        }
+        out.extend_from_slice(&value[pos..]); // 保留 ']' 及之后所有字节（包裹字节原样）
+        out
+    } else {
+        // 现有值非空但不含 ']'，说明不是合法 JSON 数组，避免覆盖破坏原数据
+        return Err("现有置顶列表值不是合法 JSON 数组，已中止写入以免破坏数据".into());
+    };
+
+    let write_opts = WriteOptions::new();
+    db.put(write_opts, BytesKey(key.into_bytes()), &new_bytes)
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
