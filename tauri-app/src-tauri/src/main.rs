@@ -453,6 +453,12 @@ fn restore_deleted_session(id: String) -> Result<(), String> {
     ops::restore_deleted_session(&id)
 }
 
+/// 把某会话追加进指定账号的置顶列表（渲染层 leveldb，须在 WorkBuddy 退出后调用）。
+#[tauri::command]
+fn add_pinned_session(uid: String, sid: String) -> Result<(), String> {
+    ops::add_pinned_session(&uid, &sid)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -491,7 +497,8 @@ pub fn run() {
             current_model,
             models_path,
             diagnose_sessions,
-            restore_deleted_session
+            restore_deleted_session,
+            add_pinned_session
         ])
         .run(tauri::generate_context!())
         .expect("error while running WorkBuddy Account Hub");
