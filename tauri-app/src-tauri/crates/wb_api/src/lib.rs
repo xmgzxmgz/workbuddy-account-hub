@@ -323,6 +323,12 @@ pub fn get_quota() -> Value {
         .unwrap_or_else(|e| json!({ "error": e }))
 }
 
+/// 查询额度（指定登录态）—— 供多账号批量/单账号查询（覆盖 dashboard 单账号局限）
+pub fn get_quota_as(login: &LoginInfo) -> Value {
+    call_api_as(login, &format!("{}{}/get-user-resource", API_BASE, BILLING_METER), "POST", "{}")
+        .unwrap_or_else(|e| json!({ "error": e }))
+}
+
 /// 仅查询签到状态
 pub fn get_checkin() -> Value {
     call_api(&format!("{}{}/checkin-activity-status", API_BASE, BILLING_METER), "POST", "{}")
