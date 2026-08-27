@@ -1690,7 +1690,7 @@ pub fn usage_summary(uid: &str, limit: i64) -> String {
                        WHERE s.user_id = ?1 AND s.deleted_at IS NULL \
                        ORDER BY COALESCE(u.updated_at, s.last_activity_at) DESC LIMIT ?2";
             if let Ok(mut stmt) = conn.prepare(sql) {
-                if let Ok(rows) = stmt.query_map([uid, lim], |r| Ok((
+                if let Ok(rows) = stmt.query_map(rusqlite::params![uid, lim], |r| Ok((
                     r.get::<_, String>(0)?,
                     r.get::<_, Option<String>>(1)?,
                     r.get::<_, Option<String>>(2)?,
