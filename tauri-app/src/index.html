@@ -468,6 +468,37 @@
       <pre id="st-out">点「诊断会话存储」查看报告（空标题 / 异常终止 / 软删会话一目了然）…</pre>
     </div>
 
+    <div class="section-title">用量与对话历史</div>
+    <div class="panel" style="margin-top:12px;">
+      <h2>用量与对话历史 <span class="tag">会话消耗 · 只读</span></h2>
+      <div class="kv" style="margin-bottom:10px;">
+        <div class="item" style="border-bottom:none;"><span class="k">说明</span><span class="v" style="max-width:100%;white-space:normal;font-weight:400;">展示本机最近对话的 token 消耗与费用（积分），数据来自本地 <code>session_usage</code> 表，与官网 <code>profile/plans-usage</code> 用量明细一致。导出对话历史含消耗明细，可供留档核对。全部只读，<b>无需关闭 WorkBuddy</b>。</span></div>
+      </div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:10px;">
+        <input id="uh-uid" placeholder="账号 UID（留空=当前账号）" style="max-width:240px;">
+        <input id="uh-limit" type="number" value="50" min="1" max="500" title="最近 N 条" style="max-width:90px;">
+        <span style="color:var(--muted);font-size:12px;">最近条数</span>
+        <button class="mini" onclick="uhRefresh()">刷新用量</button>
+        <button class="mini secondary" onclick="uhExportJson()">导出对话历史(JSON)</button>
+        <button class="mini secondary" onclick="uhExportCsv()">导出 CSV</button>
+      </div>
+      <div id="uh-totals" style="margin-bottom:10px;color:var(--muted);font-size:12px;">—</div>
+      <div style="overflow:auto;max-height:360px;border:1px solid var(--line);border-radius:8px;">
+        <table id="uh-table" style="width:100%;border-collapse:collapse;font-size:12px;">
+          <thead>
+            <tr style="position:sticky;top:0;background:var(--panel);">
+              <th style="text-align:left;padding:6px 8px;border-bottom:1px solid var(--line);">标题</th>
+              <th style="text-align:left;padding:6px 8px;border-bottom:1px solid var(--line);">模型</th>
+              <th style="text-align:right;padding:6px 8px;border-bottom:1px solid var(--line);">消耗 token</th>
+              <th style="text-align:right;padding:6px 8px;border-bottom:1px solid var(--line);">费用(积分)</th>
+              <th style="text-align:left;padding:6px 8px;border-bottom:1px solid var(--line);">最后活动</th>
+            </tr>
+          </thead>
+          <tbody id="uh-rows"></tbody>
+        </table>
+      </div>
+    </div>
+
     <div class="panel" style="margin-top:12px;">
       <h2>原始返回（调试）</h2>
       <pre id="raw-out">点击「刷新全部」…</pre>

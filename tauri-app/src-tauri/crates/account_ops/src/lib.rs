@@ -1651,3 +1651,180 @@ pub fn cleanup_orphan_pinned(uid: &str) -> Result<usize, String> {
         .map_err(|e| e.to_string())?;
     Ok(removed)
 }
+
+/// 解析 `credit_json`（格式 `{"<hash>": <金额>, ...}`）求总费用（积分）。
+/// 解析失败返回 0（不中断主流程）。
+fn sum_credit_json(s: &str) -> f64 {
+    match serde_json::from_str::<std::collections::HashMap<String, f64>>(s) {
+        Ok(m) => m.values().sum(),
+        Err(_) => 0.0,
+    }
+}
+
+/// 查看某账号「最近对话消耗」（用量明细），只读，不修改任何数据。
+///
+/// 数据源：本地 `workbuddy.db` 的 `sessions` 表 LEFT JOIN `session_usage` 表。
+/// `session_usage` 每条记录对应一个会话的消耗：
+///   - `used`       累计消耗 token 数
+///   - `size`       上下文窗口大小（token）
+///   - `credit_json` 费用明细（各模型/能力 hash → 积分），求和得该会话总费用
+/// 这与官网 `profile/plans-usage` 用量明细页的底层数据一致，本函数把它在本地还原出来。
+///
+/// 返回 JSON：{ uid, count, total_used, total_credits, conversations:[...] }，
+/// conversations 按「用量更新时间 / 最后活动时间」倒序，最多 `limit` 条。
+/// 每个 conversation: id, title(优先 custom_title), model, status, used, size, credits, last_activity_at, usage_updated_at。
+pub fn usage_summary(uid: &str, limit: i64) -> String {
+    let mut out = serde_json::Map::new();
+    out.insert("uid".into(), serde_json::json!(uid));
+    let mut list = Vec::new();
+    let mut total_used: i64 = 0;
+    let mut total_credits: f64 = 0.0;
+    let mut count: i64 = 0;
+    if let Some(db) = workbuddy_db_path() {
+        if let Ok(conn) = Connection::open(&db) {
+            let lim = if limit <= 0 { 100 } else { limit };
+            // LEFT JOIN：即使某些会话暂无用量记录也列出（used/credits 记 0）
+            let sql = "SELECT s.id, s.title, s.custom_title, s.model, s.status, s.last_activity_at, \
+                       u.used, u.size, u.credit_json, u.updated_at \
+                       FROM sessions s LEFT JOIN session_usage u ON u.session_id = s.id \
+                       WHERE s.user_id = ?1 AND s.deleted_at IS NULL \
+                       ORDER BY COALESCE(u.updated_at, s.last_activity_at) DESC LIMIT ?2";
+            if let Ok(mut stmt) = conn.prepare(sql) {
+                if let Ok(rows) = stmt.query_map([uid, lim], |r| Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, Option<String>>(1)?,
+                    r.get::<_, Option<String>>(2)?,
+                    r.get::<_, Option<String>>(3)?,
+                    r.get::<_, Option<String>>(4)?,
+                    r.get::<_, Option<i64>>(5)?,
+                    r.get::<_, Option<i64>>(6)?,
+                    r.get::<_, Option<i64>>(7)?,
+                    r.get::<_, Option<String>>(8)?,
+                    r.get::<_, Option<i64>>(9)?,
+                ))) {
+                    for row in rows {
+                        if let Ok((id, title, custom_title, model, status, last, used, size, cj, updu)) = row {
+                            let credits = cj.as_deref().map(sum_credit_json).unwrap_or(0.0);
+                            let used_v = used.unwrap_or(0);
+                            total_used += used_v;
+                            total_credits += credits;
+                            count += 1;
+                            list.push(serde_json::json!({
+                                "id": id,
+                                "title": custom_title.or(title),
+                                "model": model,
+                                "status": status,
+                                "used": used_v,
+                                "size": size,
+                                "credits": (credits * 100.0).round() / 100.0,
+                                "last_activity_at": last,
+                                "usage_updated_at": updu,
+                            }));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    out.insert("count".into(), serde_json::json!(count));
+    out.insert("total_used".into(), serde_json::json!(total_used));
+    out.insert("total_credits".into(), serde_json::json!((total_credits * 100.0).round() / 100.0));
+    out.insert("conversations".into(), serde_json::Value::Array(list));
+    serde_json::to_string_pretty(&serde_json::Value::Object(out)).unwrap_or_else(|_| "{}".to_string())
+}
+
+/// 导出某账号「对话历史」（会话清单 + 可选消耗），JSON 字符串，供留档 / 自助核对。
+///
+/// 与 `export_sessions`（纯防丢元数据）不同，本函数面向「用量明细 / 对话历史」场景：
+///   - 默认导出全部未软删会话（含 id/标题/模型/状态/时间）；
+///   - `with_usage=true` 时额外 LEFT JOIN `session_usage`，附上每个会话的
+///      used / size / credits（费用积分），并在顶层给出 total_used / total_credits 聚合；
+///   - `include_deleted=true` 连软删会话一并导出。
+/// 全程只读，不修改任何数据，无需退出 WorkBuddy。
+pub fn export_conversation_history(uid: &str, include_deleted: bool, with_usage: bool) -> String {
+    let mut out = serde_json::Map::new();
+    out.insert("uid".into(), serde_json::json!(uid));
+    out.insert("exported_at".into(), serde_json::json!(chrono_now()));
+    out.insert("include_deleted".into(), serde_json::json!(include_deleted));
+    out.insert("with_usage".into(), serde_json::json!(with_usage));
+    let mut list = Vec::new();
+    let mut total_used: i64 = 0;
+    let mut total_credits: f64 = 0.0;
+    if let Some(db) = workbuddy_db_path() {
+        if let Ok(conn) = Connection::open(&db) {
+            let sql = if include_deleted {
+                "SELECT id, title, custom_title, model, status, created_at, updated_at, last_activity_at, deleted_at \
+                 FROM sessions WHERE user_id = ?1 ORDER BY last_activity_at DESC"
+            } else {
+                "SELECT id, title, custom_title, model, status, created_at, updated_at, last_activity_at, deleted_at \
+                 FROM sessions WHERE user_id = ?1 AND deleted_at IS NULL ORDER BY last_activity_at DESC"
+            };
+            if let Ok(mut stmt) = conn.prepare(sql) {
+                if let Ok(rows) = stmt.query_map([uid], |r| Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, Option<String>>(1)?,
+                    r.get::<_, Option<String>>(2)?,
+                    r.get::<_, Option<String>>(3)?,
+                    r.get::<_, Option<String>>(4)?,
+                    r.get::<_, i64>(5)?,
+                    r.get::<_, i64>(6)?,
+                    r.get::<_, i64>(7)?,
+                    r.get::<_, Option<i64>>(8)?,
+                ))) {
+                    for row in rows {
+                        if let Ok((id, title, custom_title, model, status, created, updated, last, deleted)) = row {
+                            let mut item = serde_json::json!({
+                                "id": id,
+                                "title": title,
+                                "custom_title": custom_title,
+                                "model": model,
+                                "status": status,
+                                "created_at": created,
+                                "updated_at": updated,
+                                "last_activity_at": last,
+                                "deleted_at": deleted,
+                            });
+                            if with_usage {
+                                let mut used: i64 = 0;
+                                let mut size: i64 = 0;
+                                let mut credits: f64 = 0.0;
+                                if let Ok(mut us) = conn.prepare(
+                                    "SELECT used, size, credit_json FROM session_usage WHERE session_id = ?1",
+                                ) {
+                                    if let Ok(r2) = us.query_map([&id], |r| Ok((
+                                        r.get::<_, Option<i64>>(0)?,
+                                        r.get::<_, Option<i64>>(1)?,
+                                        r.get::<_, Option<String>>(2)?,
+                                    ))) {
+                                        for x in r2 {
+                                            if let Ok((u, s, cj)) = x {
+                                                used = u.unwrap_or(0);
+                                                size = s.unwrap_or(0);
+                                                if let Some(c) = &cj {
+                                                    credits += sum_credit_json(c);
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                total_used += used;
+                                total_credits += credits;
+                                item["used"] = serde_json::json!(used);
+                                item["size"] = serde_json::json!(size);
+                                item["credits"] = serde_json::json!((credits * 100.0).round() / 100.0);
+                            }
+                            list.push(item);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    out.insert("count".into(), serde_json::json!(list.len()));
+    if with_usage {
+        out.insert("total_used".into(), serde_json::json!(total_used));
+        out.insert("total_credits".into(), serde_json::json!((total_credits * 100.0).round() / 100.0));
+    }
+    out.insert("conversations".into(), serde_json::Value::Array(list));
+    serde_json::to_string_pretty(&serde_json::Value::Object(out)).unwrap_or_else(|_| "{}".to_string())
+}
