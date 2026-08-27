@@ -477,6 +477,18 @@ fn cleanup_orphan_pinned(uid: String) -> Result<usize, String> {
     ops::cleanup_orphan_pinned(&uid)
 }
 
+/// 查看某账号「最近对话消耗」（用量明细，只读）。limit<=0 时用默认 100。
+#[tauri::command]
+fn usage_summary(uid: String, limit: Option<i64>) -> String {
+    ops::usage_summary(&uid, limit.unwrap_or(100))
+}
+
+/// 导出某账号「对话历史」（会话清单 + 可选消耗，只读）。返回 JSON 字符串。
+#[tauri::command]
+fn export_conversation_history(uid: String, include_deleted: Option<bool>, with_usage: Option<bool>) -> String {
+    ops::export_conversation_history(&uid, include_deleted.unwrap_or(false), with_usage.unwrap_or(true))
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -519,7 +531,9 @@ pub fn run() {
             add_pinned_session,
             export_sessions,
             diagnose_pinned,
-            cleanup_orphan_pinned
+            cleanup_orphan_pinned,
+            usage_summary,
+            export_conversation_history
         ])
         .run(tauri::generate_context!())
         .expect("error while running WorkBuddy Account Hub");
