@@ -1397,7 +1397,7 @@ async function restartWB() {
 
 // 暴露给 inline onclick（安全：未定义的函数跳过，不影响其余，更不阻断 bootBootstrap）
 (function expose(){
-  const names = ['addModel','editModel','delModel','testModel','testCurrentForm','saveModel','closeModelModal','restartWB','loadAll','loadQuota','doCheckin','openReport','closeReport','copyReport','ensureSnapshot','backupAll','saveCurrentLogin','confirmSwitchYes','confirmSwitchNo','switchTo','openBackups','renderBackups','openBackupDetail','closeBackups','closeBackupDetail','loadBuddy','buddyDepart','buddyClaim','buddyDepartAll','buddyClaimAll','buddyDepartFor','buddyClaimFor','refreshBuddyAll','doCheckinAll','toggleAllKeys','refreshAll','stAddPinned','stDiagnose','stDiagnosePinned','stCleanupPinned','stExport'];
+  const names = ['addModel','editModel','delModel','testModel','testCurrentForm','saveModel','closeModelModal','restartWB','loadAll','loadQuota','doCheckin','openReport','closeReport','copyReport','ensureSnapshot','backupAll','saveCurrentLogin','confirmSwitchYes','confirmSwitchNo','switchTo','openBackups','renderBackups','openBackupDetail','closeBackups','closeBackupDetail','loadBuddy','buddyDepart','buddyClaim','buddyDepartAll','buddyClaimAll','buddyDepartFor','buddyClaimFor','refreshBuddyAll','doCheckinAll','toggleAllKeys','refreshAll','stAddPinned','stDiagnose','stDiagnosePinned','stCleanupPinned','stExport','uhRefresh','uhExportJson','uhExportCsv'];
   for (const n of names) {
     try {
       const fn = eval(n);
@@ -1457,6 +1457,87 @@ async function stExport() {
     $('st-out').textContent = r;
     toast('已导出会话清单（JSON 已下载）', 'ok');
   } catch (e) { toast('导出失败: ' + e, 'err'); }
+}
+
+// ===== 用量与对话历史面板 =====
+async function uhCurrentUid() {
+  try { const r = await invoke('list_accounts'); return (r && r.current_uid) ? r.current_uid : ''; }
+  catch { return ''; }
+}
+function uhFmtTs(ms) {
+  if (!ms || ms <= 0) return '—';
+  const d = new Date(Number(ms));
+  if (isNaN(d.getTime())) return String(ms);
+  const p = n => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+function uhFmtNum(n) {
+  try { return Number(n).toLocaleString('en-US'); } catch { return String(n); }
+}
+async function uhRefresh() {
+  let uid = $('uh-uid').value.trim();
+  if (!uid) uid = await uhCurrentUid();
+  if (!uid) { toast('无法获取当前账号 UID', 'err'); return; }
+  const limit = Math.max(1, Math.min(500, parseInt($('uh-limit').value || '50', 10) || 50));
+  try {
+    const r = await invoke('usage_summary', { uid, limit });
+    const data = JSON.parse(r);
+    const rows = data.conversations || [];
+    const tb = $('uh-rows');
+    tb.innerHTML = '';
+    if (!rows.length) {
+      tb.innerHTML = '<tr><td colspan="5" style="padding:10px;color:var(--muted);">该账号暂无对话消耗记录</td></tr>';
+    } else {
+      for (const c of rows) {
+        const tr = document.createElement('tr');
+        tr.style.borderBottom = '1px solid var(--line)';
+        const title = (c.title || '(无标题)').replace(/[<>&]/g, '');
+        tr.innerHTML = `<td style="padding:6px 8px;">${title}</td>`
+          + `<td style="padding:6px 8px;color:var(--muted);">${c.model || '—'}</td>`
+          + `<td style="padding:6px 8px;text-align:right;">${uhFmtNum(c.used || 0)}</td>`
+          + `<td style="padding:6px 8px;text-align:right;">${(c.credits || 0).toFixed(2)}</td>`
+          + `<td style="padding:6px 8px;color:var(--muted);">${uhFmtTs(c.last_activity_at)}</td>`;
+        tb.appendChild(tr);
+      }
+    }
+    $('uh-totals').textContent = `共 ${data.count} 条 · 总消耗 token ${uhFmtNum(data.total_used || 0)} · 总费用 ${(data.total_credits || 0).toFixed(2)} 积分 · 账号 ${uid}`;
+  } catch (e) { toast('刷新用量失败: ' + e, 'err'); }
+}
+async function uhExportJson() {
+  let uid = $('uh-uid').value.trim();
+  if (!uid) uid = await uhCurrentUid();
+  if (!uid) { toast('无法获取当前账号 UID', 'err'); return; }
+  try {
+    const r = await invoke('export_conversation_history', { uid, include_deleted: false, with_usage: true });
+    const blob = new Blob([r], { type: 'application/json' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'conversation_history_' + uid + '.json';
+    a.click();
+    URL.revokeObjectURL(a.href);
+    toast('已导出对话历史（JSON 已下载，含消耗）', 'ok');
+  } catch (e) { toast('导出失败: ' + e, 'err'); }
+}
+async function uhExportCsv() {
+  let uid = $('uh-uid').value.trim();
+  if (!uid) uid = await uhCurrentUid();
+  if (!uid) { toast('无法获取当前账号 UID', 'err'); return; }
+  try {
+    const r = await invoke('export_conversation_history', { uid, include_deleted: false, with_usage: true });
+    const data = JSON.parse(r);
+    const rows = data.conversations || [];
+    const head = ['id', 'title', 'model', 'status', 'used', 'size', 'credits', 'created_at', 'updated_at', 'last_activity_at', 'deleted_at'];
+    const esc = v => { const s = v == null ? '' : String(v); return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; };
+    const lines = [head.join(',')];
+    for (const c of rows) lines.push(head.map(k => esc(c[k])).join(','));
+    const blob = new Blob(['\ufeff' + lines.join('\n')], { type: 'text/csv;charset=utf-8' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'conversation_history_' + uid + '.csv';
+    a.click();
+    URL.revokeObjectURL(a.href);
+    toast('已导出对话历史（CSV 已下载）', 'ok');
+  } catch (e) { toast('导出 CSV 失败: ' + e, 'err'); }
 }
 
 // ==== 启动时序优化 ====
