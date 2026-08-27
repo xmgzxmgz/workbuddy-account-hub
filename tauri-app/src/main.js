@@ -75,9 +75,6 @@ const NotifyCenter = {
     }).join('');
   }
 };
-function escapeHtml(s) {
-  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-}
 function toggleNotify() {
   const d = $('notify-dropdown'); if (!d) return;
   const show = d.classList.toggle('show');
@@ -944,6 +941,65 @@ function renderCheckinAll(results) {
   }).join('');
 }
 
+// ===== 全部账号额度（每个账号用各自 vault 快照登录态查官方 get-user-resource） =====
+// 补齐 dashboard 只能看当前登录态单账号的局限：覆盖全部已登记账号，与本地消耗视图形成双视图。
+async function loadQuotaAll() {
+  try {
+    const r = await invoke('quota_all').catch(e => ({ error: String(e) }));
+    if (r && r.error) { toast('查询全部额度失败: ' + r.error); return; }
+    renderQuotaAll(r.results || []);
+    const s = r.summary || {};
+    toast(`全部额度查询：成功 ${s.ok || 0} · 跳过 ${s.skipped || 0} · 失败 ${s.fail || 0}`);
+  } catch (e) { toast('查询全部额度失败: ' + e); }
+}
+
+function renderQuotaAll(results) {
+  const tb = $('qa-tbody'); if (!tb) return;
+  if (!results || !results.length) { tb.innerHTML = '<tr><td colspan="7" class="empty">无已登录账号</td></tr>'; return; }
+  let sg = 0, st = 0, sq = 0, cnt = 0;
+  tb.innerHTML = results.map(r => {
+    const nick = r.nickname ? privacy(r.nickname, { head: 3, tail: 4 }) : '';
+    const uid = r.uid;
+    if (r.error && !r.body) {
+      const msg = r.skipped ? '无登录态快照' : escapeHtml(r.error);
+      return `<tr><td><b>${escapeHtml(nick || uid)}</b><br><span style="font-size:10px;color:var(--muted)">${privacy(uid, { head: 4, tail: 4 })}</span></td><td colspan="6" style="color:var(--muted)">${msg}</td></tr>`;
+    }
+    const q = parseQuota(r.body);
+    if (!q) {
+      return `<tr><td><b>${escapeHtml(nick || uid)}</b><br><span style="font-size:10px;color:var(--muted)">${privacy(uid, { head: 4, tail: 4 })}</span></td><td colspan="6" style="color:var(--red)">解析失败 / 无数据</td></tr>`;
+    }
+    cnt++;
+    sg += q.giftRemain; st += q.trialRemain; sq += q.grandRemain;
+    const typ = r.status === 200 ? '<span class="ok">✓</span>' : (r.error ? '<span class="soon">失败</span>' : (r.skipped ? '跳过' : '—'));
+    const exp = q.soonest ? (q.soonest.dl <= 0 ? '已过期' : q.soonest.dl + ' 天') : '长期';
+    const ckBtn = `<button class="mini" onclick="qaCheckinFor('${uid}')">签到</button>`;
+    return `<tr>
+      <td><b>${escapeHtml(nick || uid)}</b><br><span style="font-size:10px;color:var(--muted)">${privacy(uid, { head: 4, tail: 4 })}</span></td>
+      <td>${typ}</td>
+      <td class="num">${q.giftRemain.toFixed(2)}</td>
+      <td class="num">${q.trialRemain.toFixed(2)}</td>
+      <td class="num">${q.grandRemain.toFixed(2)}</td>
+      <td>${exp}</td>
+      <td style="white-space:nowrap;">${ckBtn}</td>
+    </tr>`;
+  }).join('');
+  $('qa-count').textContent = cnt;
+  $('qa-gift').textContent = sg.toFixed(2);
+  $('qa-trial').textContent = st.toFixed(2);
+  $('qa-grand').textContent = sq.toFixed(2);
+}
+
+async function qaCheckinFor(uid) {
+  try {
+    const r = await invoke('checkin_for', { uid });
+    if (r && r.error) { toast('签到失败: ' + r.error, 'err'); return; }
+    if (r.skipped) { toast('今日已签到'); }
+    else if (r.status === 200) { toast('签到成功 ✅'); }
+    else { toast('签到未完成（' + (r.status || '?') + '）'); }
+    loadQuotaAll();   // 刷新该行：重查额度
+  } catch (e) { toast('签到失败: ' + e, 'err'); }
+}
+
 async function refreshBuddyAll() {
   const r = await invoke('buddy_all_status').catch(e => ({ error: String(e) }));
   if (r && r.error) { buddyLogAdd('批量宠物状态失败: ' + r.error, 'err'); return; }
@@ -1155,6 +1211,12 @@ function loadNetworkParts() {
     if (j && j.status === 200) { window.__checkin = j.body || {}; renderCheckin(parseBody(j.body)); return true; }
     return false;
   }).catch(e => { console.warn('checkin err', e); return false; }), 0);
+
+  // 全部账号额度：覆盖 dashboard 单账号局限，启动时自动拉取（失败重试）
+  retry(() => invoke('quota_all').then(j => {
+    if (j && j.ok && (j.results || []).length) { renderQuotaAll(j.results); return true; }
+    return false;
+  }).catch(e => { console.warn('quota_all err', e); return false; }), 0);
 
   retry(() => invoke('get_memory').then(j => {
     if (j && j.status === 200) { renderMemory(parseBody(j.body)); return true; }
@@ -1397,7 +1459,7 @@ async function restartWB() {
 
 // 暴露给 inline onclick（安全：未定义的函数跳过，不影响其余，更不阻断 bootBootstrap）
 (function expose(){
-  const names = ['addModel','editModel','delModel','testModel','testCurrentForm','saveModel','closeModelModal','restartWB','loadAll','loadQuota','doCheckin','openReport','closeReport','copyReport','ensureSnapshot','backupAll','saveCurrentLogin','confirmSwitchYes','confirmSwitchNo','switchTo','openBackups','renderBackups','openBackupDetail','closeBackups','closeBackupDetail','loadBuddy','buddyDepart','buddyClaim','buddyDepartAll','buddyClaimAll','buddyDepartFor','buddyClaimFor','refreshBuddyAll','doCheckinAll','toggleAllKeys','refreshAll','stAddPinned','stDiagnose','stDiagnosePinned','stCleanupPinned','stExport','uhRefresh','uhExportJson','uhExportCsv'];
+  const names = ['addModel','editModel','delModel','testModel','testCurrentForm','saveModel','closeModelModal','restartWB','loadAll','loadQuota','doCheckin','openReport','closeReport','copyReport','ensureSnapshot','backupAll','saveCurrentLogin','confirmSwitchYes','confirmSwitchNo','switchTo','openBackups','renderBackups','openBackupDetail','closeBackups','closeBackupDetail','loadBuddy','buddyDepart','buddyClaim','buddyDepartAll','buddyClaimAll','buddyDepartFor','buddyClaimFor','refreshBuddyAll','doCheckinAll','loadQuotaAll','qaCheckinFor','toggleAllKeys','refreshAll','stAddPinned','stDiagnose','stDiagnosePinned','stCleanupPinned','stExport','uhRefresh','uhExportJson','uhExportCsv'];
   for (const n of names) {
     try {
       const fn = eval(n);

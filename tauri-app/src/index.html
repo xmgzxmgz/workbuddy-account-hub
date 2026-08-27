@@ -364,6 +364,31 @@
       </div>
     </div>
 
+    <div class="section-title">全部账号额度 🌐</div>
+    <div class="grid">
+      <div class="panel">
+        <h2>全部账号额度 <span class="tag">每个账号用各自登录态查 get-user-resource（覆盖 dashboard 单账号）</span>
+          <span style="flex:1"></span>
+          <button class="mini" onclick="loadQuotaAll()">查询全部额度</button>
+        </h2>
+        <div class="kv" style="margin-bottom:10px;">
+          <div class="item" style="border-bottom:none;"><span class="k">双视图</span><span class="v" style="max-width:100%;white-space:normal;font-weight:400;">上方「用量与对话历史」是<b>本地实际消耗</b>（已用多少 token/积分）；本表是<b>官方剩余额度</b>（还剩多少/何时到期）。两者拼成完整用量视图，且覆盖<b>全部已登记账号</b>（dashboard 仅当前登录态）。</span></div>
+        </div>
+        <div class="cards" style="margin-bottom:10px;">
+          <div class="card"><div class="label">已查账号</div><div class="value blue" id="qa-count">—</div></div>
+          <div class="card"><div class="label">累计赠送包剩余</div><div class="value green" id="qa-gift">—</div></div>
+          <div class="card"><div class="label">累计体验版剩余</div><div class="value blue" id="qa-trial">—</div></div>
+          <div class="card"><div class="label">累计全部剩余</div><div class="value" id="qa-grand">—</div></div>
+        </div>
+        <div style="max-height:300px;overflow:auto;">
+          <table>
+            <thead><tr><th>账号</th><th>状态</th><th class="num">赠送包剩余</th><th class="num">体验版剩余</th><th class="num">全部剩余</th><th>最早到期</th><th>操作</th></tr></thead>
+            <tbody id="qa-tbody"><tr><td colspan="7" class="empty">启动自动查询；或点「查询全部额度」查看每个账号的官方剩余额度</td></tr></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
     <div class="section-title">宠物旅行 🐾</div>
     <div class="grid">
       <div class="panel">
