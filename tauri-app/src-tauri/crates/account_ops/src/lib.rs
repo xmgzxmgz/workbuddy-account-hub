@@ -12,6 +12,8 @@
 use serde::Serialize;
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
+#[cfg(windows)]
+use std::os::windows::process::CommandExt; // 提供 creation_flags（隐藏子进程控制台窗口）
 use std::process::Command;
 use rusqlite::{Connection, OpenFlags};
 
@@ -1181,7 +1183,14 @@ pub fn is_workbuddy_running() -> bool {
     if cfg!(target_os = "macos") {
         Command::new("pgrep").args(["-f", WB_EXE]).output().map(|o| o.status.success()).unwrap_or(false)
     } else if cfg!(target_os = "windows") {
-        Command::new("tasklist").args(["/FI", "IMAGENAME eq WorkBuddy.exe"]).output()
+        // 关键修复：从 GUI 父进程 spawn tasklist 时若不隐藏窗口，Windows 会为其新建控制台窗口，
+        // 且在某些情况下 output() 直接失败 → 误报「未检测到主客户端」。CREATE_NO_WINDOW 既消除弹窗
+        // 又让 stdout 管道可靠捕获，检测恢复正常。
+        let mut c = Command::new("tasklist");
+        c.args(["/FI", "IMAGENAME eq WorkBuddy.exe"]);
+        #[cfg(windows)]
+        c.creation_flags(0x08000000);
+        c.output()
             .map(|o| String::from_utf8_lossy(&o.stdout).contains("WorkBuddy.exe"))
             .unwrap_or(false)
     } else {
@@ -1210,7 +1219,11 @@ pub fn quit_workbuddy() -> Result<(), String> {
             Err("WorkBuddy 未能完全退出，已中止切换（请手动关闭后重试）".into())
         }
     } else if cfg!(target_os = "windows") {
-        let _ = Command::new("taskkill").args(["/IM", "WorkBuddy.exe", "/F"]).output();
+        let mut c = Command::new("taskkill");
+        c.args(["/IM", "WorkBuddy.exe", "/F"]);
+        #[cfg(windows)]
+        c.creation_flags(0x08000000);
+        let _ = c.output();
         Ok(())
     } else {
         Err("当前平台不支持退出 WorkBuddy".into())
@@ -1262,16 +1275,20 @@ pub fn launch_workbuddy() -> Result<(), String> {
         // `cmd /c start WorkBuddy` 走系统关联。
         if let Some(exe) = workbuddy_exe() {
             let exe_str = exe.to_string_lossy().to_string();
-            Command::new("cmd")
-                .args(["/c", "start", "", &exe_str])
-                .spawn()
+            let mut c = Command::new("cmd");
+            c.args(["/c", "start", "", &exe_str]);
+            #[cfg(windows)]
+            c.creation_flags(0x08000000);
+            c.spawn()
                 .map(|_| ())
                 .map_err(|e| format!("启动 WorkBuddy 失败（{}）: {}", exe_str, e))
         } else {
             // 兜底：靠系统关联 / PATH 启动
-            Command::new("cmd")
-                .args(["/c", "start", "", "WorkBuddy"])
-                .spawn()
+            let mut c = Command::new("cmd");
+            c.args(["/c", "start", "", "WorkBuddy"]);
+            #[cfg(windows)]
+            c.creation_flags(0x08000000);
+            c.spawn()
                 .map(|_| ())
                 .map_err(|e| format!("启动 WorkBuddy 失败（未找到安装路径）: {}", e))
         }
