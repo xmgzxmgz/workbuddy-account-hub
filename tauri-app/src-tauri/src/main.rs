@@ -535,42 +535,6 @@ fn backup_detail(uid: String, ts: String) -> Result<Value, String> {
     Ok(serde_json::to_value(m).unwrap_or(Value::Null))
 }
 
-/// 诊断会话存储一致性（只读，返回 JSON 报告），供高级用户排查"会话不见了"类问题。
-#[tauri::command]
-fn diagnose_sessions() -> String {
-    ops::diagnose_sessions()
-}
-
-/// 恢复一条被软删的会话（清空 deleted_at）。调用前应确保 WorkBuddy 已退出。
-#[tauri::command]
-fn restore_deleted_session(id: String) -> Result<(), String> {
-    ops::restore_deleted_session(&id)
-}
-
-/// 把某会话追加进指定账号的置顶列表（渲染层 leveldb，须在 WorkBuddy 退出后调用）。
-#[tauri::command]
-fn add_pinned_session(uid: String, sid: String) -> Result<(), String> {
-    ops::add_pinned_session(&uid, &sid)
-}
-
-/// 导出某账号会话清单（JSON，供留档 / 自助核对是否真丢失）。只读，不需退出 WorkBuddy。
-#[tauri::command]
-fn export_sessions(uid: String, include_deleted: Option<bool>) -> String {
-    ops::export_sessions(&uid, include_deleted.unwrap_or(false))
-}
-
-/// 诊断某账号渲染层置顶列表里的悬空项（引用了已删/不存在会话的置顶）。只读，须退出 WorkBuddy。
-#[tauri::command]
-fn diagnose_pinned(uid: String) -> String {
-    ops::diagnose_pinned(&uid)
-}
-
-/// 清理某账号置顶列表里的悬空项（须在 WorkBuddy 退出后调用）。返回清理条数。
-#[tauri::command]
-fn cleanup_orphan_pinned(uid: String) -> Result<usize, String> {
-    ops::cleanup_orphan_pinned(&uid)
-}
-
 /// 查看某账号「最近对话消耗」（用量明细，只读）。limit<=0 时用默认 100。
 #[tauri::command]
 fn usage_summary(uid: String, limit: Option<i64>) -> String {
@@ -620,12 +584,6 @@ pub fn run() {
             official_models,
             current_model,
             models_path,
-            diagnose_sessions,
-            restore_deleted_session,
-            add_pinned_session,
-            export_sessions,
-            diagnose_pinned,
-            cleanup_orphan_pinned,
             quota_for,
             quota_all,
             checkin_for,

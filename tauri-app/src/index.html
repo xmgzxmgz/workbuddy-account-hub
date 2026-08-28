@@ -146,13 +146,6 @@
     .axis-end{position:absolute;top:38px;font-size:9px;color:var(--muted);}
     .axis-end.l{left:6%;transform:translateX(-50%);}
     .axis-end.r{right:6%;transform:translateX(50%);}
-    /* 多账号到期时间轴 */
-    .qa-tl{margin-top:12px;border:1px solid var(--line);border-radius:10px;padding:10px 12px;background:#0b0e13;max-height:240px;overflow:auto;}
-    .qa-tl .ttl{font-size:11px;color:var(--muted);margin-bottom:8px;}
-    .tl-row{display:flex;align-items:center;gap:10px;margin:5px 0;font-size:11.5px;}
-    .tl-name{width:240px;min-width:240px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--fg);}
-    .tl-bar{flex:1;height:6px;background:var(--line);border-radius:4px;overflow:hidden;}
-    .tl-bar>i{display:block;height:100%;}
     .tl-dl{width:64px;text-align:right;font-weight:600;}
     .tl-dl.red{color:var(--red);} .tl-dl.amber{color:var(--amber);} .tl-dl.green{color:var(--green);}
     /* 多账号记忆卡片 */
@@ -398,7 +391,6 @@
             <tbody id="qa-tbody"><tr><td colspan="7" class="empty">启动自动查询；或点「查询全部额度」查看每个账号的官方剩余额度</td></tr></tbody>
           </table>
         </div>
-        <div class="qa-tl" id="qa-timeline"><div class="ttl">查询全部额度后自动绘制各账号剩余套餐的到期时间轴</div></div>
       </div>
     </div>
 
@@ -488,26 +480,6 @@
     <div class="panel" style="margin-top:12px;">
       <h2>官方渠道 API <span class="tag">WorkBuddy 内置 · 只读</span></h2>
       <div id="official-list"><span class="empty">加载中…</span></div>
-    </div>
-
-    <div class="section-title">会话防丢失工具</div>
-    <div class="panel" style="margin-top:12px;">
-      <h2>会话防丢失工具 <span class="tag">运维 · 须先关闭 WorkBuddy</span></h2>
-      <div class="kv" style="margin-bottom:10px;">
-        <div class="item" style="border-bottom:none;"><span class="k">说明</span><span class="v" style="max-width:100%;white-space:normal;font-weight:400;">这些操作直接读写会话库 / 渲染层 leveldb。涉及置顶的须在<b>关闭 WorkBuddy 主程序</b>后执行，否则写入失败；「诊断」「导出」只读、随时可用。</span></div>
-      </div>
-      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:10px;">
-        <input id="st-uid" placeholder="账号 UID（如 4c6af085…）" style="max-width:260px;">
-        <input id="st-sid" placeholder="会话 ID（如 e42949bc…）" style="max-width:260px;">
-        <button class="mini" onclick="stAddPinned()">加置顶</button>
-      </div>
-      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px;">
-        <button class="mini secondary" onclick="stDiagnose()">诊断会话存储</button>
-        <button class="mini secondary" onclick="stDiagnosePinned()">诊断置顶(uid)</button>
-        <button class="mini secondary" onclick="stCleanupPinned()">清理悬空置顶(uid)</button>
-        <button class="mini secondary" onclick="stExport()">导出会话清单(uid)</button>
-      </div>
-      <pre id="st-out">点「诊断会话存储」查看报告（空标题 / 异常终止 / 软删会话一目了然）…</pre>
     </div>
 
     <div class="section-title">用量与对话历史</div>
