@@ -247,11 +247,22 @@
     .client-bar.ok{background:rgba(126,235,182,.12);color:#9fe9c4;border-bottom:1px solid rgba(126,235,182,.28);}
     .client-bar .dot{width:8px;height:8px;border-radius:50%;background:currentColor;flex:0 0 auto;}
     .client-bar.hidden{display:none;}
+    /* 账号健康池（#2）面板 */
+    .pool-panel{margin:0 0 8px;padding:8px 12px;background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.1);border-radius:10px;font-size:12px;color:#c9d2e3;}
+    .pool-panel summary{cursor:pointer;font-weight:700;color:#e6ecf5;}
+    .pool-panel .pool-list{margin-top:6px;display:flex;flex-direction:column;gap:4px;}
+    .pool-row{display:flex;align-items:center;gap:6px;color:#9aa6bd;}
+    .pool-row .dot{width:7px;height:7px;border-radius:50%;background:currentColor;flex:0 0 auto;}
+    .pool-row.ok{color:#9fe9c4;} .pool-row.warn{color:#ffcf7a;} .pool-row.bad{color:#ff9a9a;}
   </style>
 </head>
 <body>
   <!-- #27：主客户端（WorkBuddy）进程存在性提示条；关闭主客户端后签到/切换可能静默失败 -->
   <div id="client-status-bar" class="client-bar hidden"></div>
+  <details id="pool-panel" class="pool-panel" style="display:none">
+    <summary>账号健康池</summary>
+    <div id="pool-list" class="pool-list"></div>
+  </details>
   <!-- 切换风险确认弹窗（软件内提示，非浏览器 confirm） -->
   <div class="modal" id="sw-risk-modal">
     <div class="modal-box" style="width:min(460px,92vw);">

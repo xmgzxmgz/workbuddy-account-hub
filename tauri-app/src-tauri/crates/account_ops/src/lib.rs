@@ -1852,3 +1852,74 @@ pub fn export_conversation_history(uid: &str, include_deleted: bool, with_usage:
     out.insert("conversations".into(), serde_json::Value::Array(list));
     serde_json::to_string_pretty(&serde_json::Value::Object(out)).unwrap_or_else(|_| "{}".to_string())
 }
+
+// ===== 账号健康池（#2 信用感知选号 + 状态落盘；#1 轮转/临近过期状态存储） =====
+pub fn pool_state_path() -> PathBuf {
+    vault_dir().join("pool_state.json")
+}
+
+pub fn load_pool_state() -> Value {
+    let p = pool_state_path();
+    std::fs::read_to_string(&p)
+        .ok()
+        .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+        .unwrap_or_else(|| Value::Object(serde_json::Map::new()))
+}
+
+pub fn save_pool_state(state: &Value) {
+    let p = pool_state_path();
+    if let Some(parent) = p.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let tmp = p.with_extension("tmp");
+    if std::fs::write(&tmp, serde_json::to_string_pretty(state).unwrap_or_default()).is_ok() {
+        if std::fs::rename(&tmp, &p).is_ok() {
+            // 状态含账号健康/禁用信息，unix 下收紧为仅属主可读写
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o600));
+            }
+        }
+    }
+}
+
+pub fn default_pool_entry() -> Value {
+    json!({
+        "disabled": false,
+        "cooldown_until_ms": 0u64,
+        "last_error_kind": "",
+        "last_remaining_credits": 0.0f64,
+        "last_checkin_ts": 0u64,
+        "last_healthy_ts": 0u64,
+        "needs_refresh": false
+    })
+}
+
+pub fn pool_entry(state: &Value, uid: &str) -> Value {
+    state.get(uid).cloned().unwrap_or_else(default_pool_entry)
+}
+
+pub fn patch_pool_entry(state: &mut Value, uid: &str, patch: Value) {
+    if let Some(obj) = state.as_object_mut() {
+        let cur = obj.entry(uid.to_string()).or_insert_with(default_pool_entry);
+        if let Some(m) = patch.as_object() {
+            for (k, v) in m {
+                cur[k] = v.clone();
+            }
+        }
+    }
+}
+
+/// 账号是否暂不可用（禁用 / 冷却中）。返回原因与剩余冷却毫秒。
+pub fn account_blocked(state: &Value, uid: &str, now_ms: u64) -> Option<Value> {
+    let e = pool_entry(state, uid);
+    if e.get("disabled").and_then(|x| x.as_bool()).unwrap_or(false) {
+        return Some(json!({ "reason": "disabled", "cooldown": 0u64 }));
+    }
+    let cd = e.get("cooldown_until_ms").and_then(|x| x.as_u64()).unwrap_or(0);
+    if cd > now_ms {
+        return Some(json!({ "reason": "cooldown", "cooldown": cd - now_ms }));
+    }
+    None
+}

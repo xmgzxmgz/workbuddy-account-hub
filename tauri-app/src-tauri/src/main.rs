@@ -80,6 +80,14 @@ fn classify_checkin_err(msg: &str) -> (String, u64) {
     }
 }
 
+/// 当前 Unix 毫秒时间戳（本地计算，避免跨 crate 依赖）
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
 #[tauri::command]
 fn get_all() -> Value {
     let mut v = api::get_all();
@@ -160,20 +168,37 @@ fn do_checkin_retry(login: &wb_api::LoginInfo) -> Value {
     last
 }
 
-/// 一键签到：对所有「已保存登录态」的账号执行今日签到，返回每个账号的结果
+/// 一键签到：对所有「已保存登录态」的账号执行今日签到，返回每个账号的结果。
+/// 集成账号健康池（#2）：跳过禁用 / 冷却账号；失败按分类写入冷却 / 禁用并落盘 pool_state.json。
+/// 请求级轮转（#1）：round-robin 起始位，避免每次都从同一账号开始。
+/// 临近过期（#1）：token JWT exp 在 10m 内 → 标记 needs_refresh 并跳过（无刷新端点，提示重新登录）。
 #[tauri::command]
 fn checkin_all() -> Value {
     let vault = ops::vault_dir();
     let accs = ops::list_accounts(&vault);
+    let mut state = ops::load_pool_state();
+    let now = now_ms();
+    // #1 请求级轮转：round-robin 起始位
+    let rotate = state.get("__rotate").and_then(|x| x.as_u64()).unwrap_or(0) as usize;
+    let n = accs.len();
+    let order: Vec<usize> = if n > 0 { (0..n).map(|i| (i + rotate) % n).collect() } else { Vec::new() };
     let mut results = Vec::new();
     let mut ok = 0u32; let mut fail = 0u32; let mut skipped = 0u32;
     // #23：账号列表去重（同一 uid 只签到一次）+ 上限保护，避免异常重复触发风暴
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for a in accs {
+    for idx in order {
+        let a = &accs[idx];
         if seen.len() >= 100 { break; }              // #23 总量上限
         if !seen.insert(a.uid.clone()) { continue; }  // #23 去重
+        // #2 跳过禁用 / 冷却账号
+        if let Some(b) = ops::account_blocked(&state, &a.uid, now) {
+            let reason = b.get("reason").and_then(|x| x.as_str()).unwrap_or("");
+            let cd = b.get("cooldown").and_then(|x| x.as_u64()).unwrap_or(0);
+            results.push(json!({"uid": a.uid, "nickname": a.nickname, "ok": false, "skipped": true,
+                "error": format!("账号暂不可用({})", reason), "cooldown": cd, "blocked": true}));
+            skipped += 1; continue;
+        }
         if !a.has_snapshot {
-            // 无登录态快照 = 未执行签到，归为「跳过」而非失败（与宠物批量操作口径一致）
             results.push(json!({"uid": a.uid, "nickname": a.nickname, "ok": false, "skipped": true, "error": "无登录态快照"}));
             skipped += 1; continue;
         }
@@ -181,13 +206,37 @@ fn checkin_all() -> Value {
             results.push(json!({"uid": a.uid, "nickname": a.nickname, "ok": false, "skipped": true, "error": "登录态文件缺失或无效"}));
             skipped += 1; continue;
         };
+        // #1 临近过期：token JWT exp 在 10m 内 → 标记 needs_refresh 并跳过
+        let near_exp = api::jwt_payload(&login.token)
+            .and_then(|pl| pl.get("exp").and_then(|x| x.as_u64()))
+            .map(|exp| (exp as i64) * 1000 - (now as i64) < 10 * 60 * 1000)
+            .unwrap_or(false);
+        if near_exp {
+            ops::patch_pool_entry(&mut state, &a.uid, json!({"needs_refresh": true}));
+            results.push(json!({"uid": a.uid, "nickname": a.nickname, "ok": false, "skipped": true,
+                "needs_refresh": true, "error": "token 临近过期，请重新登录以刷新"}));
+            skipped += 1; continue;
+        }
         let r = do_checkin_retry(&login);
         if let Some(err) = r.get("error") {
             let emsg = err.as_str().unwrap_or("");
             let (kind, cooldown) = classify_checkin_err(emsg);
-            results.push(json!({"uid": a.uid, "nickname": a.nickname, "ok": false, "skipped": false, "error": err, "kind": kind, "cooldown": cooldown}));
+            // #2 更新健康池：session_dead → 禁用；其他 → 冷却
+            if kind == "session_dead" {
+                ops::patch_pool_entry(&mut state, &a.uid,
+                    json!({"disabled": true, "last_error_kind": kind, "cooldown_until_ms": 0u64, "needs_refresh": true}));
+            } else {
+                ops::patch_pool_entry(&mut state, &a.uid,
+                    json!({"cooldown_until_ms": now + cooldown * 1000, "last_error_kind": kind}));
+            }
+            results.push(json!({"uid": a.uid, "nickname": a.nickname, "ok": false, "skipped": false,
+                "error": err, "kind": kind, "cooldown": cooldown}));
             fail += 1; continue;
         }
+        // 成功：清空禁用 / 冷却 / 错误
+        ops::patch_pool_entry(&mut state, &a.uid,
+            json!({"disabled": false, "cooldown_until_ms": 0u64, "last_error_kind": "", "needs_refresh": false,
+                   "last_healthy_ts": now, "last_checkin_ts": now}));
         let status = r.get("status").and_then(|x| x.as_u64()).unwrap_or(0);
         let sk = r.get("skipped").and_then(|x| x.as_bool()).unwrap_or(false);
         let body = r.get("body");
@@ -203,6 +252,11 @@ fn checkin_all() -> Value {
         // 账号间限速 250ms，避免触发风控（对标 daemon.js:2221-2235 CHECKIN_QUEUE_DELAY_MS）
         std::thread::sleep(std::time::Duration::from_millis(250));
     }
+    // #1 更新轮转位（下次从下一个账号开始）
+    if n > 0 {
+        state["__rotate"] = json!(((rotate + 1) % n) as u64);
+    }
+    ops::save_pool_state(&state);
     json!({ "ok": true, "results": results, "summary": { "total": results.len(), "ok": ok, "fail": fail, "skipped": skipped } })
 }
 
@@ -216,17 +270,27 @@ fn quota_for(uid: String) -> Value {
     api::get_quota_as(&login)
 }
 
-/// 查询所有「已保存登录态」账号的额度，返回每个账号的官方套餐明细
-/// （与 checkin_all 同构，覆盖 dashboard 只能看当前登录态单账号的局限）
+/// 查询所有「已保存登录态」账号的额度（信用感知：按剩余积分降序；跳过禁用 / 冷却账号）。
+/// 结果同步写回健康池 last_remaining_credits 并落盘（#2）。
 #[tauri::command]
 fn quota_all() -> Value {
     let vault = ops::vault_dir();
     let accs = ops::list_accounts(&vault);
+    let mut state = ops::load_pool_state();
+    let now = now_ms();
     let mut results = Vec::new();
     let mut ok = 0u32; let mut fail = 0u32; let mut skipped = 0u32;
-    for a in accs {
+    for a in &accs {
         if !a.has_snapshot {
             results.push(json!({"uid": a.uid, "nickname": a.nickname, "ok": false, "skipped": true, "error": "无登录态快照"}));
+            skipped += 1; continue;
+        }
+        // #2 跳过禁用 / 冷却账号
+        if let Some(b) = ops::account_blocked(&state, &a.uid, now) {
+            let reason = b.get("reason").and_then(|x| x.as_str()).unwrap_or("");
+            let cd = b.get("cooldown").and_then(|x| x.as_u64()).unwrap_or(0);
+            results.push(json!({"uid": a.uid, "nickname": a.nickname, "ok": false, "skipped": true,
+                "error": format!("账号暂不可用({})", reason), "cooldown": cd, "blocked": true}));
             skipped += 1; continue;
         }
         let Some(login) = account_login(&vault, &a.uid) else {
@@ -235,11 +299,26 @@ fn quota_all() -> Value {
         };
         let r = api::get_quota_as(&login);
         if let Some(err) = r.get("error") {
-            results.push(json!({"uid": a.uid, "nickname": a.nickname, "ok": false, "skipped": false, "error": err}));
+            let emsg = err.as_str().unwrap_or("");
+            let (kind, cooldown) = classify_checkin_err(emsg);
+            // #2 更新健康池：session_dead → 禁用；其他 → 冷却
+            if kind == "session_dead" {
+                ops::patch_pool_entry(&mut state, &a.uid,
+                    json!({"disabled": true, "last_error_kind": kind, "cooldown_until_ms": 0u64, "needs_refresh": true}));
+            } else {
+                ops::patch_pool_entry(&mut state, &a.uid,
+                    json!({"cooldown_until_ms": now + cooldown * 1000, "last_error_kind": kind}));
+            }
+            results.push(json!({"uid": a.uid, "nickname": a.nickname, "ok": false, "skipped": false, "error": err, "kind": kind, "cooldown": cooldown}));
             fail += 1; continue;
         }
         let status = r.get("status").and_then(|x| x.as_u64()).unwrap_or(0);
         if status == 200 { ok += 1; } else { fail += 1; }
+        // #2 写回剩余积分
+        let remain = r.get("parsed").and_then(|p| p.get("grandRemain")).and_then(|x| x.as_f64()).unwrap_or(0.0);
+        ops::patch_pool_entry(&mut state, &a.uid,
+            json!({"disabled": false, "cooldown_until_ms": 0u64, "last_error_kind": "", "needs_refresh": false,
+                   "last_remaining_credits": remain, "last_healthy_ts": now}));
         results.push(json!({
             "uid": a.uid, "nickname": a.nickname, "ok": status == 200, "skipped": false,
             "status": status,
@@ -247,6 +326,13 @@ fn quota_all() -> Value {
             "parsed": r.get("parsed").cloned().unwrap_or(Value::Null)
         }));
     }
+    // #2 信用感知排序：剩余积分降序（最健康 / 积分最多在前）
+    results.sort_by(|x, y| {
+        let rx = x.get("parsed").and_then(|p| p.get("grandRemain")).and_then(|v| v.as_f64()).unwrap_or(-1.0);
+        let ry = y.get("parsed").and_then(|p| p.get("grandRemain")).and_then(|v| v.as_f64()).unwrap_or(-1.0);
+        ry.partial_cmp(&rx).unwrap_or(std::cmp::Ordering::Equal)
+    });
+    ops::save_pool_state(&state);
     json!({ "ok": true, "results": results, "summary": { "total": results.len(), "ok": ok, "fail": fail, "skipped": skipped } })
 }
 
@@ -611,6 +697,41 @@ fn app_running() -> bool {
     ops::is_workbuddy_running()
 }
 
+/// 账号健康池快照（#2）：返回每个账号的禁用 / 冷却 / 积分 / 需刷新状态，并推荐最健康（积分最多）账号。
+#[tauri::command]
+fn account_pool() -> Value {
+    let vault = ops::vault_dir();
+    let accs = ops::list_accounts(&vault);
+    let state = ops::load_pool_state();
+    let now = now_ms();
+    let mut list = Vec::new();
+    let mut best_uid: Option<String> = None;
+    let mut best_credits = -1.0f64;
+    for a in &accs {
+        let e = ops::pool_entry(&state, &a.uid);
+        let disabled = e.get("disabled").and_then(|x| x.as_bool()).unwrap_or(false);
+        let cd = e.get("cooldown_until_ms").and_then(|x| x.as_u64()).unwrap_or(0);
+        let cooldown = if cd > now { cd - now } else { 0 };
+        let needs_refresh = e.get("needs_refresh").and_then(|x| x.as_bool()).unwrap_or(false);
+        // 优先用额度缓存刷新积分，否则用落盘值
+        let credits = api::read_quota_cache(&a.uid)
+            .and_then(|v| v.get("parsed")).and_then(|p| p.get("grandRemain")).and_then(|x| x.as_f64())
+            .unwrap_or_else(|| e.get("last_remaining_credits").and_then(|x| x.as_f64()).unwrap_or(0.0));
+        let blocked = disabled || cooldown > 0;
+        if !blocked && !needs_refresh && credits > best_credits {
+            best_credits = credits;
+            best_uid = Some(a.uid.clone());
+        }
+        list.push(json!({
+            "uid": a.uid, "nickname": a.nickname, "disabled": disabled,
+            "cooldown_ms": cooldown, "needs_refresh": needs_refresh,
+            "credits": credits, "blocked": blocked
+        }));
+    }
+    json!({ "ok": true, "accounts": list, "recommended_uid": best_uid,
+            "rotate_index": state.get("__rotate").and_then(|x| x.as_u64()).unwrap_or(0) })
+}
+
 // 历史备份：list_backups() 返回全部账号的历史备份；list_backups(uid) 只返回某账号。
 #[tauri::command]
 fn list_backups(uid: Option<String>) -> Value {
@@ -669,6 +790,7 @@ pub fn run() {
             restart_workbuddy,
             restart_self,
             app_running,
+            account_pool,
             list_backups,
             backup_detail,
             list_custom_models,
