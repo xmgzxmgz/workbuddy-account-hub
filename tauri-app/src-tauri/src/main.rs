@@ -140,6 +140,22 @@ fn account_login(vault: &std::path::Path, uid: &str) -> Option<wb_api::LoginInfo
     wb_api::login_from_file(&p)
 }
 
+/// #26：签到瞬时可重试错误（限流/未知/未找到）做指数退避重试，避免偶发抖动直接判失败；
+/// 终态错误（会话失效/额度类）不重试，直接走冷却状态机。
+fn do_checkin_retry(login: &wb_api::LoginInfo) -> Value {
+    let mut last = api::do_checkin_as(login);
+    for attempt in 1..=2u32 {
+        if last.get("error").is_none() { return last; }
+        let emsg = last.get("error").and_then(|e| e.as_str()).unwrap_or("");
+        let kind = classify_checkin_err(emsg).0;
+        if kind == "session_dead" || kind == "hard_credit" { return last; }
+        let backoff = 2000u64 * (1u64 << (attempt - 1)); // 2s, 4s 指数退避
+        std::thread::sleep(std::time::Duration::from_millis(backoff));
+        last = api::do_checkin_as(login);
+    }
+    last
+}
+
 /// 一键签到：对所有「已保存登录态」的账号执行今日签到，返回每个账号的结果
 #[tauri::command]
 fn checkin_all() -> Value {
@@ -157,7 +173,7 @@ fn checkin_all() -> Value {
             results.push(json!({"uid": a.uid, "nickname": a.nickname, "ok": false, "skipped": true, "error": "登录态文件缺失或无效"}));
             skipped += 1; continue;
         };
-        let r = api::do_checkin_as(&login);
+        let r = do_checkin_retry(&login);
         if let Some(err) = r.get("error") {
             let emsg = err.as_str().unwrap_or("");
             let (kind, cooldown) = classify_checkin_err(emsg);
