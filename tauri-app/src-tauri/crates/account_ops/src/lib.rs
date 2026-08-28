@@ -688,7 +688,12 @@ fn materialize_snapshot_for(vault: &Path, uid: &str) -> Result<(), String> {
     std::fs::write(snap.join("auth.info"), serde_json::to_string_pretty(&full).map_err(|e| e.to_string())?)
         .map_err(|e| e.to_string())?;
     // #13 / #30：快照含 accessToken，写入后收紧为仅属主可读写（0o600），防越权读取
-    let _ = std::fs::set_permissions(snap.join("auth.info"), std::fs::Permissions::from_mode(0o600));
+    // Unix 平台生效；Windows 下文件位于用户私有目录，best-effort 跳过。
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(snap.join("auth.info"), std::fs::Permissions::from_mode(0o600));
+    }
     let ls = local_storage_dir();
     if ls.exists() {
         copy_dir_all(&ls, &snap.join("local_storage")).map_err(|e| e.to_string())?;
