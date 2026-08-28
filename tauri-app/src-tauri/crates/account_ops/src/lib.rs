@@ -1221,10 +1221,13 @@ fn is_workbuddy_running_windows() -> bool {
 pub fn is_workbuddy_running() -> bool {
     if cfg!(target_os = "macos") {
         Command::new("pgrep").args(["-f", WB_EXE]).output().map(|o| o.status.success()).unwrap_or(false)
-    } else if cfg!(target_os = "windows") {
-        is_workbuddy_running_windows()
     } else {
-        false
+        // Windows 专用检测函数被 #[cfg(windows)] 门控，macOS/Linux 编译时不在此作用域，
+        // 因此必须用编译期 #[cfg] 包裹调用，不能用运行时 cfg!() 直接引用。
+        #[cfg(windows)]
+        { is_workbuddy_running_windows() }
+        #[cfg(not(windows))]
+        { false }
     }
 }
 
