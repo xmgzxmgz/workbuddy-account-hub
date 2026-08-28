@@ -370,6 +370,10 @@ function renderQuota(payload) {
   }).sort((x, y) => daysLeft(x.deduction_end) - daysLeft(y.deduction_end));
   $('expire-note').innerHTML = soon.length ? '⏰ 30 天内到期（剩余额度>0）：' + soon.map(p => `${p.name}（${daysLeft(p.deduction_end)}天，${fmt(p.deduction_end)}，余 ${p.remain.toFixed(2)}）`).join('；') : '近期无待用套餐到期。';
   window.__quota = q;
+  // Batch C：趋势记录 + 预算条（单账号视图）
+  const _quid = payload && payload.login && payload.login.uid;
+  if (_quid) { recordTrend(_quid, q.grandRemain); renderTrend(_quid); }
+  renderBudgetBar(q);
 }
 function row(cells) { const tr = document.createElement('tr'); tr.innerHTML = cells.map((c, i) => `<td class="${i >= 2 && i <= 4 ? 'num' : ''}">${c}</td>`).join(''); return tr; }
 function renderCheckin(body) {
@@ -619,10 +623,15 @@ function showAccountList(accs, cur) {
       : (snapped
         ? `<button class="mini" ${isSwitching ? 'disabled style="opacity:.5;cursor:default;"' : ''} onclick="event.stopPropagation();switchTo('${a.uid}')">${isSwitching ? '切换中…' : '切换'}</button>`
         : '<span class="mini" style="background:var(--line);color:var(--muted);padding:3px 9px;border-radius:6px;font-size:10.5px;" title="该账号尚未在 WorkBuddy 中登录保存过登录态，无法直接切换">未登录</span>');
+    const meta = getMeta(a.uid);
+    const starBtn = `<button class="mini star ${meta.star ? 'on' : ''}" title="星标" onclick="event.stopPropagation();toggleStar('${a.uid}')">${meta.star ? '★' : '☆'}</button>`;
+    const tagBtn = `<button class="mini" title="标签：${meta.tags.join(', ') || '（点击设置）'}" onclick="event.stopPropagation();openTagInput('${a.uid}')">🏷</button>`;
+    div.dataset.uid = a.uid;
     div.innerHTML = `
       <div class="dot">${initial}</div>
       <div class="info"><div class="n">${a.nickname ? privacy(a.nickname, { head: 3, tail: 4 }) : '(无昵称)'}</div><div class="s">${privacy(a.uid, { head: 4, tail: 4 })}</div></div>
-      ${badge}`;
+      ${badge}
+      <div class="acc-actions">${starBtn}${tagBtn}</div>`;
     div.onclick = () => selectAccount(a, accs);
     al.appendChild(div);
   });
@@ -978,20 +987,34 @@ async function loadQuotaAll() {
   } catch (e) { toast('查询全部额度失败: ' + e); }
 }
 
-function renderQuotaAll(results) {
+function renderQuotaAll(results, opts) {
+  opts = opts || {};
   const tb = $('qa-tbody'); if (!tb) return;
   if (!results || !results.length) { tb.innerHTML = '<tr><td colspan="7" class="empty">无已登录账号</td></tr>'; return; }
+  // 全量加载时记录原始结果，供搜索/排名过滤重渲染（不覆盖）
+  if (opts.full !== false) lastQuotaAllResults = results;
+  let rows = results.slice();
+  // 排名模式：按全部剩余额度降序（仅影响展示顺序）
+  if (opts.rank) {
+    rows.sort((a, b) => {
+      const qa = (a.parsed && Array.isArray(a.parsed.packages)) ? adaptParsed(a.parsed) : parseQuota(a.body);
+      const qb = (b.parsed && Array.isArray(b.parsed.packages)) ? adaptParsed(b.parsed) : parseQuota(b.body);
+      return ((qb && qb.grandRemain) || 0) - ((qa && qa.grandRemain) || 0);
+    });
+  }
   let sg = 0, st = 0, sq = 0, cnt = 0;
-  tb.innerHTML = results.map(r => {
+  const rankNo = !!opts.rank;
+  tb.innerHTML = rows.map((r, idx) => {
     const nick = r.nickname ? privacy(r.nickname, { head: 3, tail: 4 }) : '';
     const uid = r.uid;
+    const nameCell = (rankNo ? `<b style="color:var(--amber)">#${idx + 1}</b> ` : '') + `<b>${escapeHtml(nick || uid)}</b><br><span style="font-size:10px;color:var(--muted)">${privacy(uid, { head: 4, tail: 4 })}</span>`;
     if (r.error && !r.body) {
       const msg = r.skipped ? '无登录态快照' : escapeHtml(r.error);
-      return `<tr><td><b>${escapeHtml(nick || uid)}</b><br><span style="font-size:10px;color:var(--muted)">${privacy(uid, { head: 4, tail: 4 })}</span></td><td colspan="6" style="color:var(--muted)">${msg}</td></tr>`;
+      return `<tr><td>${nameCell}</td><td colspan="6" style="color:var(--muted)">${msg}</td></tr>`;
     }
     const q = (r.parsed && Array.isArray(r.parsed.packages)) ? adaptParsed(r.parsed) : parseQuota(r.body);
     if (!q) {
-      return `<tr><td><b>${escapeHtml(nick || uid)}</b><br><span style="font-size:10px;color:var(--muted)">${privacy(uid, { head: 4, tail: 4 })}</span></td><td colspan="6" style="color:var(--red)">解析失败 / 无数据</td></tr>`;
+      return `<tr><td>${nameCell}</td><td colspan="6" style="color:var(--red)">解析失败 / 无数据</td></tr>`;
     }
     cnt++;
     sg += q.giftRemain; st += q.trialRemain; sq += q.grandRemain;
@@ -999,7 +1022,7 @@ function renderQuotaAll(results) {
     const exp = q.soonest ? qaExpChip(q.soonest.dl) : '长期';
     const ckBtn = `<button class="mini" onclick="qaCheckinFor('${uid}')">签到</button>`;
     return `<tr>
-      <td><b>${escapeHtml(nick || uid)}</b><br><span style="font-size:10px;color:var(--muted)">${privacy(uid, { head: 4, tail: 4 })}</span></td>
+      <td>${nameCell}</td>
       <td>${typ}</td>
       <td class="num">${q.giftRemain.toFixed(2)}</td>
       <td class="num">${q.trialRemain.toFixed(2)}</td>
@@ -1008,10 +1031,13 @@ function renderQuotaAll(results) {
       <td style="white-space:nowrap;">${ckBtn}</td>
     </tr>`;
   }).join('');
-  $('qa-count').textContent = cnt;
-  $('qa-gift').textContent = sg.toFixed(2);
-  $('qa-trial').textContent = st.toFixed(2);
-  $('qa-grand').textContent = sq.toFixed(2);
+  // 过滤（搜索）时保留全量汇总，避免数字随筛选跳变
+  if (opts.full !== false) {
+    $('qa-count').textContent = cnt;
+    $('qa-gift').textContent = sg.toFixed(2);
+    $('qa-trial').textContent = st.toFixed(2);
+    $('qa-grand').textContent = sq.toFixed(2);
+  }
 }
 
 // 到期预警配色：红 ≤7 天，橙 ≤30 天，绿 充裕
@@ -1020,6 +1046,95 @@ function qaExpChip(dl) {
   if (dl <= 7) return `<span class="soon">${dl} 天</span>`;
   if (dl <= 30) return `<span style="color:var(--amber);font-weight:600;">${dl} 天</span>`;
   return `<span style="color:var(--green);">${dl} 天</span>`;
+}
+
+// ===== Batch C：趋势 / 预算 / 排名 / 搜索 / 星标 / 标签 / 导出（纯前端，localStorage 持久化） =====
+let qaRankMode = false;
+let lastQuotaAllResults = null;
+
+// ---- 账号星标 / 标签（按 UID，localStorage） ----
+const META_KEY = 'wbah_account_meta_v1';
+function loadMetaMap() { try { return JSON.parse(localStorage.getItem(META_KEY) || '{}'); } catch { return {}; } }
+function saveMetaMap(m) { try { localStorage.setItem(META_KEY, JSON.stringify(m)); } catch {} }
+function getMeta(uid) { return Object.assign({ star: false, tags: [] }, loadMetaMap()[uid] || {}); }
+function setMeta(uid, patch) { const m = loadMetaMap(); m[uid] = Object.assign({ star: false, tags: [] }, m[uid] || {}, patch); saveMetaMap(m); }
+function toggleStar(uid) { const cur = getMeta(uid); setMeta(uid, { star: !cur.star }); if (accountsCache) showAccountList(accountsCache, (window.__login || {}).uid); return getMeta(uid).star; }
+function setTagsFor(uid, tags) { const arr = Array.isArray(tags) ? tags : String(tags || '').split(',').map(s => s.trim()).filter(Boolean); setMeta(uid, { tags: arr }); if (accountsCache) showAccountList(accountsCache, (window.__login || {}).uid); }
+function openTagInput(uid) {
+  let v;
+  try { v = (typeof window.prompt === 'function') ? window.prompt('设置标签（逗号分隔）：', getMeta(uid).tags.join(', ')) : null; }
+  catch { v = null; }
+  if (v === null || v === undefined) { if (v === null) toast('标签未改动'); return; }
+  setTagsFor(uid, v); toast('标签已保存');
+}
+
+// ---- 额度趋势（本地按日追加，最多 90 点） ----
+function trendKey(uid) { return 'wbah_trend_' + uid; }
+function recordTrend(uid, remain) {
+  if (!uid) return;
+  const t = new Date(), ds = `${t.getFullYear()}-${pad(t.getMonth() + 1)}-${pad(t.getDate())}`;
+  let arr = []; try { arr = JSON.parse(localStorage.getItem(trendKey(uid)) || '[]'); } catch {}
+  if (!Array.isArray(arr)) arr = [];
+  const last = arr[arr.length - 1];
+  if (last && last.date === ds) last.remain = remain; else arr.push({ date: ds, ts: t.getTime(), remain });
+  if (arr.length > 90) arr = arr.slice(-90);
+  try { localStorage.setItem(trendKey(uid), JSON.stringify(arr)); } catch {}
+}
+function getTrend(uid) { try { return JSON.parse(localStorage.getItem(trendKey(uid)) || '[]'); } catch { return []; } }
+function renderTrend(uid) {
+  const svg = $('q-trend'); if (!svg) return;
+  const arr = getTrend(uid);
+  if (!arr.length) { svg.innerHTML = '<text x="160" y="58" fill="var(--muted)" font-size="11" text-anchor="middle">暂无趋势数据（打开/刷新额度后记录）</text>'; return; }
+  const W = 320, H = 110, p = 8;
+  const vals = arr.map(x => x.remain);
+  const max = Math.max(1, ...vals), min = Math.min(0, ...vals), span = (max - min) || 1;
+  const n = arr.length;
+  const X = i => p + (n === 1 ? (W / 2 - p) : (i / (n - 1)) * (W - 2 * p));
+  const Y = v => H - p - ((v - min) / span) * (H - 2 * p);
+  const pts = arr.map((x, i) => `${X(i).toFixed(1)},${Y(x.remain).toFixed(1)}`).join(' ');
+  const area = `${X(0).toFixed(1)},${(H - p).toFixed(1)} ${pts} ${X(n - 1).toFixed(1)},${(H - p).toFixed(1)}`;
+  const lab = n > 1 ? `<text x="${X(0).toFixed(1)}" y="${H - 1}" fill="var(--muted)" font-size="8">${arr[0].date.slice(5)}</text><text x="${X(n - 1).toFixed(1)}" y="${H - 1}" fill="var(--muted)" font-size="8" text-anchor="end">${arr[n - 1].date.slice(5)}</text>` : '';
+  svg.innerHTML =
+    `<polygon points="${area}" fill="rgba(80,200,140,.12)"/>` +
+    `<polyline points="${pts}" fill="none" stroke="var(--green)" stroke-width="1.6"/>` +
+    arr.map((x, i) => `<circle cx="${X(i).toFixed(1)}" cy="${Y(x.remain).toFixed(1)}" r="1.8" fill="var(--green)"/>`).join('') +
+    `<text x="${W - p}" y="${p + 8}" fill="var(--muted)" font-size="8" text-anchor="end">峰值 ${max.toFixed(1)}</text>` + lab;
+}
+function renderBudgetBar(q) {
+  const fill = $('q-budget-fill'), txt = $('q-budget-txt');
+  if (!fill || !txt || !q) return;
+  const used = q.giftUsed || 0, size = q.giftSize || 0;
+  const pct = size > 0 ? Math.min(100, Math.round(used / size * 100)) : 0;
+  fill.style.width = pct + '%';
+  txt.textContent = `赠送包已用 ${used.toFixed(2)} / ${size.toFixed(2)}（${pct}%）`;
+}
+
+// ---- 搜索 + 排名（基于最近一次 quota_all 结果重渲染） ----
+function applyQuotaAllFilters() {
+  if (!lastQuotaAllResults) return;
+  const q = (($('qa-search') && $('qa-search').value) || '').trim().toLowerCase();
+  let rows = lastQuotaAllResults.slice();
+  if (q) rows = rows.filter(r => (r.nickname || '').toLowerCase().includes(q) || (r.uid || '').toLowerCase().includes(q));
+  renderQuotaAll(rows, { full: false, rank: qaRankMode });
+}
+function qaToggleRank() { qaRankMode = !qaRankMode; applyQuotaAllFilters(); toast(qaRankMode ? '已按剩余额度排名' : '已关闭排名'); }
+
+// ---- 导出脱敏 Markdown ----
+function exportQuotaMd() {
+  if (!lastQuotaAllResults) { toast('请先查询全部额度', 'err'); return; }
+  const lines = ['# WorkBuddy 账户中枢 · 额度导出（脱敏）', '', `> 导出时间：${new Date().toLocaleString('zh-CN')}`, ''];
+  for (const r of lastQuotaAllResults) {
+    const uidm = r.uid ? privacy(r.uid, { head: 4, tail: 4, safe: false }) : '?';
+    const nick = r.nickname ? privacy(r.nickname, { head: 3, tail: 4 }) : '?';
+    if (r.error && !r.body) { lines.push(`- **${nick}** (\`${uidm}\`)：${r.skipped ? '无登录态快照' : (r.error || '失败')}`); continue; }
+    const q = (r.parsed && Array.isArray(r.parsed.packages)) ? adaptParsed(r.parsed) : parseQuota(r.body);
+    if (!q) { lines.push(`- **${nick}** (\`${uidm}\`)：解析失败 / 无数据`); continue; }
+    lines.push(`- **${nick}** (\`${uidm}\`)：赠送包剩余 ${q.giftRemain.toFixed(2)} · 体验版 ${q.trialRemain.toFixed(2)} · 全部剩余 ${q.grandRemain.toFixed(2)} · 使用率 ${q.usePct}%`);
+  }
+  const blob = new Blob([lines.join('\n')], { type: 'text/markdown' });
+  const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = `workbuddy-quota-${new Date().toISOString().slice(0, 10)}.md`; a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  toast('已导出脱敏额度 Markdown');
 }
 
 // 多账号到期时间轴已移除（v0.5.8）：到期预警改用额度表格内彩色 chip 表达。
@@ -1563,7 +1678,7 @@ async function restartWB() {
 
 // 暴露给 inline onclick（安全：未定义的函数跳过，不影响其余，更不阻断 bootBootstrap）
 (function expose(){
-  const names = ['addModel','editModel','delModel','testModel','testCurrentForm','saveModel','closeModelModal','restartWB','loadAll','loadQuota','doCheckin','openReport','closeReport','copyReport','ensureSnapshot','backupAll','saveCurrentLogin','confirmSwitchYes','confirmSwitchNo','switchTo','openBackups','renderBackups','openBackupDetail','closeBackups','closeBackupDetail','loadBuddy','buddyDepart','buddyClaim','buddyDepartAll','buddyClaimAll','buddyDepartFor','buddyClaimFor','refreshBuddyAll','doCheckinAll','loadQuotaAll','qaCheckinFor','toggleAllKeys','refreshAll','uhRefresh','uhExportJson','uhExportCsv','loadMemoryAll'];
+  const names = ['addModel','editModel','delModel','testModel','testCurrentForm','saveModel','closeModelModal','restartWB','loadAll','loadQuota','doCheckin','openReport','closeReport','copyReport','ensureSnapshot','backupAll','saveCurrentLogin','confirmSwitchYes','confirmSwitchNo','switchTo','openBackups','renderBackups','openBackupDetail','closeBackups','closeBackupDetail','loadBuddy','buddyDepart','buddyClaim','buddyDepartAll','buddyClaimAll','buddyDepartFor','buddyClaimFor','refreshBuddyAll','doCheckinAll','loadQuotaAll','qaCheckinFor','toggleAllKeys','refreshAll','uhRefresh','uhExportJson','uhExportCsv','loadMemoryAll','qaToggleRank','exportQuotaMd','applyQuotaAllFilters','toggleStar','openTagInput'];
   for (const n of names) {
     try {
       const fn = eval(n);

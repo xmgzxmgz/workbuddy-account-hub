@@ -62,6 +62,14 @@
     .panel{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:14px 16px;}
     .panel h2{font-size:14px;margin:0 0 12px;display:flex;align-items:center;gap:8px;}
     .panel h2 .tag{font-size:10px;color:var(--muted);font-weight:400;}
+    .budget-bar{position:relative;height:22px;background:var(--bg);border:1px solid var(--line);border-radius:7px;overflow:hidden;margin-bottom:10px;}
+    .budget-fill{position:absolute;left:0;top:0;bottom:0;width:0;background:linear-gradient(90deg,rgba(80,200,140,.55),rgba(80,200,140,.85));transition:width .4s;}
+    .budget-txt{position:absolute;left:10px;top:50%;transform:translateY(-50%);font-size:11px;color:var(--fg);z-index:1;}
+    .mini-input{background:var(--bg);border:1px solid var(--line);border-radius:7px;color:var(--fg);padding:6px 10px;font-size:12px;outline:none;}
+    .mini-input:focus{border-color:var(--green);}
+    .star.on{color:#ffd24a;border-color:#ffd24a;}
+    .acc-actions{display:flex;gap:4px;margin-left:auto;align-items:center;flex-shrink:0;}
+    .acc-actions .mini{padding:2px 7px;font-size:12px;line-height:1.4;}
     .two{display:grid;grid-template-columns:1fr 1fr;gap:14px;}
     @media(max-width:920px){.two{grid-template-columns:1fr;}}
     .ring-wrap{display:flex;align-items:center;gap:14px;}
@@ -332,6 +340,10 @@
           <div class="card"><div class="label">最早到期</div><div class="value" id="q-expire">—</div></div>
           <div class="card"><div class="label">套餐数</div><div class="value blue" id="q-count">—</div></div>
         </div>
+        <div class="budget-bar" title="赠送包已用 / 总量">
+          <div class="budget-fill" id="q-budget-fill"></div>
+          <span class="budget-txt" id="q-budget-txt">—</span>
+        </div>
         <div class="axis">
           <div class="axis-track" id="axis-track">
             <div class="axis-end l">今天</div>
@@ -346,6 +358,8 @@
           </table>
         </div>
         <div class="note ok" id="expire-note"></div>
+        <div class="section-title" style="margin:14px 4px 6px;">额度趋势 <span class="tag">本地记录（每次打开/刷新额度时追加，按日去重）</span></div>
+        <svg id="q-trend" viewBox="0 0 320 110" preserveAspectRatio="none" style="width:100%;height:110px;background:var(--bg);border:1px solid var(--line);border-radius:8px;"></svg>
       </div>
 
       <div class="panel">
@@ -384,6 +398,11 @@
           <div class="card"><div class="label">累计赠送包剩余</div><div class="value green" id="qa-gift">—</div></div>
           <div class="card"><div class="label">累计体验版剩余</div><div class="value blue" id="qa-trial">—</div></div>
           <div class="card"><div class="label">累计全部剩余</div><div class="value" id="qa-grand">—</div></div>
+        </div>
+        <div class="qa-controls" style="display:flex;gap:8px;margin-bottom:10px;flex-wrap:wrap;align-items:center;">
+          <input id="qa-search" class="mini-input" placeholder="搜索昵称 / UID…" oninput="applyQuotaAllFilters()" style="flex:1;min-width:150px;">
+          <button class="mini" onclick="qaToggleRank()">⇅ 排名</button>
+          <button class="mini" onclick="exportQuotaMd()">⬇ 导出 MD</button>
         </div>
         <div style="max-height:300px;overflow:auto;">
           <table>
