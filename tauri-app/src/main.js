@@ -1276,6 +1276,17 @@ async function loadAll() {
 // 任一部分慢/失败都不会卡住其余，更不会卡住本地昵称。
 // 启动初期网络/后端可能未就绪，失败时自动重试（最多 4 次，间隔递增），
 // 避免「打开软件后额度/签到/记忆空白，要点刷新全部才出来」。
+let checkinInFlight = false;
+// 自动签到（v0.5.10）：进入软件即触发一次 + 每 3h 轮询（对标 WorkDaddy daemon.js:6669 每3h setInterval + 开面板触发）
+// 防重入对标 daemon.js:2218 claimInFlight；后端 do_checkin_as 已幂等（已签返回 skipped）
+function autoCheckin() {
+  if (checkinInFlight) return;
+  checkinInFlight = true;
+  invoke('checkin_all').then(r => {
+    if (r && r.summary) console.info('auto checkin:', r.summary);
+  }).catch(e => { console.warn('auto checkin err', e); })
+    .finally(() => { checkinInFlight = false; });
+}
 function loadNetworkParts() {
   const retry = (fn, tries) => {
     fn().then(ok => {
@@ -1309,6 +1320,12 @@ function loadNetworkParts() {
     if (!cur) return false;
     return uhRefresh(cur, true).then(() => true).catch(() => false);
   }, 0);
+
+  // 自动签到：启动即触发一次；之后每 3h 轮询（仅设一次定时器，避免重复）
+  autoCheckin();
+  if (!window.__autoCheckinTimer) {
+    window.__autoCheckinTimer = setInterval(autoCheckin, 3 * 60 * 60 * 1000);
+  }
 }
 async function loadQuota() {
   $('raw-out').textContent = '请求中…';

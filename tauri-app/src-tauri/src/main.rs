@@ -113,6 +113,8 @@ fn checkin_all() -> Value {
             "uid": a.uid, "nickname": a.nickname, "ok": status == 200, "skipped": sk,
             "status": status, "message": msg
         }));
+        // 账号间限速 250ms，避免触发风控（对标 daemon.js:2221-2235 CHECKIN_QUEUE_DELAY_MS）
+        std::thread::sleep(std::time::Duration::from_millis(250));
     }
     json!({ "ok": true, "results": results, "summary": { "total": results.len(), "ok": ok, "fail": fail, "skipped": skipped } })
 }
