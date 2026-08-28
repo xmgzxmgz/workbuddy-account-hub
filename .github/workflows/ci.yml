@@ -32,7 +32,10 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file \
-            libssl-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev patchelf pkg-config
+            libssl-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev patchelf pkg-config clang
 
       - name: Rust compile guard (cargo check)
+        env:
+          CC: clang
+          CXX: clang++
         run: cd tauri-app/src-tauri && cargo check
