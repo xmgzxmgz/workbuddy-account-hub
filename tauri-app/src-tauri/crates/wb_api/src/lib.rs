@@ -416,9 +416,14 @@ fn app_cache_dir() -> std::path::PathBuf {
     }
 }
 /// 设置文件权限为 0o600（仅属主可读写），防越权读取（#30 原子写 + 受限权限）
+/// Unix 平台生效；Windows 下 token 文件本就位于用户私有 AppData，best-effort 跳过。
+#[cfg(unix)]
 fn set_permissions_600(p: &std::path::Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o600)).is_ok()
 }
+#[cfg(not(unix))]
+fn set_permissions_600(_p: &std::path::Path) -> bool { true }
 /// 原子写额度缓存（临时文件 + rename，参考 workbuddy2api auth.go:152-156）+ 0o600 权限
 fn write_quota_cache(uid: &str, parsed: &Value, body: &Value) {
     let dir = app_cache_dir();
