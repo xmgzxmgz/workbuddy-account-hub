@@ -415,7 +415,11 @@ fn app_cache_dir() -> std::path::PathBuf {
             .join("Library").join("Application Support").join("WorkBuddy Account Hub").join("cache")
     }
 }
-/// 原子写额度缓存（临时文件 + rename，参考 workbuddy2api auth.go:152-156）
+/// 设置文件权限为 0o600（仅属主可读写），防越权读取（#30 原子写 + 受限权限）
+fn set_permissions_600(p: &std::path::Path) -> bool {
+    std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o600)).is_ok()
+}
+/// 原子写额度缓存（临时文件 + rename，参考 workbuddy2api auth.go:152-156）+ 0o600 权限
 fn write_quota_cache(uid: &str, parsed: &Value, body: &Value) {
     let dir = app_cache_dir();
     if std::fs::create_dir_all(&dir).is_err() { return; }
@@ -423,7 +427,9 @@ fn write_quota_cache(uid: &str, parsed: &Value, body: &Value) {
     let payload = json!({ "ts": chrono_now_ms(), "parsed": parsed, "body": body, "status": 200 });
     let tmp = dir.join(format!("{}.tmp", uid));
     if std::fs::write(&tmp, payload.to_string()).is_ok() {
-        let _ = std::fs::rename(&tmp, &p);
+        if std::fs::rename(&tmp, &p).is_ok() {
+            let _ = set_permissions_600(&p);
+        }
     }
 }
 fn read_quota_cache(uid: &str) -> Option<Value> {
