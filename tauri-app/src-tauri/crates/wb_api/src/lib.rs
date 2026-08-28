@@ -293,6 +293,12 @@ pub fn get_memory() -> Value {
         .unwrap_or_else(|e| json!({ "error": e }))
 }
 
+/// 查询 AI 记忆画像（指定登录态）—— 供多账号批量查询（覆盖 dashboard 单账号局限）
+pub fn get_memory_as(login: &LoginInfo) -> Value {
+    call_api_as(login, &format!("{}/api/memory/profile", API_BASE), "GET", "")
+        .unwrap_or_else(|e| json!({ "error": e }))
+}
+
 /// 执行今日签到（幂等：已签则跳过）—— 指定登录态
 pub fn do_checkin_as(login: &LoginInfo) -> Value {
     let st = call_api_as(login, &format!("{}{}/checkin-activity-status", API_BASE, BILLING_METER), "POST", "{}")
