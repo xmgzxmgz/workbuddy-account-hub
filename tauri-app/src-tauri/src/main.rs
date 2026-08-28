@@ -714,8 +714,8 @@ fn account_pool() -> Value {
         let cooldown = if cd > now { cd - now } else { 0 };
         let needs_refresh = e.get("needs_refresh").and_then(|x| x.as_bool()).unwrap_or(false);
         // 优先用额度缓存刷新积分，否则用落盘值
-        let qc = api::read_quota_cache(&a.uid);
-        let credits = qc.get("parsed").and_then(|p| p.get("grandRemain")).and_then(|x| x.as_f64())
+        let credits = api::read_quota_cache(&a.uid)
+            .and_then(|v| v.get("parsed").and_then(|p| p.get("grandRemain")).and_then(|x| x.as_f64()))
             .unwrap_or_else(|| e.get("last_remaining_credits").and_then(|x| x.as_f64()).unwrap_or(0.0));
         let blocked = disabled || cooldown > 0;
         if !blocked && !needs_refresh && credits > best_credits {
