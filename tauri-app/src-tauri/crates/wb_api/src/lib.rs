@@ -134,11 +134,14 @@ fn make_client() -> reqwest::blocking::Client {
     let mut builder = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(15))
         .connect_timeout(std::time::Duration::from_secs(10));
-    // 代理：优先 HTTPS_PROXY，其次 HTTP_PROXY（含小写），任一存在则全局套用
+    // 代理：优先 HTTPS_PROXY，其次 HTTP_PROXY，再次 ALL_PROXY（含小写），任一存在则全局套用
+    // （2api 同类项目均无代理支持，account-hub 反其道补齐以形成差异化优势，企业网/代理环境可用）
     let proxy_env = std::env::var("HTTPS_PROXY")
         .or_else(|_| std::env::var("https_proxy"))
         .or_else(|_| std::env::var("HTTP_PROXY"))
         .or_else(|_| std::env::var("http_proxy"))
+        .or_else(|_| std::env::var("ALL_PROXY"))
+        .or_else(|_| std::env::var("all_proxy"))
         .unwrap_or_default();
     if !proxy_env.is_empty() {
         if let Ok(p) = reqwest::Proxy::all(&proxy_env) {
@@ -222,7 +225,7 @@ pub fn call_api_as(login: &LoginInfo, endpoint: &str, method: &str, body: &str) 
 }
 
 /// 网络错误 → 中文映射（参考 daemon.js:2176 的错误友好化）
-fn map_net_error(e: &reqwest::blocking::Error) -> String {
+fn map_net_error(e: &reqwest::Error) -> String {
     if e.is_timeout() {
         "网络请求超时，请检查网络或代理设置".to_string()
     } else if e.is_connect() {
