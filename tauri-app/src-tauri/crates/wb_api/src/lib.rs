@@ -47,7 +47,7 @@ fn auth_candidates() -> Vec<std::path::PathBuf> {
     cands
 }
 
-fn jwt_payload(token: &str) -> Option<Value> {
+pub fn jwt_payload(token: &str) -> Option<Value> {
     let p = token.split('.').nth(1)?;
     let pad = (4 - (p.len() % 4)) % 4;
     let mut s = p.to_string();
@@ -437,7 +437,7 @@ fn write_quota_cache(uid: &str, parsed: &Value, body: &Value) {
         }
     }
 }
-fn read_quota_cache(uid: &str) -> Option<Value> {
+pub fn read_quota_cache(uid: &str) -> Option<Value> {
     let p = app_cache_dir().join(format!("{}.json", uid));
     std::fs::read_to_string(&p).ok().and_then(|s| serde_json::from_str(&s).ok())
 }
