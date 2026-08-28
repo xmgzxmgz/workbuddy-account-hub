@@ -1363,6 +1363,9 @@ async function loadAll() {
     if (ro) ro.textContent = JSON.stringify(j, null, 2);
 
     window.__login = j.login || {};
+    // #27：依据 get_all 带回的 workbuddy_running 立即刷新顶部提示条，并启动周期轮询
+    try { updateClientStatus(j.workbuddy_running); } catch (e) {}
+    if (!window.__clientPoll) { window.__clientPoll = setInterval(pollClientStatus, 30000); }
     try { renderSidebar(j); bootLog('启动加载：侧边栏已渲染'); }
     catch (e) { bootLog('启动加载：侧边栏渲染失败 ' + e.message, 'err'); }
 
@@ -1442,6 +1445,23 @@ function loadNetworkParts() {
     window.__autoCheckinTimer = setInterval(autoCheckin, 3 * 60 * 60 * 1000);
   }
 }
+// #27：主客户端（WorkBuddy）进程存在性提示（复用 app_running 命令）；
+// 关闭主客户端后签到 / 切换账号会静默失败，顶部给出明确提示而非静默报错。
+function updateClientStatus(running) {
+  const bar = document.getElementById('client-status-bar');
+  if (!bar) return;
+  if (running) {
+    bar.className = 'client-bar ok hidden';
+    bar.innerHTML = '';
+  } else {
+    bar.className = 'client-bar warn';
+    bar.innerHTML = '<span class="dot"></span><span>未检测到 WorkBuddy 主客户端在运行 —— 签到 / 切换账号可能失败，请先打开 WorkBuddy 再操作。</span>';
+  }
+}
+function pollClientStatus() {
+  invoke('app_running').then(r => updateClientStatus(!!r)).catch(() => {});
+}
+
 async function loadQuota() {
   $('raw-out').textContent = '请求中…';
   try {
