@@ -149,6 +149,11 @@ fn make_client() -> reqwest::blocking::Client {
 }
 
 /// 统一代理官方接口（指定登录态）；返回 { status, body(Value), login(脱敏) }
+///
+/// 健壮性（参考 WorkDaddy daemon.js:4782-4800 的 robustFetchResource）：
+/// - 网络错误 / 5xx 自动重试 3 次，间隔 300ms×attempt
+/// - 空响应（body 解析为空字符串）也重试（官方偶发空响应）
+/// - 401/403/429/5xx/超时 映射为中文提示，避免前端裸状态码
 pub fn call_api_as(login: &LoginInfo, endpoint: &str, method: &str, body: &str) -> Result<Value, String> {
     let target = if endpoint.starts_with("http://") || endpoint.starts_with("https://") {
         endpoint.to_string()
@@ -156,28 +161,75 @@ pub fn call_api_as(login: &LoginInfo, endpoint: &str, method: &str, body: &str) 
         format!("{}{}", API_BASE, endpoint)
     };
     let client = make_client();
-    let mut req = match method.to_uppercase().as_str() {
-        "GET" => client.get(&target),
-        "POST" => client.post(&target),
-        _ => return Err(format!("不支持的方法: {}", method)),
-    };
-    req = req
-        .header("Content-Type", "application/json")
-        .header("Accept", "application/json")
-        .header("Authorization", format!("Bearer {}", login.token))
-        .header("X-User-Id", &login.uid);
-    if method.to_uppercase() == "POST" {
-        req = req.body(body.to_string());
+    let mut last_msg = "未知网络错误".to_string();
+    for attempt in 1..=3u32 {
+        let mut req = match method.to_uppercase().as_str() {
+            "GET" => client.get(&target),
+            "POST" => client.post(&target),
+            _ => return Err(format!("不支持的方法: {}", method)),
+        };
+        req = req
+            .header("Content-Type", "application/json")
+            .header("Accept", "application/json")
+            .header("Authorization", format!("Bearer {}", login.token))
+            .header("X-User-Id", &login.uid);
+        if method.to_uppercase() == "POST" {
+            req = req.body(body.to_string());
+        }
+        let resp = match req.send() {
+            Ok(r) => r,
+            Err(e) => {
+                last_msg = map_net_error(&e);
+                if attempt < 3 {
+                    std::thread::sleep(std::time::Duration::from_millis(300 * attempt as u64));
+                    continue;
+                }
+                return Err(last_msg);
+            }
+        };
+        let status = resp.status().as_u16();
+        let text = resp.text().unwrap_or_default();
+        // 鉴权/限流类错误立即失败（不重试，避免无意义重复）
+        if status == 401 { return Err("登录身份过期，请重新登录 WorkBuddy 客户端".to_string()); }
+        if status == 403 { return Err("无权限访问该接口（HTTP 403）".to_string()); }
+        if status == 429 { return Err("请求过于频繁，请稍后再试（HTTP 429）".to_string()); }
+        if status >= 500 {
+            last_msg = format!("服务器繁忙（HTTP {}），请稍后重试", status);
+            if attempt < 3 {
+                std::thread::sleep(std::time::Duration::from_millis(300 * attempt as u64));
+                continue;
+            }
+            return Err(last_msg);
+        }
+        let parsed: Value = serde_json::from_str(&text).unwrap_or(Value::String(text.clone()));
+        // 空响应重试（官方偶发空 body）
+        let is_empty = matches!(&parsed, Value::String(s) if s.trim().is_empty());
+        if is_empty {
+            last_msg = format!("接口返回空响应（HTTP {}），正在重试", status);
+            if attempt < 3 {
+                std::thread::sleep(std::time::Duration::from_millis(300 * attempt as u64));
+                continue;
+            }
+            return Err(last_msg);
+        }
+        return Ok(json!({
+            "status": status,
+            "body": parsed,
+            "login": { "uid": login.uid, "file": login.file, "token": mask(&login.token, 8) }
+        }));
     }
-    let resp = req.send().map_err(|e| format!("请求失败: {}", e))?;
-    let status = resp.status().as_u16();
-    let text = resp.text().unwrap_or_default();
-    let parsed: Value = serde_json::from_str(&text).unwrap_or(Value::String(text));
-    Ok(json!({
-        "status": status,
-        "body": parsed,
-        "login": { "uid": login.uid, "file": login.file, "token": mask(&login.token, 8) }
-    }))
+    Err(last_msg)
+}
+
+/// 网络错误 → 中文映射（参考 daemon.js:2176 的错误友好化）
+fn map_net_error(e: &reqwest::blocking::Error) -> String {
+    if e.is_timeout() {
+        "网络请求超时，请检查网络或代理设置".to_string()
+    } else if e.is_connect() {
+        "无法连接到服务器，请检查网络".to_string()
+    } else {
+        format!("网络请求失败：{}", e)
+    }
 }
 
 /// 统一代理官方接口（使用当前本机登录态）；返回 { status, body(Value), login(脱敏) }
@@ -323,16 +375,167 @@ pub fn do_checkin() -> Value {
     }
 }
 
-/// 仅查询额度
+// ===== 额度解析健壮性（参考 WorkDaddy credit-segments.js:4-197） =====
+// 官方计费字段多年多次改名（Remain/CapacityRemain/SlicePeriodCapacityRemain…），
+// 用别名数组回退取值；同 (package_code+到期) 合并为一个赠送包；limitNum===-1 标记不限量。
+
+/// 从对象按别名数组取第一个数值（兼容 Number 或字符串数字）
+fn first_num(obj: &Value, keys: &[&str]) -> f64 {
+    for k in keys {
+        match obj.get(k) {
+            Some(Value::Number(n)) => { if let Some(f) = n.as_f64() { return f; } }
+            Some(Value::String(s)) => { if let Ok(f) = s.parse::<f64>() { return f; } }
+            _ => {}
+        }
+    }
+    0.0
+}
+/// 从对象按别名数组取第一个字符串
+fn first_str<'a>(obj: &'a Value, keys: &[&str]) -> Option<&'a str> {
+    for k in keys { if let Some(s) = obj.get(k).and_then(|x| x.as_str()) { return Some(s); } }
+    None
+}
+fn is_trial_pkg(a: &Value, code: &str, name: &str) -> bool {
+    a.get("IsTrial").and_then(|x| x.as_bool()).unwrap_or(false)
+        || code.to_lowercase().contains("trial")
+        || name.to_lowercase().contains("trial")
+        || name.contains("体验")
+}
+
+/// account-hub 自有缓存目录（不写入主客户端目录，符合「主客户端零写入」铁律）
+fn app_cache_dir() -> std::path::PathBuf {
+    if cfg!(target_os = "windows") {
+        std::path::Path::new(&std::env::var("APPDATA").unwrap_or_default())
+            .join("WorkBuddy Account Hub").join("cache")
+    } else {
+        std::path::Path::new(&std::env::var("HOME").unwrap_or_default())
+            .join("Library").join("Application Support").join("WorkBuddy Account Hub").join("cache")
+    }
+}
+/// 原子写额度缓存（临时文件 + rename，参考 workbuddy2api auth.go:152-156）
+fn write_quota_cache(uid: &str, parsed: &Value, body: &Value) {
+    let dir = app_cache_dir();
+    if std::fs::create_dir_all(&dir).is_err() { return; }
+    let p = dir.join(format!("{}.json", uid));
+    let payload = json!({ "ts": chrono_now_ms(), "parsed": parsed, "body": body, "status": 200 });
+    let tmp = dir.join(format!("{}.tmp", uid));
+    if std::fs::write(&tmp, payload.to_string()).is_ok() {
+        let _ = std::fs::rename(&tmp, &p);
+    }
+}
+fn read_quota_cache(uid: &str) -> Option<Value> {
+    let p = app_cache_dir().join(format!("{}.json", uid));
+    std::fs::read_to_string(&p).ok().and_then(|s| serde_json::from_str(&s).ok())
+}
+
+/// 解析 get-user-resource 原始响应为标准化结构（别名兼容 + 合并 + 企业不限量）
+pub fn parse_user_resource(raw: &Value) -> Value {
+    let data = raw.get("data").and_then(|d| d.get("Response")).and_then(|r| r.get("Data"));
+    let accounts = match data.and_then(|d| d.get("Accounts")).and_then(|a| a.as_array()) {
+        Some(a) => a,
+        None => return json!({ "packages": [], "giftRemain": 0.0, "trialRemain": 0.0, "grandRemain": 0.0, "empty": true }),
+    };
+    let remain_k = ["CapacityRemainPrecise", "CapacityRemain", "Remain", "SlicePeriodCapacityRemain", "CapacityRemainPrecise2"];
+    let used_k = ["CapacityUsedPrecise", "CapacityUsed", "Used", "SlicePeriodCapacityUsed"];
+    let size_k = ["CapacitySizePrecise", "CapacitySize", "Size", "SlicePeriodCapacitySize"];
+    let name_k = ["PackageName", "Name", "packageName", "title"];
+    let rid_k = ["ResourceId", "resourceId", "resource_id"];
+    let code_k = ["PackageCode", "packageCode", "Code", "code"];
+    let cyc_k = ["CycleEndTime", "cycleEndTime", "cycle_end"];
+    let ded_k = ["DeductionEndTime", "deductionEndTime", "ExpiresAt", "expiresAt", "expireTime", "DeductionEnd"];
+    let mut raw_pkgs: Vec<Value> = Vec::new();
+    for a in accounts {
+        let remain = first_num(a, &remain_k);
+        let used = first_num(a, &used_k);
+        let size = first_num(a, &size_k);
+        let name = first_str(a, &name_k).unwrap_or("—").to_string();
+        let rid = first_str(a, &rid_k).unwrap_or("").to_string();
+        let code = first_str(a, &code_k).unwrap_or("").to_string();
+        let cycle_end = first_str(a, &cyc_k).unwrap_or("").to_string();
+        let deduction_end = first_str(a, &ded_k).unwrap_or("").to_string();
+        let limit_num = a.get("LimitNum").and_then(|x| x.as_i64()).unwrap_or(0);
+        let is_unlimited = limit_num == -1;
+        let trial = is_trial_pkg(a, &code, &name);
+        raw_pkgs.push(json!({
+            "name": name, "resource_id": rid, "package_code": code, "trial": trial,
+            "remain": remain, "used": used, "size": size,
+            "cycle_end": cycle_end, "deduction_end": deduction_end, "is_unlimited": is_unlimited
+        }));
+    }
+    // 合并：同 (package_code + 到期) 累加，避免十个 500 记录渲染成十个包
+    let mut merged: Vec<Value> = Vec::new();
+    for p in raw_pkgs {
+        let key = format!("{}|{}", p["package_code"].as_str().unwrap_or(""), p["deduction_end"].as_str().unwrap_or(""));
+        if let Some(existing) = merged.iter_mut().find(|m| {
+            format!("{}|{}", m["package_code"].as_str().unwrap_or(""), m["deduction_end"].as_str().unwrap_or("")) == key
+        }) {
+            existing["remain"] = json!(existing["remain"].as_f64().unwrap_or(0.0) + p["remain"].as_f64().unwrap_or(0.0));
+            existing["used"] = json!(existing["used"].as_f64().unwrap_or(0.0) + p["used"].as_f64().unwrap_or(0.0));
+            existing["size"] = json!(existing["size"].as_f64().unwrap_or(0.0) + p["size"].as_f64().unwrap_or(0.0));
+        } else {
+            merged.push(p);
+        }
+    }
+    let sum = |arr: &[Value], k: &str| arr.iter().filter_map(|x| x[k].as_f64()).sum::<f64>();
+    let gift: Vec<&Value> = merged.iter().filter(|p| !p["trial"].as_bool().unwrap_or(false)).collect();
+    let trial: Vec<&Value> = merged.iter().filter(|p| p["trial"].as_bool().unwrap_or(false)).collect();
+    let gift_remain = gift.iter().map(|p| p["remain"].as_f64().unwrap_or(0.0)).sum::<f64>();
+    let gift_used = gift.iter().map(|p| p["used"].as_f64().unwrap_or(0.0)).sum::<f64>();
+    let gift_size = gift.iter().map(|p| p["size"].as_f64().unwrap_or(0.0)).sum::<f64>();
+    let trial_remain = trial.iter().map(|p| p["remain"].as_f64().unwrap_or(0.0)).sum::<f64>();
+    let grand_remain = sum(&merged, "remain");
+    let grand_used = sum(&merged, "used");
+    let grand_size = sum(&merged, "size");
+    let has_unlimited = merged.iter().any(|p| p["is_unlimited"].as_bool().unwrap_or(false));
+    json!({
+        "packages": merged,
+        "giftRemain": gift_remain, "giftUsed": gift_used, "giftSize": gift_size,
+        "trialRemain": trial_remain,
+        "grandRemain": grand_remain, "grandUsed": grand_used, "grandSize": grand_size,
+        "usePct": if grand_size > 0.0 { (grand_used / grand_size * 100.0).round() as i64 } else { 0 },
+        "hasUnlimited": has_unlimited
+    })
+}
+
+/// 仅查询额度（带解析 + 本地缓存 + 离线回退）
 pub fn get_quota() -> Value {
-    call_api(&format!("{}{}/get-user-resource", API_BASE, BILLING_METER), "POST", "{}")
-        .unwrap_or_else(|e| json!({ "error": e }))
+    match load_login() {
+        Some(l) => get_quota_as(&l),
+        None => json!({ "error": "未找到本机 WorkBuddy 登录态，请先登录 WorkBuddy 客户端" }),
+    }
 }
 
 /// 查询额度（指定登录态）—— 供多账号批量/单账号查询（覆盖 dashboard 单账号局限）
+/// 返回 { status, body(原始), parsed(标准化), login(脱敏), cached?(离线回退) }
 pub fn get_quota_as(login: &LoginInfo) -> Value {
-    call_api_as(login, &format!("{}{}/get-user-resource", API_BASE, BILLING_METER), "POST", "{}")
-        .unwrap_or_else(|e| json!({ "error": e }))
+    match call_api_as(login, &format!("{}{}/get-user-resource", API_BASE, BILLING_METER), "POST", "{}") {
+        Ok(v) => {
+            let status = v.get("status").and_then(|x| x.as_u64()).unwrap_or(0);
+            let body = v.get("body").cloned().unwrap_or(Value::Null);
+            let parsed = parse_user_resource(&body);
+            write_quota_cache(&login.uid, &parsed, &body);
+            json!({
+                "status": status,
+                "body": body,
+                "parsed": parsed,
+                "login": v.get("login").cloned().unwrap_or(Value::Null)
+            })
+        }
+        Err(e) => {
+            // 离线回退：网络失败时返回上次缓存（标注 cached/offline）
+            if let Some(c) = read_quota_cache(&login.uid) {
+                return json!({
+                    "status": c.get("status").and_then(|x| x.as_u64()).unwrap_or(0),
+                    "body": c.get("body").cloned().unwrap_or(Value::Null),
+                    "parsed": c.get("parsed").cloned().unwrap_or(Value::Null),
+                    "cached": true,
+                    "offline": true,
+                    "error": e
+                });
+            }
+            json!({ "error": e })
+        }
+    }
 }
 
 /// 仅查询签到状态
