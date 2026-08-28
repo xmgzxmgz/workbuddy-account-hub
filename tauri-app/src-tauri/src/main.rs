@@ -169,6 +169,48 @@ fn checkin_for(uid: String) -> Value {
     api::do_checkin_as(&login)
 }
 
+/// 查询单个账号的 AI 记忆画像（用其 vault 快照登录态 token 发请求，覆盖全部已登记账号）
+#[tauri::command]
+fn memory_for(uid: String) -> Value {
+    let vault = ops::vault_dir();
+    let Some(login) = account_login(&vault, &uid) else {
+        return json!({ "uid": uid, "ok": false, "error": "登录态文件缺失或无效" });
+    };
+    api::get_memory_as(&login)
+}
+
+/// 查询所有「已保存登录态」账号的 AI 记忆画像，返回每个账号的画像明细
+/// （与 quota_all 同构，覆盖 dashboard 只能看当前登录态单账号的局限）
+#[tauri::command]
+fn memory_all() -> Value {
+    let vault = ops::vault_dir();
+    let accs = ops::list_accounts(&vault);
+    let mut results = Vec::new();
+    let mut ok = 0u32; let mut fail = 0u32; let mut skipped = 0u32;
+    for a in accs {
+        if !a.has_snapshot {
+            results.push(json!({"uid": a.uid, "nickname": a.nickname, "ok": false, "skipped": true, "error": "无登录态快照"}));
+            skipped += 1; continue;
+        }
+        let Some(login) = account_login(&vault, &a.uid) else {
+            results.push(json!({"uid": a.uid, "nickname": a.nickname, "ok": false, "skipped": true, "error": "登录态文件缺失或无效"}));
+            skipped += 1; continue;
+        };
+        let r = api::get_memory_as(&login);
+        if let Some(err) = r.get("error") {
+            results.push(json!({"uid": a.uid, "nickname": a.nickname, "ok": false, "skipped": false, "error": err}));
+            fail += 1; continue;
+        }
+        let status = r.get("status").and_then(|x| x.as_u64()).unwrap_or(0);
+        if status == 200 { ok += 1; } else { fail += 1; }
+        results.push(json!({
+            "uid": a.uid, "nickname": a.nickname, "ok": status == 200, "skipped": false,
+            "status": status, "body": r.get("body").cloned().unwrap_or(Value::Null)
+        }));
+    }
+    json!({ "ok": true, "results": results, "summary": { "total": results.len(), "ok": ok, "fail": fail, "skipped": skipped } })
+}
+
 /// 查询所有「已保存登录态」账号的宠物当前状态
 #[tauri::command]
 fn buddy_all_status() -> Value {
@@ -587,6 +629,8 @@ pub fn run() {
             quota_for,
             quota_all,
             checkin_for,
+            memory_for,
+            memory_all,
             usage_summary,
             export_conversation_history
         ])

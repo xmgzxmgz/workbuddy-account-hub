@@ -146,6 +146,18 @@
     .axis-end{position:absolute;top:38px;font-size:9px;color:var(--muted);}
     .axis-end.l{left:6%;transform:translateX(-50%);}
     .axis-end.r{right:6%;transform:translateX(50%);}
+    /* 多账号到期时间轴 */
+    .qa-tl{margin-top:12px;border:1px solid var(--line);border-radius:10px;padding:10px 12px;background:#0b0e13;max-height:240px;overflow:auto;}
+    .qa-tl .ttl{font-size:11px;color:var(--muted);margin-bottom:8px;}
+    .tl-row{display:flex;align-items:center;gap:10px;margin:5px 0;font-size:11.5px;}
+    .tl-name{width:240px;min-width:240px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--fg);}
+    .tl-bar{flex:1;height:6px;background:var(--line);border-radius:4px;overflow:hidden;}
+    .tl-bar>i{display:block;height:100%;}
+    .tl-dl{width:64px;text-align:right;font-weight:600;}
+    .tl-dl.red{color:var(--red);} .tl-dl.amber{color:var(--amber);} .tl-dl.green{color:var(--green);}
+    /* 多账号记忆卡片 */
+    .mem-card{border:1px solid var(--line);border-radius:10px;padding:10px 12px;margin:8px 0;background:#0b0e13;}
+    .mem-head{font-size:13px;} .mem-head b{font-weight:700;}
     .modal{display:none;position:fixed;inset:0;background:rgba(0,0,0,.62);z-index:50;align-items:center;justify-content:center;}
     .modal.show{display:flex;}
     .modal-box{width:min(700px,92vw);max-height:86vh;background:var(--panel);border:1px solid var(--line);border-radius:12px;display:flex;flex-direction:column;}
@@ -386,6 +398,7 @@
             <tbody id="qa-tbody"><tr><td colspan="7" class="empty">启动自动查询；或点「查询全部额度」查看每个账号的官方剩余额度</td></tr></tbody>
           </table>
         </div>
+        <div class="qa-tl" id="qa-timeline"><div class="ttl">查询全部额度后自动绘制各账号剩余套餐的到期时间轴</div></div>
       </div>
     </div>
 
@@ -445,10 +458,14 @@
     <div class="section-title">AI 记忆 · 环境</div>
     <div class="grid">
       <div class="panel">
-        <h2>AI 记忆画像 <span class="tag">/api/memory/profile</span></h2>
+        <h2>AI 记忆画像 <span class="tag">/api/memory/profile</span>
+          <span style="flex:1"></span>
+          <button class="mini" onclick="loadMemoryAll()">查询全部账号记忆 🌐</button>
+        </h2>
         <div class="kv" id="kv-memory" style="margin-bottom:12px;"><span class="empty">加载中…</span></div>
         <div id="memory-sections"></div>
         <div class="memo" id="memo-foryou">—</div>
+        <div id="memory-all" style="margin-top:10px;"></div>
       </div>
       <div class="panel">
         <h2>本机环境</h2>
