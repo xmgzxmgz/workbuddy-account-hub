@@ -955,8 +955,7 @@ async function loadQuotaAll() {
 
 function renderQuotaAll(results) {
   const tb = $('qa-tbody'); if (!tb) return;
-  if (!results || !results.length) { tb.innerHTML = '<tr><td colspan="7" class="empty">无已登录账号</td></tr>'; if ($('qa-timeline')) $('qa-timeline').innerHTML = ''; return; }
-  const tl = [];
+  if (!results || !results.length) { tb.innerHTML = '<tr><td colspan="7" class="empty">无已登录账号</td></tr>'; return; }
   let sg = 0, st = 0, sq = 0, cnt = 0;
   tb.innerHTML = results.map(r => {
     const nick = r.nickname ? privacy(r.nickname, { head: 3, tail: 4 }) : '';
@@ -972,12 +971,6 @@ function renderQuotaAll(results) {
     cnt++;
     sg += q.giftRemain; st += q.trialRemain; sq += q.grandRemain;
     const typ = r.status === 200 ? '<span class="ok">✓</span>' : (r.error ? '<span class="soon">失败</span>' : (r.skipped ? '跳过' : '—'));
-    // 到期时间轴数据：仅取剩余>0 的赠送包，避免每日已用尽的包刷屏（对齐 dashboard 30天预警口径）
-    q.pkgs.filter(p => p.remain > 0.004).forEach(p => {
-      const dl = daysLeft(p.deduction_end);
-      if (dl === null) return;
-      tl.push({ nick: nick || uid, name: p.name || '—', trial: p.trial, dl });
-    });
     const exp = q.soonest ? qaExpChip(q.soonest.dl) : '长期';
     const ckBtn = `<button class="mini" onclick="qaCheckinFor('${uid}')">签到</button>`;
     return `<tr>
@@ -994,7 +987,6 @@ function renderQuotaAll(results) {
   $('qa-gift').textContent = sg.toFixed(2);
   $('qa-trial').textContent = st.toFixed(2);
   $('qa-grand').textContent = sq.toFixed(2);
-  qaRenderTimeline(tl);
 }
 
 // 到期预警配色：红 ≤7 天，橙 ≤30 天，绿 充裕
@@ -1005,21 +997,7 @@ function qaExpChip(dl) {
   return `<span style="color:var(--green);">${dl} 天</span>`;
 }
 
-// 多账号到期时间轴：把所有账号的剩余套餐按最早抵扣到期排序，画彩色进度条
-function qaRenderTimeline(tl) {
-  const box = $('qa-timeline'); if (!box) return;
-  if (!tl.length) { box.innerHTML = '<div class="ttl">所有账号暂无剩余额度套餐（无可绘制时间轴）</div>'; return; }
-  tl.sort((a, b) => a.dl - b.dl);
-  box.innerHTML = '<div class="ttl">到期时间轴 ⏰（按剩余额度包最早抵扣到期排序 · 红=≤7天 橙=≤30天 绿=充裕）</div>' +
-    tl.map(x => {
-      const cls = x.dl <= 7 ? 'red' : (x.dl <= 30 ? 'amber' : 'green');
-      const col = x.dl <= 7 ? 'var(--red)' : (x.dl <= 30 ? 'var(--amber)' : 'var(--green)');
-      const w = Math.max(8, Math.min(100, 100 - x.dl * 1.05));
-      const tag = x.trial ? '<span class="pill trial">体验版</span>' : '';
-      const label = x.dl <= 0 ? '已过期' : x.dl + '天';
-      return `<div class="tl-row"><span class="tl-name" title="${escapeHtml(x.nick)}">${escapeHtml(x.nick)} · ${escapeHtml(x.name)} ${tag}</span><span class="tl-bar"><i style="width:${w}%;background:${col}"></i></span><span class="tl-dl ${cls}">${label}</span></div>`;
-    }).join('');
-}
+// 多账号到期时间轴已移除（v0.5.8）：到期预警改用额度表格内彩色 chip 表达。
 
 async function qaCheckinFor(uid) {
   try {
@@ -1299,6 +1277,13 @@ function loadNetworkParts() {
     if (j && j.status === 200) { renderMemory(parseBody(j.body)); return true; }
     return false;
   }).catch(e => { console.warn('memory err', e); return false; }), 0);
+
+  // 用量与对话历史：进入软件默认获取（无需手动点刷新）
+  retry(() => {
+    const cur = (window.__login && window.__login.uid) || '';
+    if (!cur) return false;
+    return uhRefresh(cur, true).then(() => true).catch(() => false);
+  }, 0);
 }
 async function loadQuota() {
   $('raw-out').textContent = '请求中…';
@@ -1536,7 +1521,7 @@ async function restartWB() {
 
 // 暴露给 inline onclick（安全：未定义的函数跳过，不影响其余，更不阻断 bootBootstrap）
 (function expose(){
-  const names = ['addModel','editModel','delModel','testModel','testCurrentForm','saveModel','closeModelModal','restartWB','loadAll','loadQuota','doCheckin','openReport','closeReport','copyReport','ensureSnapshot','backupAll','saveCurrentLogin','confirmSwitchYes','confirmSwitchNo','switchTo','openBackups','renderBackups','openBackupDetail','closeBackups','closeBackupDetail','loadBuddy','buddyDepart','buddyClaim','buddyDepartAll','buddyClaimAll','buddyDepartFor','buddyClaimFor','refreshBuddyAll','doCheckinAll','loadQuotaAll','qaCheckinFor','toggleAllKeys','refreshAll','stAddPinned','stDiagnose','stDiagnosePinned','stCleanupPinned','stExport','uhRefresh','uhExportJson','uhExportCsv','loadMemoryAll'];
+  const names = ['addModel','editModel','delModel','testModel','testCurrentForm','saveModel','closeModelModal','restartWB','loadAll','loadQuota','doCheckin','openReport','closeReport','copyReport','ensureSnapshot','backupAll','saveCurrentLogin','confirmSwitchYes','confirmSwitchNo','switchTo','openBackups','renderBackups','openBackupDetail','closeBackups','closeBackupDetail','loadBuddy','buddyDepart','buddyClaim','buddyDepartAll','buddyClaimAll','buddyDepartFor','buddyClaimFor','refreshBuddyAll','doCheckinAll','loadQuotaAll','qaCheckinFor','toggleAllKeys','refreshAll','uhRefresh','uhExportJson','uhExportCsv','loadMemoryAll'];
   for (const n of names) {
     try {
       const fn = eval(n);
@@ -1548,55 +1533,6 @@ async function restartWB() {
 
 // 一键「刷新全部」：本地信息 + 网络部分 + 宠物面板一次性全部刷新（含宠物，避免只点宠物按钮才出）
 function refreshAll() { loadAll(); loadBuddy(); }
-
-// ===== 会话防丢失工具（运维面板） =====
-// 这些操作直接读写会话库 / 渲染层 leveldb；涉及置顶的须在关闭 WorkBuddy 后执行。
-async function stAddPinned() {
-  const uid = $('st-uid').value.trim(), sid = $('st-sid').value.trim();
-  if (!uid || !sid) { toast('请填写 UID 和会话 ID'); return; }
-  try {
-    await invoke('add_pinned_session', { uid, sid });
-    toast('已加置顶（若 WorkBuddy 在运行则写入可能失败，请先关闭）', 'ok');
-  } catch (e) { toast('加置顶失败: ' + e, 'err'); }
-}
-async function stDiagnose() {
-  try {
-    const r = await invoke('diagnose_sessions');
-    $('st-out').textContent = r;
-  } catch (e) { $('st-out').textContent = '诊断失败: ' + e; }
-}
-async function stDiagnosePinned() {
-  const uid = $('st-uid').value.trim();
-  if (!uid) { toast('请填写 UID'); return; }
-  try {
-    const r = await invoke('diagnose_pinned', { uid });
-    $('st-out').textContent = r;
-  } catch (e) { $('st-out').textContent = '诊断失败: ' + e; }
-}
-async function stCleanupPinned() {
-  const uid = $('st-uid').value.trim();
-  if (!uid) { toast('请填写 UID'); return; }
-  try {
-    const n = await invoke('cleanup_orphan_pinned', { uid });
-    toast('已清理悬空置顶 ' + n + ' 条（请确认已关闭 WorkBuddy）', 'ok');
-    stDiagnosePinned();
-  } catch (e) { toast('清理失败: ' + e, 'err'); }
-}
-async function stExport() {
-  const uid = $('st-uid').value.trim();
-  if (!uid) { toast('请填写 UID'); return; }
-  try {
-    const r = await invoke('export_sessions', { uid, include_deleted: false });
-    const blob = new Blob([r], { type: 'application/json' });
-    const a = document.createElement('a');
-    a.href = URL.createObjectURL(blob);
-    a.download = 'sessions_' + uid + '.json';
-    a.click();
-    URL.revokeObjectURL(a.href);
-    $('st-out').textContent = r;
-    toast('已导出会话清单（JSON 已下载）', 'ok');
-  } catch (e) { toast('导出失败: ' + e, 'err'); }
-}
 
 // ===== 用量与对话历史面板 =====
 async function uhCurrentUid() {
@@ -1613,10 +1549,10 @@ function uhFmtTs(ms) {
 function uhFmtNum(n) {
   try { return Number(n).toLocaleString('en-US'); } catch { return String(n); }
 }
-async function uhRefresh() {
-  let uid = $('uh-uid').value.trim();
+async function uhRefresh(forceUid, silent) {
+  let uid = forceUid || $('uh-uid').value.trim();
   if (!uid) uid = await uhCurrentUid();
-  if (!uid) { toast('无法获取当前账号 UID', 'err'); return; }
+  if (!uid) { if (!silent) toast('无法获取当前账号 UID', 'err'); return; }
   const limit = Math.max(1, Math.min(500, parseInt($('uh-limit').value || '50', 10) || 50));
   try {
     const r = await invoke('usage_summary', { uid, limit });
@@ -1640,7 +1576,7 @@ async function uhRefresh() {
       }
     }
     $('uh-totals').textContent = `共 ${data.count} 条 · 总消耗 token ${uhFmtNum(data.total_used || 0)} · 总费用 ${(data.total_credits || 0).toFixed(2)} 积分 · 账号 ${uid}`;
-  } catch (e) { toast('刷新用量失败: ' + e, 'err'); }
+  } catch (e) { if (!silent) toast('刷新用量失败: ' + e, 'err'); }
 }
 async function uhExportJson() {
   let uid = $('uh-uid').value.trim();
