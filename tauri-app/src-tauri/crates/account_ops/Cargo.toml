@@ -15,3 +15,7 @@ leveldb = { version = "0.8", default-features = false }
 # db-key 0.0.5 的 Key trait 只为 i32 实现，需自行为新类型实现 Key；
 # 显式 pin 同一版本，确保与 leveldb 内部使用的 db-key 是同一个 trait。
 db-key = "0.0.5"
+
+[target.'cfg(windows)'.dependencies]
+# Windows 原生进程枚举（ToolHelp32），避免从 GUI 进程 spawn tasklist 导致检测失败/弹窗。
+windows = { version = "0.58", features = ["Win32_System_Diagnostics_ToolHelp", "Win32_Foundation"] }
