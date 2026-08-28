@@ -15,6 +15,12 @@ use std::path::{Path, PathBuf};
 #[cfg(windows)]
 use std::os::windows::process::CommandExt; // 提供 creation_flags（隐藏子进程控制台窗口）
 use std::process::Command;
+#[cfg(windows)]
+use windows::Win32::System::Diagnostics::ToolHelp::{
+    CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
+};
+#[cfg(windows)]
+use windows::Win32::Foundation::CloseHandle;
 use rusqlite::{Connection, OpenFlags};
 
 // 渲染层会话置顶状态存储在 Electron localStorage（leveldb）里，键名形如
@@ -1178,21 +1184,45 @@ fn merge_local_storage_entries(src_ls: &Path, uid: &str) {
 /// 自己（Hub）也当成 WorkBuddy 杀掉，导致切换写入登录态/重启流程中断（切换不过去的根因）。
 const WB_EXE: &str = "/Applications/WorkBuddy.app/Contents/MacOS/Electron";
 
+#[cfg(windows)]
+fn is_workbuddy_running_windows() -> bool {
+    // 使用 Windows 原生 ToolHelp32 API 枚举进程，精确匹配 WorkBuddy.exe。
+    // 这比 spawn tasklist 更可靠：不依赖子进程、不受控制台窗口/编码/PATH 影响，也不会弹窗。
+    unsafe {
+        let snapshot = match CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) {
+            Ok(h) => h,
+            Err(_) => return false,
+        };
+        let mut entry = PROCESSENTRY32W::default();
+        entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
+        if Process32FirstW(snapshot, &mut entry).is_ok() {
+            loop {
+                let len = entry
+                    .szExeFile
+                    .iter()
+                    .position(|&c| c == 0)
+                    .unwrap_or(entry.szExeFile.len());
+                let name = String::from_utf16_lossy(&entry.szExeFile[..len]);
+                if name.eq_ignore_ascii_case("WorkBuddy.exe") {
+                    let _ = CloseHandle(snapshot);
+                    return true;
+                }
+                if Process32NextW(snapshot, &mut entry).is_err() {
+                    break;
+                }
+            }
+        }
+        let _ = CloseHandle(snapshot);
+        false
+    }
+}
+
 /// WorkBuddy 是否正在运行（精确匹配主进程，排除 Hub 自身）
 pub fn is_workbuddy_running() -> bool {
     if cfg!(target_os = "macos") {
         Command::new("pgrep").args(["-f", WB_EXE]).output().map(|o| o.status.success()).unwrap_or(false)
     } else if cfg!(target_os = "windows") {
-        // 关键修复：从 GUI 父进程 spawn tasklist 时若不隐藏窗口，Windows 会为其新建控制台窗口，
-        // 且在某些情况下 output() 直接失败 → 误报「未检测到主客户端」。CREATE_NO_WINDOW 既消除弹窗
-        // 又让 stdout 管道可靠捕获，检测恢复正常。
-        let mut c = Command::new("tasklist");
-        c.args(["/FI", "IMAGENAME eq WorkBuddy.exe"]);
-        #[cfg(windows)]
-        c.creation_flags(0x08000000);
-        c.output()
-            .map(|o| String::from_utf8_lossy(&o.stdout).contains("WorkBuddy.exe"))
-            .unwrap_or(false)
+        is_workbuddy_running_windows()
     } else {
         false
     }

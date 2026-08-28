@@ -241,12 +241,14 @@
     .notify-detail-head{display:flex;justify-content:space-between;align-items:center;font-size:13px;font-weight:700;margin-bottom:8px;}
     .notify-detail-body{white-space:pre-wrap;word-break:break-all;font-size:12px;line-height:1.7;color:#c9d2e3;overflow:auto;max-height:60vh;}
     /* #27：主客户端（WorkBuddy）未运行时顶部提示条 */
-    .client-bar{position:sticky;top:0;z-index:60;padding:7px 14px;font-size:12.5px;line-height:1.5;
-      display:flex;align-items:center;gap:8px;backdrop-filter:blur(6px);}
-    .client-bar.warn{background:rgba(255,176,32,.16);color:#ffcf7a;border-bottom:1px solid rgba(255,176,32,.35);}
-    .client-bar.ok{background:rgba(126,235,182,.12);color:#9fe9c4;border-bottom:1px solid rgba(126,235,182,.28);}
-    .client-bar .dot{width:8px;height:8px;border-radius:50%;background:currentColor;flex:0 0 auto;}
+    .client-bar{position:sticky;top:0;z-index:60;padding:5px 10px;font-size:12px;line-height:1.35;
+      display:flex;align-items:center;gap:7px;backdrop-filter:blur(6px);min-height:0;}
+    .client-bar.warn{background:rgba(255,176,32,.12);color:#ffcf7a;border-bottom:1px solid rgba(255,176,32,.28);}
+    .client-bar.ok{background:rgba(126,235,182,.10);color:#9fe9c4;border-bottom:1px solid rgba(126,235,182,.22);}
+    .client-bar .dot{width:6px;height:6px;border-radius:50%;background:currentColor;flex:0 0 auto;}
     .client-bar.hidden{display:none;}
+    .client-bar .close{margin-left:auto;background:transparent;border:none;color:inherit;font-size:15px;line-height:1;cursor:pointer;padding:0 3px;opacity:.65;}
+    .client-bar .close:hover{opacity:1;}
     /* 账号健康池（#2）面板 */
     .pool-panel{margin:0 0 8px;padding:8px 12px;background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.1);border-radius:10px;font-size:12px;color:#c9d2e3;}
     .pool-panel summary{cursor:pointer;font-weight:700;color:#e6ecf5;}

@@ -1368,7 +1368,7 @@ async function loadAll() {
     // #27：依据 get_all 带回的 workbuddy_running 立即刷新顶部提示条，并启动周期轮询
     try { updateClientStatus(j.workbuddy_running); } catch (e) {}
     try { renderPool(); } catch (e) {}
-    if (!window.__clientPoll) { window.__clientPoll = setInterval(pollClientStatus, 60000); }
+    if (!window.__clientPoll) { window.__clientPoll = setInterval(pollClientStatus, 15000); }
     try { renderSidebar(j); bootLog('启动加载：侧边栏已渲染'); }
     catch (e) { bootLog('启动加载：侧边栏渲染失败 ' + e.message, 'err'); }
 
@@ -1455,7 +1455,9 @@ function updateClientStatus(running) {
     bar.innerHTML = '';
   } else {
     bar.className = 'client-bar warn';
-    bar.innerHTML = '<span class="dot"></span><span>未检测到 WorkBuddy 主客户端在运行 —— 签到 / 切换账号可能失败，请先打开 WorkBuddy 再操作。</span>';
+    bar.innerHTML = '<span class="dot"></span><span>未检测到 WorkBuddy 主客户端在运行 —— 签到 / 切换账号可能失败，请先打开 WorkBuddy 再操作。</span><button class="close" title="关闭提示">×</button>';
+    const closeBtn = bar.querySelector('.close');
+    if (closeBtn) closeBtn.onclick = () => { bar.classList.add('hidden'); bar.innerHTML = ''; };
   }
 }
 // 账号健康池（#2）：展示每个账号的健康/禁用/冷却/需刷新状态 + 推荐账号
