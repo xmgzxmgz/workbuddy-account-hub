@@ -295,8 +295,33 @@ function parseQuota(body) {
     soonest, usePct: sum(pkgs, 'size') > 0 ? Math.round(sum(pkgs, 'used') / sum(pkgs, 'size') * 100) : 0,
   };
 }
-function renderQuota(body) {
-  const q = parseQuota(body);
+// 后端标准化解析（packages + 汇总）适配为前端渲染所需的 q 结构
+function adaptParsed(p) {
+  const pkgs = (p.packages || []).map(x => ({
+    name: x.name, resource_id: x.resource_id, trial: x.trial,
+    remain: x.remain, used: x.used, size: x.size,
+    cycle_end: x.cycle_end, deduction_end: x.deduction_end, is_unlimited: x.is_unlimited
+  }));
+  const gift = pkgs.filter(x => !x.trial), trial = pkgs.filter(x => x.trial);
+  const sum = (a, k) => a.reduce((s, x) => s + (x[k] || 0), 0);
+  let soonest = null;
+  for (const a of gift) { const dl = daysLeft(a.deduction_end); if (dl === null) continue; if (!soonest || dl < soonest.dl) soonest = { dl, a }; }
+  return {
+    pkgs, gift, trial,
+    giftRemain: sum(gift, 'remain'), giftUsed: sum(gift, 'used'), giftSize: sum(gift, 'size'),
+    trialRemain: sum(trial, 'remain'),
+    grandRemain: sum(pkgs, 'remain'), grandUsed: sum(pkgs, 'used'), grandSize: sum(pkgs, 'size'),
+    soonest, usePct: (p.usePct != null ? p.usePct : 0), hasUnlimited: p.hasUnlimited
+  };
+}
+function renderQuota(payload) {
+  // 优先用后端标准化解析（parsed：含别名兼容/合并/企业不限量），失败回退前端 parseQuota 解析原始 body
+  let q;
+  if (payload && payload.parsed && Array.isArray(payload.parsed.packages)) {
+    q = adaptParsed(payload.parsed);
+  } else {
+    q = parseQuota((payload && payload.body) ? payload.body : payload);
+  }
   if (!q) return;
   const { pkgs, gift, trial, giftRemain, giftUsed, giftSize, trialRemain, grandRemain, grandUsed, grandSize, soonest, usePct } = q;
   $('ov-gift').textContent = giftRemain.toFixed(2);
@@ -964,7 +989,7 @@ function renderQuotaAll(results) {
       const msg = r.skipped ? '无登录态快照' : escapeHtml(r.error);
       return `<tr><td><b>${escapeHtml(nick || uid)}</b><br><span style="font-size:10px;color:var(--muted)">${privacy(uid, { head: 4, tail: 4 })}</span></td><td colspan="6" style="color:var(--muted)">${msg}</td></tr>`;
     }
-    const q = parseQuota(r.body);
+    const q = (r.parsed && Array.isArray(r.parsed.packages)) ? adaptParsed(r.parsed) : parseQuota(r.body);
     if (!q) {
       return `<tr><td><b>${escapeHtml(nick || uid)}</b><br><span style="font-size:10px;color:var(--muted)">${privacy(uid, { head: 4, tail: 4 })}</span></td><td colspan="6" style="color:var(--red)">解析失败 / 无数据</td></tr>`;
     }
@@ -1258,7 +1283,7 @@ function loadNetworkParts() {
     });
   };
   retry(() => invoke('get_quota').then(j => {
-    if (j && j.status === 200) { renderQuota(parseBody(j.body)); return true; }
+    if (j && j.status === 200) { renderQuota(j); return true; }
     return false;   // 静默失败，交给重试兜底，避免启动时反复弹 toast
   }).catch(e => { console.warn('quota err', e); return false; }), 0);
 
@@ -1290,7 +1315,7 @@ async function loadQuota() {
   try {
     const j = await invoke('get_quota');
     $('raw-out').textContent = JSON.stringify(j, null, 2);
-    if (j.status === 200) renderQuota(parseBody(j.body));
+    if (j.status === 200) renderQuota(j);
   } catch (e) { $('raw-out').textContent = '错误：' + e; }
 }
 async function doCheckin() {
