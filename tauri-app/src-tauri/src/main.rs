@@ -15,6 +15,67 @@ use account_ops as ops;
 use serde_json::{json, Value};
 use wb_api as api;
 
+// ===== Batch D：单实例锁（#25）+ 签到错误分类冷却（#16） =====
+
+/// 单实例锁路径（与安装目录同级）
+fn instance_lock_path() -> std::path::PathBuf {
+    if cfg!(windows) {
+        std::path::Path::new(&std::env::var("LOCALAPPDATA").unwrap_or_default())
+            .join("WorkBuddy Account Hub").join(".instance.lock")
+    } else {
+        std::path::Path::new(&std::env::var("HOME").unwrap_or_default())
+            .join("Library").join("Application Support").join("WorkBuddy Account Hub").join(".instance.lock")
+    }
+}
+
+/// 判断某 PID 是否仍存活（跨平台命令探测；探测失败按「不存活」处理）
+fn pid_alive(pid: u32) -> bool {
+    if pid == 0 { return false; }
+    #[cfg(windows)] {
+        if let Ok(o) = std::process::Command::new("tasklist")
+            .args(["/FI", &format!("PID eq {}", pid), "/NH"]).output() {
+            let s = String::from_utf8_lossy(&o.stdout).to_lowercase();
+            // 同时匹配 PID 与本程序映像名，避免 PID 复用误判为「已在运行」
+            return s.contains(&pid.to_string()) && s.contains("workbuddy-account-hub");
+        }
+        false
+    }
+    #[cfg(not(windows))] {
+        std::process::Command::new("kill").args(["-0", &pid.to_string()])
+            .status().map(|s| s.success()).unwrap_or(false)
+    }
+}
+
+/// 确保单实例：若已被另一存活实例占用则退出；陈旧锁自动清理后占位。
+fn ensure_single_instance() -> bool {
+    let p = instance_lock_path();
+    if let Ok(s) = std::fs::read_to_string(&p) {
+        if let Ok(pid) = s.trim().parse::<u32>() {
+            if pid_alive(pid) { return false; }   // 另一实例仍在运行
+        }
+        let _ = std::fs::remove_file(&p);          // 陈旧锁
+    }
+    if let Some(parent) = p.parent() { let _ = std::fs::create_dir_all(parent); }
+    let _ = std::fs::write(&p, std::process::id().to_string());
+    true
+}
+
+/// 签到错误分类 → （类型, 建议冷却秒数）（#16 冷却状态机）
+fn classify_checkin_err(msg: &str) -> (String, u64) {
+    let m = msg.to_lowercase();
+    if m.contains("401") || m.contains("登录") || m.contains("身份过期") || m.contains("12153") {
+        ("session_dead".into(), 0)        // 会话失效：需重新登录，禁用该账号
+    } else if m.contains("429") || m.contains("频繁") {
+        ("rate_limited".into(), 60)       // 限流：60s 后重试
+    } else if m.contains("402") || m.contains("额度") {
+        ("hard_credit".into(), 43200)     // 额度类：12h
+    } else if m.contains("404") || m.contains("not found") {
+        ("not_found".into(), 300)         // 未找到：短冷却
+    } else {
+        ("unknown".into(), 300)
+    }
+}
+
 #[tauri::command]
 fn get_all() -> Value {
     let mut v = api::get_all();
@@ -98,7 +159,9 @@ fn checkin_all() -> Value {
         };
         let r = api::do_checkin_as(&login);
         if let Some(err) = r.get("error") {
-            results.push(json!({"uid": a.uid, "nickname": a.nickname, "ok": false, "skipped": false, "error": err}));
+            let emsg = err.as_str().unwrap_or("");
+            let (kind, cooldown) = classify_checkin_err(emsg);
+            results.push(json!({"uid": a.uid, "nickname": a.nickname, "ok": false, "skipped": false, "error": err, "kind": kind, "cooldown": cooldown}));
             fail += 1; continue;
         }
         let status = r.get("status").and_then(|x| x.as_u64()).unwrap_or(0);
@@ -553,6 +616,10 @@ fn export_conversation_history(uid: String, include_deleted: Option<bool>, with_
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    if !ensure_single_instance() {
+        eprintln!("WorkBuddy Account Hub 已在运行，本实例退出（单实例锁）");
+        std::process::exit(0);
+    }
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
             get_all,

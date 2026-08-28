@@ -13,7 +13,7 @@ use serde::Serialize;
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use rusqlite::Connection;
+use rusqlite::{Connection, OpenFlags};
 
 // 渲染层会话置顶状态存储在 Electron localStorage（leveldb）里，键名形如
 // `wb:conversation-list:expanded-state:u:<uid>`，值 JSON 含 `{"pinned":true,...}`。
@@ -687,6 +687,8 @@ fn materialize_snapshot_for(vault: &Path, uid: &str) -> Result<(), String> {
     });
     std::fs::write(snap.join("auth.info"), serde_json::to_string_pretty(&full).map_err(|e| e.to_string())?)
         .map_err(|e| e.to_string())?;
+    // #13 / #30：快照含 accessToken，写入后收紧为仅属主可读写（0o600），防越权读取
+    let _ = std::fs::set_permissions(snap.join("auth.info"), std::fs::Permissions::from_mode(0o600));
     let ls = local_storage_dir();
     if ls.exists() {
         copy_dir_all(&ls, &snap.join("local_storage")).map_err(|e| e.to_string())?;
@@ -1285,7 +1287,7 @@ pub fn launch_workbuddy() -> Result<(), String> {
 pub fn diagnose_sessions() -> String {
     let mut report = serde_json::Map::new();
     if let Some(db) = workbuddy_db_path() {
-        if let Ok(conn) = Connection::open(&db) {
+        if let Ok(conn) = Connection::open_with_flags(&db, OpenFlags::SQLITE_OPEN_READ_ONLY) {
             if let Ok(mut stmt) = conn.prepare("SELECT user_id, COUNT(*), COALESCE(SUM(CASE WHEN deleted_at IS NOT NULL THEN 1 ELSE 0 END),0) FROM sessions GROUP BY user_id") {
                 if let Ok(rows) = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, i64>(2)?))) {
                     let mut by_user = serde_json::Map::new();
@@ -1439,7 +1441,7 @@ pub fn export_sessions(uid: &str, include_deleted: bool) -> String {
     out.insert("exported_at".into(), serde_json::json!(chrono_now()));
     let mut list = Vec::new();
     if let Some(db) = workbuddy_db_path() {
-        if let Ok(conn) = Connection::open(&db) {
+        if let Ok(conn) = Connection::open_with_flags(&db, OpenFlags::SQLITE_OPEN_READ_ONLY) {
             let sql = if include_deleted {
                 "SELECT id, title, custom_title, status, created_at, updated_at, last_activity_at, deleted_at, user_id \
                  FROM sessions WHERE user_id = ?1 ORDER BY last_activity_at DESC"
@@ -1543,7 +1545,7 @@ pub fn diagnose_pinned(uid: &str) -> String {
     let mut valid = std::collections::HashSet::new();
     let mut soft_deleted = std::collections::HashSet::new();
     if let Some(db) = workbuddy_db_path() {
-        if let Ok(conn) = Connection::open(&db) {
+        if let Ok(conn) = Connection::open_with_flags(&db, OpenFlags::SQLITE_OPEN_READ_ONLY) {
             if let Ok(mut stmt) = conn.prepare("SELECT id, deleted_at FROM sessions WHERE user_id = ?1") {
                 if let Ok(rows) = stmt.query_map([uid], |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<i64>>(1)?))) {
                     for row in rows {
@@ -1681,7 +1683,7 @@ pub fn usage_summary(uid: &str, limit: i64) -> String {
     let mut total_credits: f64 = 0.0;
     let mut count: i64 = 0;
     if let Some(db) = workbuddy_db_path() {
-        if let Ok(conn) = Connection::open(&db) {
+        if let Ok(conn) = Connection::open_with_flags(&db, OpenFlags::SQLITE_OPEN_READ_ONLY) {
             let lim = if limit <= 0 { 100 } else { limit };
             // LEFT JOIN：即使某些会话暂无用量记录也列出（used/credits 记 0）
             let sql = "SELECT s.id, s.title, s.custom_title, s.model, s.status, s.last_activity_at, \
@@ -1751,7 +1753,7 @@ pub fn export_conversation_history(uid: &str, include_deleted: bool, with_usage:
     let mut total_used: i64 = 0;
     let mut total_credits: f64 = 0.0;
     if let Some(db) = workbuddy_db_path() {
-        if let Ok(conn) = Connection::open(&db) {
+        if let Ok(conn) = Connection::open_with_flags(&db, OpenFlags::SQLITE_OPEN_READ_ONLY) {
             let sql = if include_deleted {
                 "SELECT id, title, custom_title, model, status, created_at, updated_at, last_activity_at, deleted_at \
                  FROM sessions WHERE user_id = ?1 ORDER BY last_activity_at DESC"
