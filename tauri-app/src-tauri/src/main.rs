@@ -14,6 +14,8 @@
 use account_ops as ops;
 use serde_json::{json, Value};
 use wb_api as api;
+#[cfg(windows)]
+use std::os::windows::process::CommandExt; // 提供 creation_flags（隐藏子进程控制台窗口）
 
 // ===== Batch D：单实例锁（#25）+ 签到错误分类冷却（#16） =====
 
@@ -32,8 +34,10 @@ fn instance_lock_path() -> std::path::PathBuf {
 fn pid_alive(pid: u32) -> bool {
     if pid == 0 { return false; }
     #[cfg(windows)] {
-        if let Ok(o) = std::process::Command::new("tasklist")
-            .args(["/FI", &format!("PID eq {}", pid), "/NH"]).output() {
+        let mut c = std::process::Command::new("tasklist");
+        c.args(["/FI", &format!("PID eq {}", pid), "/NH"]);
+        c.creation_flags(0x08000000); // CREATE_NO_WINDOW：避免从 GUI 父进程 spawn 时弹出控制台窗口
+        if let Ok(o) = c.output() {
             let s = String::from_utf8_lossy(&o.stdout).to_lowercase();
             // 同时匹配 PID 与本程序映像名，避免 PID 复用误判为「已在运行」
             return s.contains(&pid.to_string()) && s.contains("workbuddy-account-hub");

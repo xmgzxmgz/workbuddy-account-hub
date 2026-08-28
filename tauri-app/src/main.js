@@ -1365,7 +1365,7 @@ async function loadAll() {
     window.__login = j.login || {};
     // #27：依据 get_all 带回的 workbuddy_running 立即刷新顶部提示条，并启动周期轮询
     try { updateClientStatus(j.workbuddy_running); } catch (e) {}
-    if (!window.__clientPoll) { window.__clientPoll = setInterval(pollClientStatus, 30000); }
+    if (!window.__clientPoll) { window.__clientPoll = setInterval(pollClientStatus, 60000); }
     try { renderSidebar(j); bootLog('启动加载：侧边栏已渲染'); }
     catch (e) { bootLog('启动加载：侧边栏渲染失败 ' + e.message, 'err'); }
 
@@ -1439,11 +1439,8 @@ function loadNetworkParts() {
     return uhRefresh(cur, true).then(() => true).catch(() => false);
   }, 0);
 
-  // 自动签到：启动即触发一次；之后每 3h 轮询（仅设一次定时器，避免重复）
-  autoCheckin();
-  if (!window.__autoCheckinTimer) {
-    window.__autoCheckinTimer = setInterval(autoCheckin, 3 * 60 * 60 * 1000);
-  }
+  // 自动签到已按用户要求撤销（v0.5.16）：不再启动即触发、也不再每 3h 轮询系统级定时。
+  // 仅保留手动「一键签到」按钮（调用 checkin_all）。这同时避免了后台无 GUI 时仍保活/轮询的行为。
 }
 // #27：主客户端（WorkBuddy）进程存在性提示（复用 app_running 命令）；
 // 关闭主客户端后签到 / 切换账号会静默失败，顶部给出明确提示而非静默报错。
