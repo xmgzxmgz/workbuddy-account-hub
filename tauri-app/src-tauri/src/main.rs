@@ -153,7 +153,9 @@ fn quota_all() -> Value {
         if status == 200 { ok += 1; } else { fail += 1; }
         results.push(json!({
             "uid": a.uid, "nickname": a.nickname, "ok": status == 200, "skipped": false,
-            "status": status, "body": r.get("body").cloned().unwrap_or(Value::Null)
+            "status": status,
+            "body": r.get("body").cloned().unwrap_or(Value::Null),
+            "parsed": r.get("parsed").cloned().unwrap_or(Value::Null)
         }));
     }
     json!({ "ok": true, "results": results, "summary": { "total": results.len(), "ok": ok, "fail": fail, "skipped": skipped } })
