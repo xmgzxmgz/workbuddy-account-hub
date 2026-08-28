@@ -44,7 +44,7 @@ jobs:
           args: "--bundles dmg,app"
           tagName: ${{ github.ref_name }}
           releaseName: "WorkBuddy Account Hub v__VERSION__"
-          releaseDraft: true
+          releaseDraft: false
           prerelease: false
 
   # ---------- windows ----------
@@ -80,7 +80,7 @@ jobs:
           args: "--bundles nsis"
           tagName: ${{ github.ref_name }}
           releaseName: "WorkBuddy Account Hub v__VERSION__"
-          releaseDraft: true
+          releaseDraft: false
           prerelease: false
 
       - name: Package Windows portable (green) zip
@@ -102,4 +102,4 @@ jobs:
         with:
           tag_name: ${{ github.ref_name }}
           files: "WorkBuddy-Account-Hub_${{ github.ref_name }}_portable-x64.zip"
-          draft: true
+          draft: false
