@@ -163,7 +163,11 @@ fn checkin_all() -> Value {
     let accs = ops::list_accounts(&vault);
     let mut results = Vec::new();
     let mut ok = 0u32; let mut fail = 0u32; let mut skipped = 0u32;
+    // #23：账号列表去重（同一 uid 只签到一次）+ 上限保护，避免异常重复触发风暴
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     for a in accs {
+        if seen.len() >= 100 { break; }              // #23 总量上限
+        if !seen.insert(a.uid.clone()) { continue; }  // #23 去重
         if !a.has_snapshot {
             // 无登录态快照 = 未执行签到，归为「跳过」而非失败（与宠物批量操作口径一致）
             results.push(json!({"uid": a.uid, "nickname": a.nickname, "ok": false, "skipped": true, "error": "无登录态快照"}));
