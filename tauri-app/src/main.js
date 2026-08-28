@@ -955,7 +955,8 @@ async function loadQuotaAll() {
 
 function renderQuotaAll(results) {
   const tb = $('qa-tbody'); if (!tb) return;
-  if (!results || !results.length) { tb.innerHTML = '<tr><td colspan="7" class="empty">无已登录账号</td></tr>'; return; }
+  if (!results || !results.length) { tb.innerHTML = '<tr><td colspan="7" class="empty">无已登录账号</td></tr>'; if ($('qa-timeline')) $('qa-timeline').innerHTML = ''; return; }
+  const tl = [];
   let sg = 0, st = 0, sq = 0, cnt = 0;
   tb.innerHTML = results.map(r => {
     const nick = r.nickname ? privacy(r.nickname, { head: 3, tail: 4 }) : '';
@@ -971,7 +972,13 @@ function renderQuotaAll(results) {
     cnt++;
     sg += q.giftRemain; st += q.trialRemain; sq += q.grandRemain;
     const typ = r.status === 200 ? '<span class="ok">✓</span>' : (r.error ? '<span class="soon">失败</span>' : (r.skipped ? '跳过' : '—'));
-    const exp = q.soonest ? (q.soonest.dl <= 0 ? '已过期' : q.soonest.dl + ' 天') : '长期';
+    // 到期时间轴数据：仅取剩余>0 的赠送包，避免每日已用尽的包刷屏（对齐 dashboard 30天预警口径）
+    q.pkgs.filter(p => p.remain > 0.004).forEach(p => {
+      const dl = daysLeft(p.deduction_end);
+      if (dl === null) return;
+      tl.push({ nick: nick || uid, name: p.name || '—', trial: p.trial, dl });
+    });
+    const exp = q.soonest ? qaExpChip(q.soonest.dl) : '长期';
     const ckBtn = `<button class="mini" onclick="qaCheckinFor('${uid}')">签到</button>`;
     return `<tr>
       <td><b>${escapeHtml(nick || uid)}</b><br><span style="font-size:10px;color:var(--muted)">${privacy(uid, { head: 4, tail: 4 })}</span></td>
@@ -987,6 +994,31 @@ function renderQuotaAll(results) {
   $('qa-gift').textContent = sg.toFixed(2);
   $('qa-trial').textContent = st.toFixed(2);
   $('qa-grand').textContent = sq.toFixed(2);
+  qaRenderTimeline(tl);
+}
+
+// 到期预警配色：红 ≤7 天，橙 ≤30 天，绿 充裕
+function qaExpChip(dl) {
+  if (dl <= 0) return '<span class="soon">已过期</span>';
+  if (dl <= 7) return `<span class="soon">${dl} 天</span>`;
+  if (dl <= 30) return `<span style="color:var(--amber);font-weight:600;">${dl} 天</span>`;
+  return `<span style="color:var(--green);">${dl} 天</span>`;
+}
+
+// 多账号到期时间轴：把所有账号的剩余套餐按最早抵扣到期排序，画彩色进度条
+function qaRenderTimeline(tl) {
+  const box = $('qa-timeline'); if (!box) return;
+  if (!tl.length) { box.innerHTML = '<div class="ttl">所有账号暂无剩余额度套餐（无可绘制时间轴）</div>'; return; }
+  tl.sort((a, b) => a.dl - b.dl);
+  box.innerHTML = '<div class="ttl">到期时间轴 ⏰（按剩余额度包最早抵扣到期排序 · 红=≤7天 橙=≤30天 绿=充裕）</div>' +
+    tl.map(x => {
+      const cls = x.dl <= 7 ? 'red' : (x.dl <= 30 ? 'amber' : 'green');
+      const col = x.dl <= 7 ? 'var(--red)' : (x.dl <= 30 ? 'var(--amber)' : 'var(--green)');
+      const w = Math.max(8, Math.min(100, 100 - x.dl * 1.05));
+      const tag = x.trial ? '<span class="pill trial">体验版</span>' : '';
+      const label = x.dl <= 0 ? '已过期' : x.dl + '天';
+      return `<div class="tl-row"><span class="tl-name" title="${escapeHtml(x.nick)}">${escapeHtml(x.nick)} · ${escapeHtml(x.name)} ${tag}</span><span class="tl-bar"><i style="width:${w}%;background:${col}"></i></span><span class="tl-dl ${cls}">${label}</span></div>`;
+    }).join('');
 }
 
 async function qaCheckinFor(uid) {
@@ -998,6 +1030,51 @@ async function qaCheckinFor(uid) {
     else { toast('签到未完成（' + (r.status || '?') + '）'); }
     loadQuotaAll();   // 刷新该行：重查额度
   } catch (e) { toast('签到失败: ' + e, 'err'); }
+}
+
+// ===== 全部账号 AI 记忆画像（每个账号用各自 vault 快照登录态查 /api/memory/profile） =====
+// 补齐单账号记忆面板只能看当前登录态的局限，覆盖全部已登记账号。
+async function loadMemoryAll() {
+  try {
+    const r = await invoke('memory_all').catch(e => ({ error: String(e) }));
+    if (r && r.error) { toast('查询全部记忆失败: ' + r.error, 'err'); return; }
+    renderMemoryAll(r.results || []);
+    const s = r.summary || {};
+    toast(`全部记忆查询：成功 ${s.ok || 0} · 跳过 ${s.skipped || 0} · 失败 ${s.fail || 0}`);
+  } catch (e) { toast('查询全部记忆失败: ' + e, 'err'); }
+}
+
+function renderMemoryAll(results) {
+  const box = $('memory-all'); if (!box) return;
+  if (!results || !results.length) { box.innerHTML = '<span class="empty">无已登录账号</span>'; return; }
+  box.innerHTML = results.map(r => {
+    const nick = r.nickname ? privacy(r.nickname, { head: 3, tail: 4 }) : '';
+    const uid = r.uid;
+    const head = `<div class="mem-head">🗂 <b>${escapeHtml(nick || uid)}</b> <span style="font-size:10px;color:var(--muted)">${privacy(uid, { head: 4, tail: 4 })}</span></div>`;
+    if (r.error && !r.body) { const msg = r.skipped ? '无登录态快照' : escapeHtml(r.error); return `<div class="mem-card">${head}<div class="sec-body" style="margin-top:6px;color:var(--muted)">${msg}</div></div>`; }
+    const d = r.body?.data;
+    if (!d) { return `<div class="mem-card">${head}<div class="sec-body" style="margin-top:6px;color:var(--red)">无数据 / 解析失败</div></div>`; }
+    const items = [
+      ['用户 ID', privacy(d.user_id, { head: 4, tail: 4, safe: !d.user_id })],
+      ['用户名', privacy(d.user_name, { head: 3, tail: 3, safe: !d.user_name })],
+      ['更新时间', (d.updated_at || d.updatedAt || '—')], ['版本', d.version ?? '—'],
+    ];
+    const kv = items.map(([k, v]) => `<div class="item"><span class="k">${k}</span><span class="v">${v || '—'}</span></div>`).join('');
+    const raw = d.foryou_prompt || d.memory || '';
+    let sec = '';
+    if (raw) {
+      const parts = raw.split(/^##\s+/m).filter(Boolean);
+      sec = parts.map(p => {
+        const nl = p.indexOf('\n');
+        const title = (nl > 0 ? p.slice(0, nl) : p).trim();
+        const content = (nl > 0 ? p.slice(nl + 1) : '').trim();
+        return `<details class="sec"><summary>${escapeHtml(title)}</summary><div class="sec-body">${escapeHtml(content)}</div></details>`;
+      }).join('');
+      if (!parts.length) sec = `<details class="sec"><summary>记忆内容</summary><div class="sec-body">${escapeHtml(raw)}</div></details>`;
+    } else sec = '<span class="empty">无记忆画像</span>';
+    const memo = raw ? `<span class="${keysRevealed ? 'privacy-text show' : 'privacy-text'}">${escapeHtml(raw)}</span>` : '(空)';
+    return `<div class="mem-card">${head}<div class="kv" style="margin:8px 0;">${kv}</div><div class="memo" style="margin-bottom:6px;">${memo}</div>${sec}</div>`;
+  }).join('');
 }
 
 async function refreshBuddyAll() {
@@ -1459,7 +1536,7 @@ async function restartWB() {
 
 // 暴露给 inline onclick（安全：未定义的函数跳过，不影响其余，更不阻断 bootBootstrap）
 (function expose(){
-  const names = ['addModel','editModel','delModel','testModel','testCurrentForm','saveModel','closeModelModal','restartWB','loadAll','loadQuota','doCheckin','openReport','closeReport','copyReport','ensureSnapshot','backupAll','saveCurrentLogin','confirmSwitchYes','confirmSwitchNo','switchTo','openBackups','renderBackups','openBackupDetail','closeBackups','closeBackupDetail','loadBuddy','buddyDepart','buddyClaim','buddyDepartAll','buddyClaimAll','buddyDepartFor','buddyClaimFor','refreshBuddyAll','doCheckinAll','loadQuotaAll','qaCheckinFor','toggleAllKeys','refreshAll','stAddPinned','stDiagnose','stDiagnosePinned','stCleanupPinned','stExport','uhRefresh','uhExportJson','uhExportCsv'];
+  const names = ['addModel','editModel','delModel','testModel','testCurrentForm','saveModel','closeModelModal','restartWB','loadAll','loadQuota','doCheckin','openReport','closeReport','copyReport','ensureSnapshot','backupAll','saveCurrentLogin','confirmSwitchYes','confirmSwitchNo','switchTo','openBackups','renderBackups','openBackupDetail','closeBackups','closeBackupDetail','loadBuddy','buddyDepart','buddyClaim','buddyDepartAll','buddyClaimAll','buddyDepartFor','buddyClaimFor','refreshBuddyAll','doCheckinAll','loadQuotaAll','qaCheckinFor','toggleAllKeys','refreshAll','stAddPinned','stDiagnose','stDiagnosePinned','stCleanupPinned','stExport','uhRefresh','uhExportJson','uhExportCsv','loadMemoryAll'];
   for (const n of names) {
     try {
       const fn = eval(n);
