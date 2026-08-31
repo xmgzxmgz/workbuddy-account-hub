@@ -523,20 +523,9 @@ async function switchTo(uid) {
   // → 重启 WorkBuddy 以新登录态生效。切换前若 WorkBuddy 正在运行，先弹确认框（避免中断任务）。
   if (switchingUid) { toast('正在切换 ' + shortUid(switchingUid) + '，请稍候…'); return; }
   try {
-    // 复用最近一次 list_accounts 已带回的 workbuddy_running 状态，避免切换前再发一次 IPC。
-    let wbRunning = false;
-    const cached = window.__accountsMeta;
-    if (cached && typeof cached.workbuddy_running === 'boolean') {
-      wbRunning = cached.workbuddy_running;
-    } else {
-      try { wbRunning = await invoke('app_running'); } catch (e) {}
-    }
-
-    if (wbRunning) {
-      // 软件内确认框：提示关闭 WorkBuddy 会中断可能在跑的任务
-      const ok = await confirmSwitchRisk(uid);
-      if (!ok) { toast('已取消切换'); return; }
-    }
+    // 切换为破坏性操作（会先关闭 WorkBuddy 再重启、并搬迁会话归属），统一弹确认框，不再依赖主客户端检测。
+    const ok = await confirmSwitchRisk(uid);
+    if (!ok) { toast('已取消切换'); return; }
 
     switchingUid = uid;
     try { showAccountList(accountsCache, (window.__login || {}).uid); } catch (e) {}
@@ -563,7 +552,7 @@ let switchResolve = null;
 function confirmSwitchRisk(uid) {
   return new Promise(res => {
     $('sw-risk-uid').textContent = shortUid(uid);
-    $('sw-risk-status').textContent = '检测到 WorkBuddy 正在运行。切换将先关闭 WorkBuddy（如有任务正在生成/下载会被中断），再自动重启切换账号。\n\n⚠️ 切换会把「当前账号」在会话库里的对话/自动化搬迁到目标账号名下（"搬"语义）：切过去后能看到并继续原对话，但源账号视角下这些内容不再可见；来回切换会让会话在两个账号间流动。';
+    $('sw-risk-status').textContent = '切换账号会先关闭 WorkBuddy（若正在运行，正在生成/下载的任务可能被中断），再自动重启切换账号。\n\n⚠️ 切换会把「当前账号」在会话库里的对话/自动化搬迁到目标账号名下（"搬"语义）：切过去后能看到并继续原对话，但源账号视角下这些内容不再可见；来回切换会让会话在两个账号间流动。';
     $('sw-risk-modal').classList.add('show');
     switchResolve = res;
   });
@@ -575,7 +564,7 @@ function confirmSwitchNo() { $('sw-risk-modal').classList.remove('show'); if (sw
 async function refreshAccounts() {
   let data;
   try { data = await invoke('list_accounts'); } catch { return; }
-  // 缓存 workbuddy_running 等元数据，供 switchTo 判断是否需要确认框（省一次 IPC）
+  // 缓存账号元数据（供后续渲染与切换复用）
   if (data) window.__accountsMeta = data;
   // list_accounts 返回完整账号清单（登记表 + vault 兜底 + 当前），
   // 这里把 has_snapshot 合并进 accountsCache，并且如果清单比此前多出了账号
@@ -1363,9 +1352,6 @@ async function loadAll() {
     if (ro) ro.textContent = JSON.stringify(j, null, 2);
 
     window.__login = j.login || {};
-    // #27：依据 get_all 带回的 workbuddy_running 立即刷新顶部提示条，并启动周期轮询
-    try { updateClientStatus(j.workbuddy_running); } catch (e) {}
-    if (!window.__clientPoll) { window.__clientPoll = setInterval(pollClientStatus, 15000); }
     try { renderSidebar(j); bootLog('启动加载：侧边栏已渲染'); }
     catch (e) { bootLog('启动加载：侧边栏渲染失败 ' + e.message, 'err'); }
 
@@ -1442,24 +1428,8 @@ function loadNetworkParts() {
   // 自动签到已按用户要求撤销（v0.5.16）：不再启动即触发、也不再每 3h 轮询系统级定时。
   // 仅保留手动「一键签到」按钮（调用 checkin_all）。这同时避免了后台无 GUI 时仍保活/轮询的行为。
 }
-// #27：主客户端（WorkBuddy）进程存在性提示（复用 app_running 命令）；
-// 关闭主客户端后签到 / 切换账号会静默失败，顶部给出明确提示而非静默报错。
-function updateClientStatus(running) {
-  const bar = document.getElementById('client-status-bar');
-  if (!bar) return;
-  if (running) {
-    bar.className = 'client-bar ok hidden';
-    bar.innerHTML = '';
-  } else {
-    bar.className = 'client-bar warn';
-    bar.innerHTML = '<span class="dot"></span><span>未检测到 WorkBuddy 主客户端在运行 —— 签到 / 切换账号可能失败，请先打开 WorkBuddy 再操作。</span><button class="close" title="关闭提示">×</button>';
-    const closeBtn = bar.querySelector('.close');
-    if (closeBtn) closeBtn.onclick = () => { bar.classList.add('hidden'); bar.innerHTML = ''; };
-  }
-}
-function pollClientStatus() {
-  invoke('app_running').then(r => updateClientStatus(!!r)).catch(() => {});
-}
+// （主客户端检测提示条已移除：v0.5.23 起不再暴露 workbuddy_running / app_running，启动即不再弹此 banner）
+
 
 async function loadQuota() {
   $('raw-out').textContent = '请求中…';
