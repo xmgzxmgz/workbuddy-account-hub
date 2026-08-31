@@ -520,13 +520,10 @@ let switchingUid = null;
 async function switchTo(uid) {
   // 一键切换：切换前自动备份当前账号（含 workbuddy.db 会话库）→ 写入目标登录态（真实 token + 真实 uid）
   // → 把源账号在 workbuddy.db 里的会话/自动化归属搬迁到目标账号名下（"搬"语义，用户核心诉求）
-  // → 重启 WorkBuddy 以新登录态生效。切换前若 WorkBuddy 正在运行，先弹确认框（避免中断任务）。
+  // → 重启 WorkBuddy 以新登录态生效。切换前若 WorkBuddy 正在运行，后端会先优雅退出再换入（无需前端确认）。
   if (switchingUid) { toast('正在切换 ' + shortUid(switchingUid) + '，请稍候…'); return; }
   try {
-    // 切换为破坏性操作（会先关闭 WorkBuddy 再重启、并搬迁会话归属），统一弹确认框，不再依赖主客户端检测。
-    const ok = await confirmSwitchRisk(uid);
-    if (!ok) { toast('已取消切换'); return; }
-
+    // 直接切换，不弹确认框；后端 switch_account 已在 WorkBuddy 运行时先优雅退出，避免回写覆盖。
     switchingUid = uid;
     try { showAccountList(accountsCache, (window.__login || {}).uid); } catch (e) {}
     toast('正在切换 ' + shortUid(uid) + '…');
@@ -547,19 +544,7 @@ async function switchTo(uid) {
   }
 }
 
-// 软件内确认弹窗（自定义样式，提示关闭 WorkBuddy 的中断风险）
-let switchResolve = null;
-function confirmSwitchRisk(uid) {
-  return new Promise(res => {
-    $('sw-risk-uid').textContent = shortUid(uid);
-    $('sw-risk-status').textContent = '切换账号会先关闭 WorkBuddy（若正在运行，正在生成/下载的任务可能被中断），再自动重启切换账号。\n\n⚠️ 切换会把「当前账号」在会话库里的对话/自动化搬迁到目标账号名下（"搬"语义）：切过去后能看到并继续原对话，但源账号视角下这些内容不再可见；来回切换会让会话在两个账号间流动。';
-    $('sw-risk-modal').classList.add('show');
-    switchResolve = res;
-  });
-}
-function confirmSwitchYes() { $('sw-risk-modal').classList.remove('show'); if (switchResolve) { switchResolve(true); switchResolve = null; } }
-function confirmSwitchNo() { $('sw-risk-modal').classList.remove('show'); if (switchResolve) { switchResolve(false); switchResolve = null; } }
-// （banner 死 UI 已移除：切换后由 switchTo 自动调 restart_workbuddy，无需手动入口）
+// （切换确认弹窗已移除：v0.5.24 起 switchTo 直接切换，不再弹确认框）
 
 async function refreshAccounts() {
   let data;
@@ -1667,7 +1652,7 @@ async function restartWB() {
 
 // 暴露给 inline onclick（安全：未定义的函数跳过，不影响其余，更不阻断 bootBootstrap）
 (function expose(){
-  const names = ['addModel','editModel','delModel','testModel','testCurrentForm','saveModel','closeModelModal','restartWB','loadAll','loadQuota','doCheckin','openReport','closeReport','copyReport','ensureSnapshot','backupAll','saveCurrentLogin','confirmSwitchYes','confirmSwitchNo','switchTo','openBackups','renderBackups','openBackupDetail','closeBackups','closeBackupDetail','loadBuddy','buddyDepart','buddyClaim','buddyDepartAll','buddyClaimAll','buddyDepartFor','buddyClaimFor','refreshBuddyAll','doCheckinAll','loadQuotaAll','qaCheckinFor','toggleAllKeys','refreshAll','uhRefresh','uhExportJson','uhExportCsv','loadMemoryAll','qaToggleRank','exportQuotaMd','applyQuotaAllFilters','toggleStar','openTagInput'];
+  const names = ['addModel','editModel','delModel','testModel','testCurrentForm','saveModel','closeModelModal','restartWB','loadAll','loadQuota','doCheckin','openReport','closeReport','copyReport','ensureSnapshot','backupAll','saveCurrentLogin','switchTo','openBackups','renderBackups','openBackupDetail','closeBackups','closeBackupDetail','loadBuddy','buddyDepart','buddyClaim','buddyDepartAll','buddyClaimAll','buddyDepartFor','buddyClaimFor','refreshBuddyAll','doCheckinAll','loadQuotaAll','qaCheckinFor','toggleAllKeys','refreshAll','uhRefresh','uhExportJson','uhExportCsv','loadMemoryAll','qaToggleRank','exportQuotaMd','applyQuotaAllFilters','toggleStar','openTagInput'];
   for (const n of names) {
     try {
       const fn = eval(n);
