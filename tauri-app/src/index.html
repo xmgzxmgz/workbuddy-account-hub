@@ -243,21 +243,6 @@
   </style>
 </head>
 <body>
-  <!-- 切换风险确认弹窗（软件内提示，非浏览器 confirm） -->
-  <div class="modal" id="sw-risk-modal">
-    <div class="modal-box" style="width:min(460px,92vw);">
-      <div class="modal-head"><span>切换账号确认</span><button onclick="confirmSwitchNo()">×</button></div>
-      <div class="modal-body" style="padding:16px;">
-        <div style="font-size:13px;margin-bottom:8px;">即将切换到 <b id="sw-risk-uid"></b></div>
-        <div id="sw-risk-status" style="font-size:12px;color:var(--muted);line-height:1.6;"></div>
-      </div>
-      <div class="modal-foot">
-        <button class="mini secondary" onclick="confirmSwitchNo()">取消</button>
-        <button class="mini" style="background:var(--green);" onclick="confirmSwitchYes()">确认切换</button>
-      </div>
-    </div>
-  </div>
-
   <!-- 侧边栏 -->
   <aside class="sidebar">
     <h3>当前登录</h3>
