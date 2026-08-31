@@ -597,7 +597,6 @@ fn list_accounts() -> Value {
         let mut m = serde_json::Map::new();
         m.insert("accounts".into(), serde_json::to_value(accs).unwrap_or(Value::Null));
         m.insert("current_uid".into(), serde_json::to_value(ops::current_uid()).unwrap_or(Value::Null));
-        m.insert("workbuddy_running".into(), Value::Bool(ops::is_workbuddy_running()));
         m
     })
 }
@@ -635,11 +634,6 @@ fn restart_workbuddy() -> Result<(), String> {
 #[tauri::command]
 fn restart_self(app: tauri::AppHandle) {
     app.restart();
-}
-
-#[tauri::command]
-fn app_running() -> bool {
-    ops::is_workbuddy_running()
 }
 
 // 历史备份：list_backups() 返回全部账号的历史备份；list_backups(uid) 只返回某账号。
@@ -699,7 +693,6 @@ pub fn run() {
             switch_account,
             restart_workbuddy,
             restart_self,
-            app_running,
             list_backups,
             backup_detail,
             list_custom_models,
