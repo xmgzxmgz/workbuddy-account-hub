@@ -947,7 +947,6 @@ async function doCheckinAll() {
   const r = await invoke('checkin_all').catch(e => ({ error: String(e) }));
   if (r && r.error) { toast('批量签到失败: ' + r.error); return; }
   renderCheckinAll(r.results || []);
-  renderPool();
   const s = r.summary || {};
   toast(`批量签到完成：成功 ${s.ok || 0} · 跳过 ${s.skipped || 0} · 失败 ${s.fail || 0}`);
 }
@@ -983,7 +982,6 @@ async function loadQuotaAll() {
     const r = await invoke('quota_all').catch(e => ({ error: String(e) }));
     if (r && r.error) { toast('查询全部额度失败: ' + r.error); return; }
     renderQuotaAll(r.results || []);
-    renderPool();
     const s = r.summary || {};
     toast(`全部额度查询：成功 ${s.ok || 0} · 跳过 ${s.skipped || 0} · 失败 ${s.fail || 0}`);
   } catch (e) { toast('查询全部额度失败: ' + e); }
@@ -1367,7 +1365,6 @@ async function loadAll() {
     window.__login = j.login || {};
     // #27：依据 get_all 带回的 workbuddy_running 立即刷新顶部提示条，并启动周期轮询
     try { updateClientStatus(j.workbuddy_running); } catch (e) {}
-    try { renderPool(); } catch (e) {}
     if (!window.__clientPoll) { window.__clientPoll = setInterval(pollClientStatus, 15000); }
     try { renderSidebar(j); bootLog('启动加载：侧边栏已渲染'); }
     catch (e) { bootLog('启动加载：侧边栏渲染失败 ' + e.message, 'err'); }
@@ -1460,31 +1457,6 @@ function updateClientStatus(running) {
     if (closeBtn) closeBtn.onclick = () => { bar.classList.add('hidden'); bar.innerHTML = ''; };
   }
 }
-// 账号健康池（#2）：展示每个账号的健康/禁用/冷却/需刷新状态 + 推荐账号
-function renderPool() {
-  const el = document.getElementById('pool-panel');
-  const list = document.getElementById('pool-list');
-  if (!el || !list) return;
-  invoke('account_pool').then(r => {
-    if (!r || !r.ok) { el.style.display = 'none'; return; }
-    el.style.display = '';
-    list.innerHTML = '';
-    const rec = r.recommended_uid || '';
-    for (const a of (r.accounts || [])) {
-      const tag = a.disabled ? '禁用' : (a.cooldown_ms > 0 ? '冷却 ' + Math.ceil(a.cooldown_ms / 1000) + 's' : (a.needs_refresh ? '需刷新' : '健康'));
-      const cls = a.disabled || a.needs_refresh ? 'bad' : (a.cooldown_ms > 0 ? 'warn' : 'ok');
-      const star = a.uid === rec ? ' ★推荐' : '';
-      const row = document.createElement('div');
-      row.className = 'pool-row ' + cls;
-      const dot = document.createElement('span'); dot.className = 'dot';
-      const txt = document.createElement('span');
-      txt.textContent = (a.nickname || a.uid) + ' · ' + tag + ' · 积分 ' + (Math.round((a.credits || 0) * 100) / 100) + star;
-      row.appendChild(dot); row.appendChild(txt);
-      list.appendChild(row);
-    }
-  }).catch(() => { if (el) el.style.display = 'none'; });
-}
-
 function pollClientStatus() {
   invoke('app_running').then(r => updateClientStatus(!!r)).catch(() => {});
 }
