@@ -984,11 +984,44 @@ impl Key for BytesKey {
     }
 }
 
+/// 诊断日志：写入 %TEMP%/wb_pin_migrate.log，定位置顶迁移失败根因
+fn pin_log(msg: &str) {
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(std::env::temp_dir().join("wb_pin_migrate.log"))
+    {
+        let _ = std::io::Write::write_all(&mut f, format!("[{ts}] {msg}\n").as_bytes());
+    }
+}
+
 pub fn migrate_renderer_pin_state(from_uid: &str, to_uid: &str) -> Result<(), String> {
-    let pat_pin_from = format!("workbuddy-pinned-conversations:{from_uid}");
-    let pat_pin_to = format!("workbuddy-pinned-conversations:{to_uid}");
-    let pat_exp_from = format!("wb:conversation-list:expanded-state:u:{from_uid}");
-    let pat_exp_to = format!("wb:conversation-list:expanded-state:u:{to_uid}");
+    pin_log(&format!("=== migrate start from={from_uid} to={to_uid}"));
+    // 兼容两种 uid 格式：当前版 account.uid=完整UUID；旧版可能仅用前8位短id
+    let from_short = &from_uid[..from_uid.len().min(8)];
+    let to_short = &to_uid[..to_uid.len().min(8)];
+    let pairs: Vec<(String, String)> = vec![
+        (
+            format!("workbuddy-pinned-conversations:{from_uid}"),
+            format!("workbuddy-pinned-conversations:{to_uid}"),
+        ),
+        (
+            format!("workbuddy-pinned-conversations:{from_short}"),
+            format!("workbuddy-pinned-conversations:{to_short}"),
+        ),
+        (
+            format!("wb:conversation-list:expanded-state:u:{from_uid}"),
+            format!("wb:conversation-list:expanded-state:u:{to_uid}"),
+        ),
+        (
+            format!("wb:conversation-list:expanded-state:u:{from_short}"),
+            format!("wb:conversation-list:expanded-state:u:{to_short}"),
+        ),
+    ];
 
     let mut dir = workbuddy_home();
     dir.push("app");
@@ -996,68 +1029,93 @@ pub fn migrate_renderer_pin_state(from_uid: &str, to_uid: &str) -> Result<(), St
     dir.push("Local Storage");
     dir.push("leveldb");
     if !dir.exists() {
-        // 渲染层存储不存在（极少见，如从未启动过会话界面），视为无需迁移
+        pin_log("dir missing, skip (Ok)");
         return Ok(());
     }
 
-    // 打开 leveldb（只读校验 + 可写）。若被占用（理论上不会，因已 quit），给少量重试窗口。
-    // 键类型必须是 BytesKey（db-key 0.0.5 只实现 Key for i32，必须自定义字节键）。
-    let db: Database<BytesKey> = open_leveldb_with_retry(&dir)?;
+    let db: Database<BytesKey> = match open_leveldb_with_retry(&dir) {
+        Ok(d) => {
+            pin_log("db open OK");
+            d
+        }
+        Err(e) => {
+            pin_log(&format!("db open FAIL: {e}"));
+            return Err(format!("渲染层 leveldb 打开失败: {e}"));
+        }
+    };
 
-    // 遍历全部键，收集需要改名的（精确匹配 pinned 列表键 与 expanded-state 键，按 from_uid）
     let read_opts = ReadOptions::new();
     let iter = db.iter(read_opts);
     iter.start();
+    let mut total: usize = 0;
     let mut to_rename: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
+    let mut dumped: usize = 0;
     for (key, val) in iter {
-        if let Ok(kstr) = std::str::from_utf8(key.as_bytes()) {
-            let new_key: Option<String> = if let Some(base) = kstr.strip_suffix(&pat_pin_from) {
-                Some(format!("{base}{pat_pin_to}"))
-            } else if let Some(base) = kstr.strip_suffix(&pat_exp_from) {
-                Some(format!("{base}{pat_exp_to}"))
-            } else {
-                None
-            };
-            if let Some(nk) = new_key {
-                to_rename.push((nk.into_bytes(), val));
+        total += 1;
+        let kbytes = key.to_vec();
+        let vbytes = val.to_vec();
+        if let Ok(kstr) = std::str::from_utf8(&kbytes) {
+            // 诊断：导出可能与置顶/会话相关的键与取值，便于定位真实键名与 uid 格式
+            if dumped < 60
+                && (kstr.contains("pinned")
+                    || kstr.contains("conversation")
+                    || kstr.contains("expanded")
+                    || kstr.contains("uid")
+                    || kstr.contains("user")
+                    || kstr.contains("account")
+                    || kstr.contains("session"))
+            {
+                pin_log(&format!(
+                    "KEY[{dumped}] {kstr} => {:.240}",
+                    String::from_utf8_lossy(&vbytes)
+                ));
+                dumped += 1;
+            }
+            for (from_pat, to_pat) in &pairs {
+                if let Some(base) = kstr.strip_suffix(from_pat) {
+                    let nk = format!("{base}{to_pat}");
+                    to_rename.push((nk.into_bytes(), vbytes.clone()));
+                    pin_log(&format!("MATCH via from_pat={from_pat} -> new={nk}"));
+                    break;
+                }
             }
         }
     }
-
+    pin_log(&format!(
+        "iter done total_keys={total} candidates={}",
+        to_rename.len()
+    ));
     if to_rename.is_empty() {
+        pin_log("no candidates -> no-op OK");
         return Ok(());
     }
 
-    // 写新键 + 删旧键（best-effort：单条失败记日志但继续）
-    let mut done = 0usize;
+    let mut done: usize = 0;
     for (new_key, val) in &to_rename {
-        // 旧键 = 新键把 to 模式换回 from 模式
-        let old_key: Option<Vec<u8>> = if let Ok(nstr) = std::str::from_utf8(new_key) {
-            if let Some(base) = nstr.strip_suffix(&pat_pin_to) {
-                Some(format!("{base}{pat_pin_from}").into_bytes())
-            } else if let Some(base) = nstr.strip_suffix(&pat_exp_to) {
-                Some(format!("{base}{pat_exp_from}").into_bytes())
-            } else {
-                None
+        let mut old: Option<Vec<u8>> = None;
+        if let Ok(nstr) = std::str::from_utf8(new_key) {
+            for (from_pat, to_pat) in &pairs {
+                if let Some(base) = nstr.strip_suffix(to_pat) {
+                    old = Some(format!("{base}{from_pat}").into_bytes());
+                    break;
+                }
             }
-        } else {
-            None
-        };
-        if let Some(old) = old_key {
-            let write_opts = WriteOptions::new();
-            if db.put(write_opts, BytesKey(new_key.clone()), val).is_ok() {
-                let del_opts = WriteOptions::new();
-                let _ = db.delete(del_opts, BytesKey(old));
+        }
+        if let Some(old) = old {
+            let w = WriteOptions::new();
+            if db.put(w, BytesKey(new_key.clone()), val).is_ok() {
+                let d = WriteOptions::new();
+                let _ = db.delete(d, BytesKey(old));
                 done += 1;
+                pin_log(&format!("renamed OK new_len={}", new_key.len()));
+            } else {
+                pin_log("put FAIL");
             }
         }
     }
-
+    pin_log(&format!("done={done}"));
     if done == 0 {
-        return Err(format!(
-            "渲染层置顶键已找到 {} 个但写入失败（leveldb 可能无法写入）",
-            to_rename.len()
-        ));
+        return Err("渲染层置顶键已找到但写入失败（leveldb 可能无法写入）".into());
     }
     Ok(())
 }
