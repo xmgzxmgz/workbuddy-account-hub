@@ -1074,7 +1074,7 @@ pub fn migrate_renderer_pin_state(from_uid: &str, to_uid: &str) -> Result<(), St
             for (from_pat, to_pat) in &pairs {
                 if let Some(base) = kstr.strip_suffix(from_pat) {
                     let nk = format!("{base}{to_pat}");
-                    to_rename.push((nk.into_bytes(), vbytes.clone()));
+                    to_rename.push((nk.clone().into_bytes(), vbytes.clone()));
                     pin_log(&format!("MATCH via from_pat={from_pat} -> new={nk}"));
                     break;
                 }
