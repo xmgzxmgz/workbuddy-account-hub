@@ -529,11 +529,9 @@ async function switchTo(uid) {
     toast('正在切换 ' + shortUid(uid) + '…');
     const r = await invoke('switch_account', { uid });
     if (r) {
-      toast('已切换到 ' + shortUid(r.uid) + ' ✅ 正在重启 WorkBuddy 生效…', 'ok');
-      // 切换成功且 WorkBuddy 当前无任务运行（已被后端优雅退出或本就未运行），则自动重启 WorkBuddy 生效
-      setTimeout(async () => {
-        try { await invoke('restart_workbuddy'); } catch (e) { toast('重启 WorkBuddy 失败: ' + e, 'err'); }
-      }, 1200);
+      toast('已切换到 ' + shortUid(r.uid) + ' ✅ WorkBuddy 正在重启生效…', 'ok');
+      // 重启由后端 switch_account 同步完成（Rust 直接 launch_workbuddy），无需前端定时器，
+      // 避免双开 WorkBuddy 实例。
       refreshAccounts();
       setTimeout(() => loadAll(), 1500);
     }
