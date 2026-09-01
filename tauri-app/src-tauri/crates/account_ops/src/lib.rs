@@ -1052,7 +1052,7 @@ pub fn migrate_renderer_pin_state(from_uid: &str, to_uid: &str) -> Result<(), St
     let mut dumped: usize = 0;
     for (key, val) in iter {
         total += 1;
-        let kbytes = key.to_vec();
+        let kbytes = key.as_bytes().to_vec();
         let vbytes = val.to_vec();
         if let Ok(kstr) = std::str::from_utf8(&kbytes) {
             // 诊断：导出可能与置顶/会话相关的键与取值，便于定位真实键名与 uid 格式
