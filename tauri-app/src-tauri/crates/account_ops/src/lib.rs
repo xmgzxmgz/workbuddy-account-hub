@@ -746,7 +746,8 @@ fn latest_hist_auth(vault: &Path, uid: &str) -> Option<PathBuf> {
 /// 现按用户需求主动搬迁会话归属，使"切账号会话跟着过去"成为现实。
 pub fn switch_account(vault: &Path, uid: &str) -> Result<SwitchResult, String> {
     // 切换前若 WorkBuddy 在运行，先优雅退出（避免退出时回写覆盖 local_storage/登录态）
-    if is_workbuddy_running() {
+    let was_running = is_workbuddy_running();
+    if was_running {
         quit_workbuddy()?;
     }
 
@@ -828,14 +829,17 @@ pub fn switch_account(vault: &Path, uid: &str) -> Result<SwitchResult, String> {
     // （切回源账号时也看不到）。回滚方式：从 vault/<cid>/history/<ts>/workbuddy.db.bak 还原。
     let mut migrated_sessions: i64 = 0;
     let mut migrated_autos: i64 = 0;
+    // pin_warn 提前声明：既承载会话置顶迁移告警，也承载会话归属迁移失败告警（见下）
+    let mut pin_warn: Option<String> = None;
     if let Some(cid) = &cur_uid {
         if cid != uid {
             match migrate_sessions_user_id(cid, uid) {
                 Ok((s, a)) => { migrated_sessions = s; migrated_autos = a; }
                 Err(e) => {
-                    return Err(format!(
-                        "会话搬迁失败（已中止切换，登录态未改动）: {e}"
-                    ));
+                    // ⚠️ 改为告警而非中止：会话迁移失败不应让整次切换卡死
+                    // （否则 WB 已被杀、不重启、登录态已切走，用户进退两难）。
+                    // 登录态已切换，WB 随后由 Rust 直接重启；会话可稍后手动重试迁移。
+                    pin_warn = Some(format!("会话迁移失败（登录态已切换，但会话未搬迁，可稍后重试）: {e}"));
                 }
             }
         }
@@ -843,7 +847,6 @@ pub fn switch_account(vault: &Path, uid: &str) -> Result<SwitchResult, String> {
 
     // 会话置顶（Pinned）状态迁移：把渲染层 localStorage 里 `u:<旧uid>` 键复制为 `u:<新uid>`。
     // best-effort：失败时仅记录警告，不阻断账号切换（置顶丢失只是体验问题，可手动重新置顶）。
-    let mut pin_warn: Option<String> = None;
     if let Some(cid) = &cur_uid {
         if cid != uid {
             if let Err(e) = migrate_renderer_pin_state(cid, uid) {
@@ -852,6 +855,12 @@ pub fn switch_account(vault: &Path, uid: &str) -> Result<SwitchResult, String> {
         }
     }
 
+    // ⚠️ 关键修复：切换成功后由 Rust 直接重启 WorkBuddy，不再依赖前端 setTimeout。
+    // 避免前端定时器未触发/异常时 WB 被杀了却不重启（用户报告的「闪退/不重启」根因之一）。
+    // 仅当初次在运行时才重启（保持原有语义，不误开未运行的 WB）；启动失败忽略，用户可手动打开。
+    if was_running {
+        let _ = launch_workbuddy();
+    }
     // 切换后由前端在确认 WorkBuddy 无任务运行后，调用 restart_workbuddy 重启 WorkBuddy 生效
     // （不是重启中枢——中枢重启会丢当前界面状态，且 WorkBuddy 自身需以新登录态重启）。
     Ok(SwitchResult {
@@ -896,6 +905,8 @@ pub fn migrate_sessions_user_id(from_uid: &str, to_uid: &str) -> Result<(i64, i6
     std::fs::copy(&db, &backup).map_err(|e| format!("备份 workbuddy.db 失败: {e}"))?;
 
     let conn = Connection::open(&db).map_err(|e| format!("打开 workbuddy.db 失败: {e}"))?;
+    // 兜底：若 WorkBuddy 仍残留锁，等待而非立即失败（配合 quit_workbuddy 轮询退出，基本不会触发）
+    let _ = conn.execute("PRAGMA busy_timeout=8000", []);
 
     // 会话归属改写（核心诉求：切账号，会话跟着过去）
     let s_changed = conn
@@ -1252,12 +1263,31 @@ pub fn quit_workbuddy() -> Result<(), String> {
             Err("WorkBuddy 未能完全退出，已中止切换（请手动关闭后重试）".into())
         }
     } else if cfg!(target_os = "windows") {
+        // 先强制结束 WorkBuddy 主进程
         let mut c = Command::new("taskkill");
         c.args(["/IM", "WorkBuddy.exe", "/F"]);
         #[cfg(windows)]
         c.creation_flags(0x08000000);
         let _ = c.output();
-        Ok(())
+        // ⚠️ 关键修复：taskkill /F 是异步的，WorkBuddy 可能仍未释放 workbuddy.db 锁。
+        // 必须轮询等待其完全退出（最多 ~12s），否则紧随其后的会话迁移会撞上
+        // "database is locked" 而中止，表现为「WB 被杀却不重启、会话不迁移」。
+        for _ in 0..40 {
+            if !is_workbuddy_running() { return Ok(()); }
+            std::thread::sleep(std::time::Duration::from_millis(300));
+        }
+        // 兜底再杀一次，再等 2s
+        let mut c2 = Command::new("taskkill");
+        c2.args(["/IM", "WorkBuddy.exe", "/F"]);
+        #[cfg(windows)]
+        c2.creation_flags(0x08000000);
+        let _ = c2.output();
+        std::thread::sleep(std::time::Duration::from_millis(2000));
+        if !is_workbuddy_running() {
+            Ok(())
+        } else {
+            Err("WorkBuddy 未能完全退出，已中止切换（请手动关闭 WorkBuddy 后重试）".into())
+        }
     } else {
         Err("当前平台不支持退出 WorkBuddy".into())
     }
