@@ -28,11 +28,11 @@ pub struct LoginInfo {
 
 /// 在指定根目录下遍历一层子目录，收集可能存在的登录态文件路径。
 /// 用于 macOS / 自定义安装路径下 WorkBuddy 数据目录名不确定时的兜底扫描。
-fn scan_auth_candidates(root: &Path) -> Vec<std::path::PathBuf> {
+fn scan_auth_candidates(root: impl AsRef<Path>) -> Vec<std::path::PathBuf> {
     let names = ["workbuddy-desktop.info", "Tencent-Cloud.coding-copilot.info"];
     let rels = ["Data/Public/auth", "auth", "Data/auth"];
     let mut out = Vec::new();
-    if let Ok(rd) = std::fs::read_dir(root) {
+    if let Ok(rd) = std::fs::read_dir(root.as_ref()) {
         for e in rd.flatten() {
             if !e.file_type().map(|t| t.is_dir()).unwrap_or(false) {
                 continue;
