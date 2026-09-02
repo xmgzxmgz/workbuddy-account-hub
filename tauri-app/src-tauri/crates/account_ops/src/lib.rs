@@ -1092,6 +1092,12 @@ pub fn migrate_renderer_pin_state(from_uid: &str, to_uid: &str) -> Result<(), St
 
     let mut done: usize = 0;
     for (new_key, val) in &to_rename {
+        // 合并语义：先读目标键已有值，把源置顶去重追加，避免覆盖目标账号原本的置顶
+        let merged: Vec<u8> = match db.get(ReadOptions::new(), BytesKey(new_key.clone())) {
+            Ok(Some(existing)) => merge_pinned_json(val, &existing),
+            _ => val.clone(),
+        };
+        // 反推源（旧）键：写成功后才删除，避免写入失败丢源数据
         let mut old: Option<Vec<u8>> = None;
         if let Ok(nstr) = std::str::from_utf8(new_key) {
             for (from_pat, to_pat) in &pairs {
@@ -1102,14 +1108,29 @@ pub fn migrate_renderer_pin_state(from_uid: &str, to_uid: &str) -> Result<(), St
             }
         }
         if let Some(old) = old {
-            let w = WriteOptions::new();
-            if db.put(w, BytesKey(new_key.clone()), val).is_ok() {
+            // put 带重试：应对 leveldb 偶发 IO/锁错误（强杀 WB 后库状态可能瞬时不一致）
+            let mut put_ok = false;
+            let mut last_err = String::new();
+            for attempt in 0..6 {
+                match db.put(WriteOptions::new(), BytesKey(new_key.clone()), &merged) {
+                    Ok(_) => {
+                        put_ok = true;
+                        break;
+                    }
+                    Err(e) => {
+                        last_err = e.to_string();
+                        pin_log(&format!("put attempt {attempt} FAIL: {last_err}"));
+                        std::thread::sleep(std::time::Duration::from_millis(400));
+                    }
+                }
+            }
+            if put_ok {
                 let d = WriteOptions::new();
                 let _ = db.delete(d, BytesKey(old));
                 done += 1;
-                pin_log(&format!("renamed OK new_len={}", new_key.len()));
+                pin_log(&format!("renamed OK new_len={}", merged.len()));
             } else {
-                pin_log("put FAIL");
+                pin_log(&format!("put ALL FAIL: {last_err} (源键保留，可下次重试)"));
             }
         }
     }
@@ -1118,6 +1139,32 @@ pub fn migrate_renderer_pin_state(from_uid: &str, to_uid: &str) -> Result<(), St
         return Err("渲染层置顶键已找到但写入失败（leveldb 可能无法写入）".into());
     }
     Ok(())
+}
+
+/// 合并两个置顶列表（PinnedItem[] JSON）：目标原有项在前，源新增项按 `id` 去重追加在后。
+/// 任一解析失败则回退为 `dst`（尽量不丢数据）。用于切换账号时把源账号置顶并入目标账号，
+/// 同时保留目标账号原本的置顶，避免"覆盖即丢失"。
+fn merge_pinned_json(src: &[u8], dst: &[u8]) -> Vec<u8> {
+    let parse_arr = |b: &[u8]| -> Vec<serde_json::Value> {
+        match serde_json::from_slice::<serde_json::Value>(b) {
+            Ok(serde_json::Value::Array(a)) => a,
+            _ => Vec::new(),
+        }
+    };
+    let mut dst_arr = parse_arr(dst);
+    let src_arr = parse_arr(src);
+    let mut seen: std::collections::HashSet<String> = dst_arr
+        .iter()
+        .filter_map(|v| v.get("id").and_then(|x| x.as_str()).map(|s| s.to_string()))
+        .collect();
+    for item in src_arr {
+        let id = item.get("id").and_then(|x| x.as_str()).unwrap_or("").to_string();
+        if !id.is_empty() && !seen.contains(&id) {
+            dst_arr.push(item);
+            seen.insert(id);
+        }
+    }
+    serde_json::to_vec(&dst_arr).unwrap_or_else(|_| dst.to_vec())
 }
 
 /// 带重试地打开渲染层 leveldb（应对 WorkBuddy 刚退出、文件锁释放的极小时间窗）。
