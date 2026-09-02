@@ -26,7 +26,35 @@ pub struct LoginInfo {
     pub account: Value,
 }
 
-/// 定位本机登录态文件（Mac: CodeBuddyExtension/Data/Public/auth；Win: LOCALAPPDATA 同路径）
+/// 在指定根目录下遍历一层子目录，收集可能存在的登录态文件路径。
+/// 用于 macOS / 自定义安装路径下 WorkBuddy 数据目录名不确定时的兜底扫描。
+fn scan_auth_candidates(root: &Path) -> Vec<std::path::PathBuf> {
+    let names = ["workbuddy-desktop.info", "Tencent-Cloud.coding-copilot.info"];
+    let rels = ["Data/Public/auth", "auth", "Data/auth"];
+    let mut out = Vec::new();
+    if let Ok(rd) = std::fs::read_dir(root) {
+        for e in rd.flatten() {
+            if !e.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                continue;
+            }
+            let sub = e.path();
+            for n in &names {
+                for rel in &rels {
+                    let p = sub.join(rel).join(n);
+                    if p.exists() {
+                        out.push(p);
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+/// 定位本机登录态文件。
+/// macOS 下 WorkBuddy 的数据目录名可能是 `CodeBuddyExtension` 或 `WorkBuddy`
+/// （取决于打包时的 productName），也可能落在 `~/Library/Application Support` 或 `~/.workbuddy`，
+/// 故在硬编码候选之外追加一层目录扫描兜底，避免平台差异导致读不到登录态、积分等全部失效。
 fn auth_candidates() -> Vec<std::path::PathBuf> {
     let mut cands = Vec::new();
     let home = std::env::var("HOME").unwrap_or_default();
@@ -38,13 +66,77 @@ fn auth_candidates() -> Vec<std::path::PathBuf> {
             .into_owned()
     });
     if cfg!(target_os = "windows") {
-        cands.push(std::path::Path::new(&local).join("CodeBuddyExtension").join("Data").join("Public").join("auth").join("workbuddy-desktop.info"));
+        cands.push(
+            std::path::Path::new(&local)
+                .join("CodeBuddyExtension")
+                .join("Data")
+                .join("Public")
+                .join("auth")
+                .join("workbuddy-desktop.info"),
+        );
+        cands.extend(scan_auth_candidates(std::path::Path::new(&local)));
     } else {
-        cands.push(std::path::Path::new(&home).join("Library").join("Application Support").join("CodeBuddyExtension").join("Data").join("Public").join("auth").join("workbuddy-desktop.info"));
-        cands.push(std::path::Path::new(&home).join("Library").join("Application Support").join("CodeBuddyExtension").join("Data").join("Public").join("auth").join("Tencent-Cloud.coding-copilot.info"));
+        let asp = std::path::Path::new(&home)
+            .join("Library")
+            .join("Application Support");
+        // 硬编码候选（覆盖已知 productName 变体）
+        for app in &["CodeBuddyExtension", "WorkBuddy"] {
+            for n in &["workbuddy-desktop.info", "Tencent-Cloud.coding-copilot.info"] {
+                cands.push(
+                    asp.join(app)
+                        .join("Data")
+                        .join("Public")
+                        .join("auth")
+                        .join(n),
+                );
+            }
+        }
+        // 一层目录扫描兜底（无论数据目录具体叫什么）
+        cands.extend(scan_auth_candidates(&asp));
+        // 主目录 .workbuddy（若主客户端数据落在 home 下）
+        cands.extend(scan_auth_candidates(std::path::Path::new(&home).join(".workbuddy")));
     }
     cands.retain(|p| p.exists());
     cands
+}
+
+/// 诊断：返回候选登录态路径及其存在情况（供 macOS 找不到登录态时定位真实目录）
+pub fn auth_probe() -> Value {
+    let platform = if cfg!(target_os = "windows") { "windows" } else { "macos" };
+    let home = std::env::var("HOME").unwrap_or_default();
+    let mut probed = Vec::new();
+    if cfg!(target_os = "windows") {
+        let local = std::env::var("LOCALAPPDATA").unwrap_or_default();
+        let p = std::path::Path::new(&local)
+            .join("CodeBuddyExtension")
+            .join("Data")
+            .join("Public")
+            .join("auth")
+            .join("workbuddy-desktop.info");
+        probed.push(json!({ "path": p.to_string_lossy(), "exists": p.exists() }));
+    } else {
+        let asp = std::path::Path::new(&home)
+            .join("Library")
+            .join("Application Support");
+        for app in &["CodeBuddyExtension", "WorkBuddy"] {
+            let p = asp
+                .join(app)
+                .join("Data")
+                .join("Public")
+                .join("auth")
+                .join("workbuddy-desktop.info");
+            probed.push(json!({ "path": p.to_string_lossy(), "exists": p.exists() }));
+        }
+        for p in scan_auth_candidates(&asp) {
+            probed.push(json!({ "path": p.to_string_lossy(), "exists": true, "via": "scan" }));
+        }
+    }
+    json!({
+        "platform": platform,
+        "home": home,
+        "probed": probed,
+        "found_login": load_login().is_some(),
+    })
 }
 
 pub fn jwt_payload(token: &str) -> Option<Value> {
@@ -339,6 +431,10 @@ pub fn get_all() -> Value {
     result["local_accounts"] = local_accounts(&cur);
     result["env"] = app_env();
     result["jwt"] = jwt_info();
+    // 未找到登录态时附带诊断（列出候选路径与存在情况，便于定位平台/目录差异）
+    if login.is_none() {
+        result["auth_probe"] = auth_probe();
+    }
     result
 }
 
@@ -626,15 +722,34 @@ pub fn buddy_claim() -> Value {
 // ===== 本地信息 =====
 
 /// WorkBuddy 本机数据根目录（跨平台）：
-///   macOS:   ~/Library/Application Support/CodeBuddyExtension/Data
+///   macOS:   ~/Library/Application Support/CodeBuddyExtension/Data （WorkBuddy 名亦兼容）
 ///   Windows: %APPDATA%\CodeBuddyExtension\Data
 fn data_root() -> std::path::PathBuf {
     if cfg!(target_os = "windows") {
         std::path::Path::new(&std::env::var("APPDATA").unwrap_or_default())
             .join("CodeBuddyExtension").join("Data")
     } else {
-        std::path::Path::new(&std::env::var("HOME").unwrap_or_default())
-            .join("Library").join("Application Support").join("CodeBuddyExtension").join("Data")
+        let home = std::env::var("HOME").unwrap_or_default();
+        let asp = std::path::Path::new(&home).join("Library").join("Application Support");
+        // 优先已知目录名，回退一层扫描（覆盖 productName 变体）
+        for app in &["CodeBuddyExtension", "WorkBuddy"] {
+            let p = asp.join(app).join("Data");
+            if p.exists() {
+                return p;
+            }
+        }
+        if let Ok(rd) = std::fs::read_dir(&asp) {
+            for e in rd.flatten() {
+                if !e.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                    continue;
+                }
+                let p = e.path().join("Data");
+                if p.exists() {
+                    return p;
+                }
+            }
+        }
+        asp.join("CodeBuddyExtension").join("Data")
     }
 }
 
