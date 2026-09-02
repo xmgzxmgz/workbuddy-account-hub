@@ -259,9 +259,9 @@
         <summary style="cursor:pointer;font-size:12.5px;font-weight:600;color:var(--muted);">跨端同步（极空间 NAS · Tailscale）</summary>
         <div style="margin-top:10px;">
           <div class="kv" style="margin-bottom:8px;">
-            <div class="field" style="min-width:160px;flex:1;"><label>NAS 地址</label><input id="nas-host" placeholder="100.124.11.49"/></div>
+            <div class="field" style="min-width:160px;flex:1;"><label>NAS 地址</label><input id="nas-host" placeholder="your-nas-ip"/></div>
             <div class="field" style="min-width:80px;flex:0 0 90px;"><label>SSH 端口</label><input id="nas-port" placeholder="10000"/></div>
-            <div class="field" style="min-width:120px;flex:1;"><label>用户名</label><input id="nas-user" placeholder="13950215101a"/></div>
+            <div class="field" style="min-width:120px;flex:1;"><label>用户名</label><input id="nas-user" placeholder="your-nas-account"/></div>
             <div class="field" style="min-width:140px;flex:1;"><label>密码</label><input id="nas-pass" type="password" placeholder="仅存本地，不提交"/></div>
           </div>
           <div class="sec-line">
@@ -748,9 +748,9 @@
       $('import-file').value='';
     }
     function nasSync(action){
-      const host=$('nas-host').value.trim()||'100.124.11.49';
+      const host=$('nas-host').value.trim()||'your-nas-ip';
       const port=$('nas-port').value.trim()||'10000';
-      const user=$('nas-user').value.trim()||'13950215101a';
+      const user=$('nas-user').value.trim()||'your-nas-account';
       const pass=$('nas-pass').value.trim();
       if(!pass){ $('nas-status').textContent='请填写 NAS 密码（仅存本机）'; return; }
       localStorage.setItem(LS_NAS, JSON.stringify({host,port,user,pass}));
