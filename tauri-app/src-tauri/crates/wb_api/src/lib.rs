@@ -18,6 +18,34 @@ const API_BASE: &str = "https://copilot.tencent.com";
 const BILLING_METER: &str = "/billing/meter";
 const V2_METER: &str = "/v2/billing/meter";
 
+/// 官方计费商品码（COMMODITY_CODES，逆向自 Electron 客户端 app.asar）。
+/// 计费资源接口（#97550 重构后）按码集分派：付费包走 paid-packages、免费/赠送/体验包走 free-packages，
+/// `PackageCodes` 为必填，不传后端直接 code:10085「请求不合法」。
+const PAID_PACKAGE_CODES: &[&str] = &[
+    "TCACA_code_002_AkiJS3ZHF5", // proMon
+    "TCACA_code_005_maRGyrHhw1", // proMonPlus
+    "TCACA_code_003_FAnt7lcmRT", // proYear
+    "TCACA_code_023_4xbGhMrE6q", // youth
+    "TCACA_code_026_BaESVICNoi", // advanced
+    "TCACA_code_027_0FCGVA6vSa", // flagship
+    "TCACA_code_009_0XmEQc2xOf", // extra
+    "TCACA_code_038_OhvqZtiPKr", // extra38
+    "TCACA_code_036_lupO5WgNdG", // extraIntl
+];
+const FREE_PACKAGE_CODES: &[&str] = &[
+    "TCACA_code_001_PqouKr6QWV", // free
+    "TCACA_code_008_cfWoLwvjU4", // freeMon
+    "TCACA_code_035_ArVxJcGDsm", // freeMonIntl
+    "TCACA_code_006_DbXS0lrypC", // gift
+    "TCACA_code_039_KRcQj7wUat", // proTrialMon
+    "TCACA_code_040_mi9rCYg46x", // proTrialYear
+    "TCACA_code_007_nzdH5h4Nl0", // activity
+    "TCACA_code_028_NtpWi0jzXs", // bonus28
+    "TCACA_code_029_6wCGEWquYy", // bonus29
+    "TCACA_code_030_BjSt89qTvr", // bonus30
+    "TCACA_code_037_WxOD3MpI2o", // bonusIntl
+];
+
 #[derive(Serialize)]
 pub struct LoginInfo {
     pub uid: String,
@@ -539,9 +567,16 @@ pub fn read_quota_cache(uid: &str) -> Option<Value> {
 }
 
 /// 解析 get-user-resource 原始响应为标准化结构（别名兼容 + 合并 + 企业不限量）
+/// 兼容两种响应结构：
+///  - 新接口（#97550）：body.data.Accounts
+///  - 旧接口（已废弃）：body.data.Response.Data.Accounts
 pub fn parse_user_resource(raw: &Value) -> Value {
-    let data = raw.get("data").and_then(|d| d.get("Response")).and_then(|r| r.get("Data"));
-    let accounts = match data.and_then(|d| d.get("Accounts")).and_then(|a| a.as_array()) {
+    let data = raw.get("data");
+    let accounts = match data
+        .and_then(|d| d.get("Accounts"))
+        .and_then(|a| a.as_array())
+        .or_else(|| data.and_then(|d| d.get("Response")).and_then(|r| r.get("Data")).and_then(|d| d.get("Accounts")).and_then(|a| a.as_array()))
+    {
         Some(a) => a,
         None => return json!({ "packages": [], "giftRemain": 0.0, "trialRemain": 0.0, "grandRemain": 0.0, "empty": true }),
     };
@@ -616,36 +651,109 @@ pub fn get_quota() -> Value {
 }
 
 /// 查询额度（指定登录态）—— 供多账号批量/单账号查询（覆盖 dashboard 单账号局限）
-/// 返回 { status, body(原始), parsed(标准化), login(脱敏), cached?(离线回退) }
+/// 返回 { status, body(原始), parsed(标准化), login(脱敏), cached?(离线回退), permission_denied? }
+///
+/// ⚠️ 接口变更（#97550）：官方把旧的单一 `get-user-resource` 拆成三个接口
+///   - `get-user-resource-summary`（聚合，无业务参数）
+///   - `get-user-resource-paid-packages`（付费包，需 PackageCodes=PAID_PACKAGE_CODES）
+///   - `get-user-resource-free-packages`（免费/赠送/体验包，需 PackageCodes=FREE_PACKAGE_CODES）
+/// 旧接口现在返回 code:10085「请求不合法」（即 403）。桌面端登录态 token 对这三个计费资源接口
+/// 被官方网关限制（计费读取需经客户端 daemon 代理），直接调用会系统性 403；本函数对此返回
+/// `permission_denied: true` 并附清晰说明，而非吓人的原始 403。
 pub fn get_quota_as(login: &LoginInfo) -> Value {
-    match call_api_as(login, &format!("{}{}/get-user-resource", API_BASE, BILLING_METER), "POST", "{}") {
-        Ok(v) => {
-            let status = v.get("status").and_then(|x| x.as_u64()).unwrap_or(0);
-            let body = v.get("body").cloned().unwrap_or(Value::Null);
-            let parsed = parse_user_resource(&body);
-            write_quota_cache(&login.uid, &parsed, &body);
-            json!({
-                "status": status,
-                "body": body,
-                "parsed": parsed,
-                "login": v.get("login").cloned().unwrap_or(Value::Null)
-            })
-        }
-        Err(e) => {
-            // 离线回退：网络失败时返回上次缓存（标注 cached/offline）
-            if let Some(c) = read_quota_cache(&login.uid) {
-                return json!({
-                    "status": c.get("status").and_then(|x| x.as_u64()).unwrap_or(0),
-                    "body": c.get("body").cloned().unwrap_or(Value::Null),
-                    "parsed": c.get("parsed").cloned().unwrap_or(Value::Null),
-                    "cached": true,
-                    "offline": true,
-                    "error": e
-                });
-            }
-            json!({ "error": e })
-        }
+    // 当日切片窗口（免费包筛选用，官网 buildSlicePeriodRange 同口径：本地当日 00:00:00 ~ 23:59:59）
+    let now = chrono::Local::now();
+    let start = now.date_naive().and_hms_opt(0, 0, 0).unwrap_or(now.naive_local()).format("%Y-%m-%d %H:%M:%S").to_string();
+    let end = now.date_naive().and_hms_opt(23, 59, 59).unwrap_or(now.naive_local()).format("%Y-%m-%d %H:%M:%S").to_string();
+
+    let mut accounts: Vec<Value> = Vec::new();
+    let mut permission_denied = false;
+    let mut token_expired = false;
+    let mut last_err = String::new();
+
+    // 1) summary（聚合，无业务参数）
+    if let Err(e) = fetch_accounts(login, &format!("{}{}/get-user-resource-summary", API_BASE, BILLING_METER), "{}", &mut accounts) {
+        if is_permission_err(&e) { permission_denied = true; } else if is_token_expired(&e) { token_expired = true; } last_err = e;
     }
+    // 2) paid-packages
+    let paid_body = json!({
+        "PageNumber": 1, "PageSize": 100,
+        "PackageCodes": PAID_PACKAGE_CODES,
+        "Status": [0, 3],
+        "NeedRenewInfo": true,
+        "IsDisplayTotalInfo": true
+    }).to_string();
+    if let Err(e) = fetch_accounts(login, &format!("{}{}/get-user-resource-paid-packages", API_BASE, BILLING_METER), &paid_body, &mut accounts) {
+        if is_permission_err(&e) { permission_denied = true; } else if is_token_expired(&e) { token_expired = true; } last_err = e;
+    }
+    // 3) free-packages
+    let free_body = json!({
+        "PageNumber": 1, "PageSize": 100,
+        "PackageCodes": FREE_PACKAGE_CODES,
+        "Status": [0, 3],
+        "SlicePeriodStartTime": start,
+        "SlicePeriodEndTime": end,
+        "IsDisplayTotalInfo": true
+    }).to_string();
+    if let Err(e) = fetch_accounts(login, &format!("{}{}/get-user-resource-free-packages", API_BASE, BILLING_METER), &free_body, &mut accounts) {
+        if is_permission_err(&e) { permission_denied = true; } else if is_token_expired(&e) { token_expired = true; } last_err = e;
+    }
+
+    if token_expired {
+        return json!({ "error": "登录身份过期，请重新登录 WorkBuddy 客户端后重试" });
+    }
+
+    if permission_denied {
+        // 离线回退：权限被拒但有历史缓存时仍展示上次数据（标注 cached）
+        if let Some(c) = read_quota_cache(&login.uid) {
+            return json!({
+                "status": c.get("status").and_then(|x| x.as_u64()).unwrap_or(0),
+                "body": c.get("body").cloned().unwrap_or(Value::Null),
+                "parsed": c.get("parsed").cloned().unwrap_or(Value::Null),
+                "login": { "uid": login.uid, "file": login.file, "token": mask(&login.token, 8) },
+                "cached": true, "offline": true,
+                "permission_denied": true
+            });
+        }
+        return json!({
+            "permission_denied": true,
+            "permission_msg": "该账号桌面登录态无计费额度读取权限（官方网关限制：计费资源需经客户端 daemon 代理，桌面 token 不可直接读取）。签到与宠物能量不受影响。",
+            "login": { "uid": login.uid, "file": login.file, "token": mask(&login.token, 8) }
+        });
+    }
+
+    let merged_body = json!({ "data": { "Accounts": accounts } });
+    let parsed = parse_user_resource(&merged_body);
+    write_quota_cache(&login.uid, &parsed, &merged_body);
+    json!({
+        "status": 200,
+        "body": merged_body,
+        "parsed": parsed,
+        "login": { "uid": login.uid, "file": login.file, "token": mask(&login.token, 8) }
+    })
+}
+
+/// 拉取某计费接口返回的 Accounts 并合并进 accs；鉴权/权限类错误返回 Err（供上层判定 permission_denied）
+fn fetch_accounts(login: &LoginInfo, path: &str, body: &str, accs: &mut Vec<Value>) -> Result<(), String> {
+    match call_api_as(login, path, "POST", body) {
+        Ok(v) => {
+            if let Some(arr) = v.get("body").and_then(|b| b.get("data")).and_then(|d| d.get("Accounts")).and_then(|a| a.as_array()) {
+                accs.extend(arr.iter().cloned());
+            }
+            Ok(())
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// 是否为计费资源接口的权限限制错误（code:10085 / HTTP 403 / 10085「请求不合法」）
+fn is_permission_err(e: &str) -> bool {
+    e.contains("10085") || e.contains("403") || e.contains("请求不合法")
+}
+
+/// 登录态是否过期（call_api_as 对 401 返回「登录身份过期…」）
+fn is_token_expired(e: &str) -> bool {
+    e.contains("401") || e.contains("登录身份过期") || e.contains("请重新登录")
 }
 
 /// 仅查询签到状态
