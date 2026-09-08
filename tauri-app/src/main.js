@@ -338,16 +338,16 @@ function adaptParsed(p) {
   };
 }
 function renderQuota(payload) {
-  // 权限受限：桌面 token 无计费读取权限（官方网关限制），给出清晰说明而非空白
+  // 权限受限：计费读取仍被官方网关拒绝，给出清晰说明而非空白
   if (payload && payload.permission_denied) {
     const set = (id, v) => { const el = $(id); if (el) el.textContent = v; };
-    set('ov-gift', '—'); set('ov-gift-m', '无读取权限');
-    set('ov-trial', '—'); set('ov-trial-m', '无读取权限');
-    set('ov-grand', '—'); set('ov-grand-m', '无读取权限');
+    set('ov-gift', '—'); set('ov-gift-m', '读取被拦截');
+    set('ov-trial', '—'); set('ov-trial-m', '读取被拦截');
+    set('ov-grand', '—'); set('ov-grand-m', '读取被拦截');
     set('q-use', '—'); set('q-use-m', '—');
     set('q-count', '—'); set('q-expire', '受限');
-    const en = $('expire-note'); if (en) en.innerHTML = '⚠ 该账号桌面登录态无计费额度读取权限（官方网关限制：计费资源需经客户端 daemon 代理，桌面 token 不可直接读取）。签到与宠物能量不受影响。';
-    const tb = $('pkg-body'); if (tb) tb.innerHTML = '<tr><td colspan="8" class="perm-denied">无计费读取权限（官方限制）· 当前无法读取额度</td></tr>';
+    const en = $('expire-note'); if (en) en.innerHTML = '⚠ 该账号计费额度读取仍被官方网关拒绝（已自动附加浏览器 UA 仍失败，可能为账号权限或网关风控限制）。签到与宠物能量不受影响。';
+    const tb = $('pkg-body'); if (tb) tb.innerHTML = '<tr><td colspan="8" class="perm-denied">计费读取被网关拒绝 · 当前无法读取额度</td></tr>';
     const track = $('axis-track'); if (track) track.querySelectorAll('.axis-dot').forEach(n => n.remove());
     window.__quota = null;
     return;
@@ -985,7 +985,7 @@ function renderCheckinAll(results) {
   }).join('');
 }
 
-// ===== 全部账号额度（每个账号用各自 vault 快照登录态查官方 get-user-resource） =====
+// ===== 全部账号额度（每个账号用各自 vault 快照登录态查官方计费三接口） =====
 // 补齐 dashboard 只能看当前登录态单账号的局限：覆盖全部已登记账号，与本地消耗视图形成双视图。
 async function loadQuotaAll() {
   try {
@@ -1019,8 +1019,8 @@ function renderQuotaAll(results, opts) {
     const uid = r.uid;
     const nameCell = (rankNo ? `<b style="color:var(--amber)">#${idx + 1}</b> ` : '') + `<b>${escapeHtml(nick || uid)}</b><br><span style="font-size:10px;color:var(--muted)">${acctUidMask(uid)}</span>`;
     if (r.permission_denied) {
-      const tip = escapeHtml(r.permission_msg || '该账号桌面登录态无计费额度读取权限（官方网关限制）');
-      return `<tr><td>${nameCell}</td><td colspan="6" class="perm-denied" title="${tip}">⚠ 桌面 token 无计费读取权限<small style="display:block;color:var(--muted);font-weight:400;font-size:10px;">官方网关限制 · 签到/能量不受影响</small></td></tr>`;
+      const tip = escapeHtml(r.permission_msg || '该账号计费额度读取仍被官方网关拒绝（可能为账号权限或网关风控限制）');
+      return `<tr><td>${nameCell}</td><td colspan="6" class="perm-denied" title="${tip}">⚠ 计费读取被网关拒绝<small style="display:block;color:var(--muted);font-weight:400;font-size:10px;">可能为账号权限或风控限制 · 签到/能量不受影响</small></td></tr>`;
     }
     if (r.error && !r.body) {
       const msg = r.skipped ? '无登录态快照' : escapeHtml(r.error);
@@ -1140,7 +1140,7 @@ function exportQuotaMd() {
   for (const r of lastQuotaAllResults) {
     const uidm = r.uid ? acctUidMask(r.uid) : '?';
     const nick = acctLabel(r) || '?';
-    if (r.permission_denied) { lines.push(`- **${nick}** (\`${uidm}\`)：桌面 token 无计费读取权限（官方网关限制，无法读取额度）`); continue; }
+    if (r.permission_denied) { lines.push(`- **${nick}** (\`${uidm}\`)：计费读取被官方网关拒绝（可能为账号权限或风控限制，无法读取额度）`); continue; }
     if (r.error && !r.body) { lines.push(`- **${nick}** (\`${uidm}\`)：${r.skipped ? '无登录态快照' : (r.error || '失败')}`); continue; }
     const q = (r.parsed && Array.isArray(r.parsed.packages)) ? adaptParsed(r.parsed) : parseQuota(r.body);
     if (!q) { lines.push(`- **${nick}** (\`${uidm}\`)：解析失败 / 无数据`); continue; }
