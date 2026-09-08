@@ -207,6 +207,8 @@
       background:rgba(0,0,0,.3);border:1px solid var(--line);border-radius:11px;padding:13px;
       font-size:12px;line-height:1.7;white-space:pre-wrap;max-height:220px;overflow:auto;color:#c6cfe4;
     }
+    .trend-info{display:flex;gap:18px;flex-wrap:wrap;font-size:11.5px;color:var(--muted);align-items:center;}
+    .trend-info b{color:var(--fg);font-variant-numeric:tabular-nums;}
 
     /* ============ API 管理 ============ */
     .cur-bar{
@@ -512,6 +514,7 @@
           <div class="ring" id="jwt-ring"><div class="rt"><b id="jwt-days">—</b><span>天</span></div></div>
           <div class="kv" id="kv-jwt" style="flex:1;"><span class="empty">加载中…</span></div>
         </div>
+        <div class="meta" id="jwt-note" style="margin-top:10px;color:var(--muted);font-size:11px;line-height:1.6;"></div>
       </div>
     </div>
 
@@ -543,7 +546,8 @@
         </div>
         <div class="note ok" id="expire-note"></div>
         <div class="section-title" style="margin:14px 2px 6px;">额度趋势 <span class="tag" style="text-transform:none;letter-spacing:0;">本地记录（每次打开/刷新额度时追加，按日去重）</span></div>
-        <svg id="q-trend" viewBox="0 0 320 110" preserveAspectRatio="none" style="width:100%;height:110px;background:rgba(0,0,0,.24);border:1px solid var(--line);border-radius:11px;"></svg>
+        <div class="trend-info" id="q-trend-info" style="margin-bottom:6px;"></div>
+        <svg id="q-trend" viewBox="0 0 680 130" preserveAspectRatio="none" style="width:100%;height:130px;background:rgba(0,0,0,.24);border:1px solid var(--line);border-radius:11px;"></svg>
       </div>
 
       <div class="panel">

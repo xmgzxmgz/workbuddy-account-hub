@@ -529,6 +529,29 @@ fn first_str<'a>(obj: &'a Value, keys: &[&str]) -> Option<&'a str> {
     for k in keys { if let Some(s) = obj.get(k).and_then(|x| x.as_str()) { return Some(s); } }
     None
 }
+/// 取第一个「时间」值并统一为 "YYYY-MM-DD HH:MM:SS" 本地时间字符串。
+/// 2026-09-08 实测：新三接口里 DeductionEndTime 已从字符串日期改为毫秒时间戳数字
+/// （如 1789002140000），first_str 只认字符串导致取不到 → 前端全部显示「长期」、
+/// 「近期无待用套餐到期」误报。此处字符串原样返回，数字按本地时区格式化。
+fn first_time_val(obj: &Value, keys: &[&str]) -> Option<String> {
+    for k in keys {
+        match obj.get(k) {
+            Some(Value::String(s)) => { if !s.is_empty() { return Some(s.clone()); } }
+            Some(Value::Number(n)) => {
+                if let Some(ms) = n.as_i64() {
+                    if ms > 0 {
+                        use chrono::TimeZone;
+                        if let Some(dt) = chrono::Local.timestamp_millis_opt(ms).single() {
+                            return Some(dt.format("%Y-%m-%d %H:%M:%S").to_string());
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
 fn is_trial_pkg(a: &Value, code: &str, name: &str) -> bool {
     a.get("IsTrial").and_then(|x| x.as_bool()).unwrap_or(false)
         || code.to_lowercase().contains("trial")
@@ -594,7 +617,7 @@ pub fn parse_user_resource(raw: &Value) -> Value {
     let rid_k = ["ResourceId", "resourceId", "resource_id"];
     let code_k = ["PackageCode", "packageCode", "Code", "code"];
     let cyc_k = ["CycleEndTime", "cycleEndTime", "cycle_end"];
-    let ded_k = ["DeductionEndTime", "deductionEndTime", "ExpiresAt", "expiresAt", "expireTime", "DeductionEnd"];
+    let ded_k = ["DeductionEndTime", "deductionEndTime", "ExpiresAt", "expiresAt", "expireTime", "DeductionEnd", "ExpiredTime", "expiredTime"];
     let mut raw_pkgs: Vec<Value> = Vec::new();
     for a in accounts {
         let remain = first_num(a, &remain_k);
@@ -603,8 +626,8 @@ pub fn parse_user_resource(raw: &Value) -> Value {
         let name = first_str(a, &name_k).unwrap_or("—").to_string();
         let rid = first_str(a, &rid_k).unwrap_or("").to_string();
         let code = first_str(a, &code_k).unwrap_or("").to_string();
-        let cycle_end = first_str(a, &cyc_k).unwrap_or("").to_string();
-        let deduction_end = first_str(a, &ded_k).unwrap_or("").to_string();
+        let cycle_end = first_time_val(a, &cyc_k).unwrap_or_default();
+        let deduction_end = first_time_val(a, &ded_k).unwrap_or_default();
         let limit_num = a.get("LimitNum").and_then(|x| x.as_i64()).unwrap_or(0);
         let is_unlimited = limit_num == -1;
         let trial = is_trial_pkg(a, &code, &name);
