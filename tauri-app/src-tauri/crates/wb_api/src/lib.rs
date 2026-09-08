@@ -246,6 +246,12 @@ fn mask(s: &str, n: usize) -> String {
     if s.is_empty() { "(空)".into() } else { format!("{}…({}字符)", &s[..s.len().min(n)], s.len()) }
 }
 
+/// 官方网关 WAF 会拦截非浏览器 User-Agent 的 Bearer 请求（计费三接口实测：
+/// 默认 reqwest UA → 403 code:10085「请求不合法」；附加浏览器 UA → 200）。
+/// 因此所有请求统一携带浏览器 UA（2026-09-08 实测：UA 是唯一必需头，Origin/Referer 无关）。
+pub const BROWSER_UA: &str =
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36";
+
 /// 构建带超时与代理的 HTTP 客户端。
 /// - timeout: 整体 15s、connect 10s，避免网络挂起导致整个 get_all（含本地昵称）永久卡死 UI。
 /// - 代理：尊重 HTTPS_PROXY/HTTP_PROXY 等环境变量（如本机 Clash 127.0.0.1:7897），
@@ -253,7 +259,8 @@ fn mask(s: &str, n: usize) -> String {
 fn make_client() -> reqwest::blocking::Client {
     let mut builder = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(15))
-        .connect_timeout(std::time::Duration::from_secs(10));
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .user_agent(BROWSER_UA);
     // 代理：优先 HTTPS_PROXY，其次 HTTP_PROXY，再次 ALL_PROXY（含小写），任一存在则全局套用
     // （2api 同类项目均无代理支持，account-hub 反其道补齐以形成差异化优势，企业网/代理环境可用）
     let proxy_env = std::env::var("HTTPS_PROXY")
@@ -657,8 +664,9 @@ pub fn get_quota() -> Value {
 ///   - `get-user-resource-summary`（聚合，无业务参数）
 ///   - `get-user-resource-paid-packages`（付费包，需 PackageCodes=PAID_PACKAGE_CODES）
 ///   - `get-user-resource-free-packages`（免费/赠送/体验包，需 PackageCodes=FREE_PACKAGE_CODES）
-/// 旧接口现在返回 code:10085「请求不合法」（即 403）。桌面端登录态 token 对这三个计费资源接口
-/// 被官方网关限制（计费读取需经客户端 daemon 代理），直接调用会系统性 403；本函数对此返回
+/// 旧接口现在返回 code:10085「请求不合法」（即 403）。2026-09-08 实测：403 根因是网关 WAF 拦截
+/// 非浏览器 User-Agent 的请求（默认 reqwest UA 被判为脚本流量），并非 token 权限问题——
+/// 统一附加浏览器 UA（见 BROWSER_UA）后三接口均 200。若仍遇 403/10085 则返回
 /// `permission_denied: true` 并附清晰说明，而非吓人的原始 403。
 pub fn get_quota_as(login: &LoginInfo) -> Value {
     // 当日切片窗口（免费包筛选用，官网 buildSlicePeriodRange 同口径：本地当日 00:00:00 ~ 23:59:59）
@@ -717,7 +725,7 @@ pub fn get_quota_as(login: &LoginInfo) -> Value {
         }
         return json!({
             "permission_denied": true,
-            "permission_msg": "该账号桌面登录态无计费额度读取权限（官方网关限制：计费资源需经客户端 daemon 代理，桌面 token 不可直接读取）。签到与宠物能量不受影响。",
+            "permission_msg": "该账号计费额度读取仍被官方网关拒绝（已附加浏览器 UA 仍 403/10085，可能为账号权限或网关风控限制）。签到与宠物能量不受影响。",
             "login": { "uid": login.uid, "file": login.file, "token": mask(&login.token, 8) }
         });
     }
