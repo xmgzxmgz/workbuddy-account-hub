@@ -719,6 +719,104 @@ pub fn buddy_claim() -> Value {
     }
 }
 
+// ===== 宠物能量 / 盲盒抽奖（growth center） =====
+//
+// 成长中心「宠物能量 / 盲盒抽奖」是 Web 端功能（Electron 客户端只有 buddy travel）。
+// 接口均在 copilot.tencent.com 上，与登录态 token 绑定：
+//   GET  /activity/growth/energy           -> {code,msg,data:{balance,total_consumed,total_earned}}  （宠物能量余额）
+//   GET  /activity/growth/buddy/quota      -> {code,msg,data:{affordable,balance,cost_per_open,max_open_count}} （抽奖额度）
+//   POST /activity/growth/buddy/open       -> {"count":N} 抽奖；能量不足返回 {code:400,msg:"insufficient energy"}
+//
+// 「能量已满」判定：quota.affordable >= 1（即 balance >= cost_per_open，可抽至少 1 个盲盒）。
+
+const PET_ENERGY: &str = "/activity/growth/energy";
+const PET_QUOTA: &str = "/activity/growth/buddy/quota";
+const PET_OPEN: &str = "/activity/growth/buddy/open";
+
+/// 解析成长中心接口包裹体 {code,msg,data}，返回 (业务码, 文案, data)
+fn growth_unwrap(body: &Value) -> (i64, String, Value) {
+    let code = body.get("code").and_then(|x| x.as_i64()).unwrap_or(-1);
+    let msg = body.get("msg").and_then(|x| x.as_str()).unwrap_or("").to_string();
+    let data = body.get("data").cloned().unwrap_or(Value::Null);
+    (code, msg, data)
+}
+
+/// 查询宠物能量 + 抽奖额度（指定登录态），合并为统一结构。
+/// 返回 { ok, energy_balance, energy_earned, energy_consumed, cost_per_open,
+///        affordable, max_open_count, is_full, error? }
+pub fn pet_energy_as(login: &LoginInfo) -> Value {
+    let e = call_api_as(login, &format!("{}{}", API_BASE, PET_ENERGY), "GET", "");
+    let q = call_api_as(login, &format!("{}{}", API_BASE, PET_QUOTA), "GET", "");
+    let ev = match e { Ok(v) => v, Err(err) => return json!({ "ok": false, "error": err }) };
+    let qv = match q { Ok(v) => v, Err(err) => return json!({ "ok": false, "error": err }) };
+    let e_status = ev.get("status").and_then(|x| x.as_u64()).unwrap_or(0);
+    let q_status = qv.get("status").and_then(|x| x.as_u64()).unwrap_or(0);
+    if e_status != 200 || q_status != 200 {
+        return json!({ "ok": false, "error": format!("能量接口 HTTP {} / 额度接口 HTTP {}", e_status, q_status) });
+    }
+    let e_body = ev.get("body").cloned().unwrap_or(Value::Null);
+    let q_body = qv.get("body").cloned().unwrap_or(Value::Null);
+    let (e_code, _e_msg, e_data) = growth_unwrap(&e_body);
+    let (q_code, q_msg, q_data) = growth_unwrap(&q_body);
+    if e_code != 0 || q_code != 0 {
+        return json!({ "ok": false, "error": if q_msg.is_empty() { "能量查询失败：未知业务错误".into() } else { q_msg } });
+    }
+    let balance = q_data.get("balance").and_then(|x| x.as_f64()).unwrap_or(0.0);
+    let cost_per_open = q_data.get("cost_per_open").and_then(|x| x.as_f64()).unwrap_or(0.0);
+    let affordable = q_data.get("affordable").and_then(|x| x.as_i64()).unwrap_or(0);
+    let max_open_count = q_data.get("max_open_count").and_then(|x| x.as_i64()).unwrap_or(0);
+    let total_earned = e_data.get("total_earned").and_then(|x| x.as_f64()).unwrap_or(0.0);
+    let total_consumed = e_data.get("total_consumed").and_then(|x| x.as_f64()).unwrap_or(0.0);
+    let is_full = affordable >= 1;
+    json!({
+        "ok": true,
+        "energy_balance": balance,
+        "energy_earned": total_earned,
+        "energy_consumed": total_consumed,
+        "cost_per_open": cost_per_open,
+        "affordable": affordable,
+        "max_open_count": max_open_count,
+        "is_full": is_full
+    })
+}
+
+/// 查询宠物能量 + 抽奖额度（当前本机登录态）
+pub fn pet_energy() -> Value {
+    match load_login() {
+        Some(l) => pet_energy_as(&l),
+        None => json!({ "ok": false, "error": "未找到本机 WorkBuddy 登录态" }),
+    }
+}
+
+/// 抽盲盒（指定登录态）。count 为该次抽取个数（受 balance 与 max_open_count 双重限制）。
+/// 返回 { ok, status, message?, data?, error? }；能量不足时 data 为空且 error 含文案。
+pub fn pet_draw_as(login: &LoginInfo, count: u64) -> Value {
+    let cnt = if count < 1 { 1 } else { count };
+    let body = json!({ "count": cnt }).to_string();
+    let r = call_api_as(login, &format!("{}{}", API_BASE, PET_OPEN), "POST", &body);
+    match r {
+        Ok(v) => {
+            let status = v.get("status").and_then(|x| x.as_u64()).unwrap_or(0);
+            let b = v.get("body").cloned().unwrap_or(Value::Null);
+            let (code, msg, data) = growth_unwrap(&b);
+            if status != 200 || code != 0 {
+                let err = if msg.is_empty() { format!("HTTP {}", status) } else { msg.clone() };
+                return json!({ "ok": false, "status": status, "error": err, "body": b });
+            }
+            json!({ "ok": true, "status": status, "message": msg, "data": data, "body": b })
+        }
+        Err(e) => json!({ "ok": false, "error": e }),
+    }
+}
+
+/// 抽盲盒（当前本机登录态）
+pub fn pet_draw(count: u64) -> Value {
+    match load_login() {
+        Some(l) => pet_draw_as(&l, count),
+        None => json!({ "ok": false, "error": "未找到本机 WorkBuddy 登录态" }),
+    }
+}
+
 // ===== 本地信息 =====
 
 /// WorkBuddy 本机数据根目录（跨平台）：

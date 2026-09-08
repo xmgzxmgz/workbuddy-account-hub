@@ -803,6 +803,7 @@ async function loadBuddy() {
       renderBuddy(d);
       ok = true;
       refreshBuddyAll();   // 当前账号宠物加载完后，顺带拉取全部账号宠物状态
+      loadPetEnergyAll();  // 同时拉取全部账号宠物能量（盲盒抽奖前置）
     } else if (st.status && st.status !== 200) {
       buddyLogAdd('状态接口返回 ' + st.status, 'err');
     }
@@ -1290,6 +1291,80 @@ async function buddyClaimFor(uid) {
     buddyLogAdd('账号 ' + privacy(uid, { head: 4, tail: 4 }) + ' 领取失败: ' + String(em).slice(0, 80), 'err');
   }
   setTimeout(refreshBuddyAll, 1200);
+}
+
+// ===== 宠物能量 / 盲盒抽奖（growth center） =====
+let petEnergyCache = {};   // uid -> { affordable, max_open_count }
+
+function petLogAdd(msg, cls) {
+  const box = $('pet-energy-log'); if (!box) return;
+  box.style.display = 'block';
+  const t = new Date().toLocaleTimeString();
+  const line = document.createElement('div');
+  line.className = 'line ' + (cls || 'info');
+  line.innerHTML = `<span class="t">${t}</span>${escapeHtml(msg)}`;
+  box.prepend(line);
+}
+
+async function loadPetEnergyAll() {
+  const r = await invoke('pet_energy_all').catch(e => ({ error: String(e) }));
+  if (r && r.error) { toast('查询宠物能量失败: ' + r.error); petLogAdd('查询失败: ' + r.error, 'err'); return; }
+  renderPetEnergyAll(r.accounts || []);
+}
+
+function renderPetEnergyAll(accounts) {
+  const tb = $('pet-energy-tbody'); if (!tb) return;
+  petEnergyCache = {};
+  if (!accounts.length) { tb.innerHTML = '<tr><td colspan="6" class="empty">无账号</td></tr>'; return; }
+  tb.innerHTML = accounts.map(a => {
+    const uid = a.uid;
+    const nick = a.nickname ? privacy(a.nickname, { head: 3, tail: 4 }) : '';
+    const uidCell = `<td><b>${escapeHtml(nick || uid)}</b><br><span style="font-size:10px;color:var(--muted)">${privacy(uid, { head: 4, tail: 4 })}</span></td>`;
+    if (!a.has_login) {
+      return `<tr>${uidCell}<td colspan="5" class="soon">无登录态</td></tr>`;
+    }
+    if (a.error) {
+      return `<tr>${uidCell}<td colspan="5" class="soon">${escapeHtml(String(a.error))}</td></tr>`;
+    }
+    const balance = (a.energy_balance !== undefined && a.energy_balance !== null) ? a.energy_balance : 0;
+    const cost = (a.cost_per_open !== undefined && a.cost_per_open !== null) ? a.cost_per_open : 0;
+    const affordable = a.affordable || 0;
+    const maxOpen = a.max_open_count || 0;
+    const full = !!a.is_full;
+    petEnergyCache[uid] = { affordable, max_open_count: maxOpen };
+    const statusBadge = full
+      ? '<span class="pill" style="background:rgba(39,192,138,.18);color:var(--green)">能量已满 ✅</span>'
+      : '<span class="pill">未满</span>';
+    const drawBtn = `<button class="mini" ${full ? '' : 'disabled'} onclick="petDrawFor('${uid}')">抽盲盒${affordable > 1 ? (' ×' + affordable) : ''}</button>`;
+    return `<tr>
+      ${uidCell}
+      <td class="num">${balance}</td>
+      <td class="num">${cost}</td>
+      <td class="num">${affordable}</td>
+      <td>${statusBadge}</td>
+      <td style="white-space:nowrap;">${drawBtn}</td>
+    </tr>`;
+  }).join('');
+}
+
+async function petDrawFor(uid) {
+  const info = petEnergyCache[uid];
+  let count = 1;
+  if (info) {
+    const cap = info.max_open_count && info.max_open_count > 0 ? info.max_open_count : info.affordable;
+    count = Math.max(1, Math.min(info.affordable || 1, cap || info.affordable || 1));
+  }
+  petLogAdd('为账号 ' + privacy(uid, { head: 4, tail: 4 }) + ' 抽取 ' + count + ' 个盲盒…', 'info');
+  const r = await invoke('pet_draw_for', { uid: uid, count: count }).catch(e => ({ ok: false, error: String(e) }));
+  if (!r || r.error) {
+    const em = (r && r.error) ? r.error : '未知错误';
+    toast('抽盲盒失败: ' + em);
+    petLogAdd('账号 ' + privacy(uid, { head: 4, tail: 4 }) + ' 抽奖失败: ' + em, 'err');
+    return;
+  }
+  petLogAdd('账号 ' + privacy(uid, { head: 4, tail: 4 }) + ' 抽奖成功 🎉', 'ok');
+  toast('抽盲盒成功（账号 ' + privacy(uid, { head: 4, tail: 4 }) + '）');
+  setTimeout(loadPetEnergyAll, 800);   // 刷新能量（消耗后已变化）
 }
 
 // 自动轮询：旅行中每 20s 同步状态，到达后自动领取

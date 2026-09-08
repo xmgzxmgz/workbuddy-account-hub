@@ -544,6 +544,59 @@ fn buddy_claim_for(uid: String) -> Value {
     claim_one(&login, &uid, "")
 }
 
+// ---------- 宠物能量 / 盲盒抽奖（growth center） ----------
+
+/// 查询所有「已保存登录态」账号的宠物能量与抽奖额度，返回每个账号的能量是否已满。
+/// 与 buddy_all_status / quota_all 同构，覆盖 dashboard 只能看当前账号的局限。
+#[tauri::command]
+fn pet_energy_all() -> Value {
+    let vault = ops::vault_dir();
+    let accs = ops::list_accounts(&vault);
+    let mut accounts = Vec::new();
+    for a in accs {
+        if !a.has_snapshot {
+            accounts.push(json!({"uid": a.uid, "nickname": a.nickname, "has_login": false, "error": "无登录态快照"}));
+            continue;
+        }
+        let Some(login) = account_login(&vault, &a.uid) else {
+            accounts.push(json!({"uid": a.uid, "nickname": a.nickname, "has_login": false, "error": "登录态文件缺失或无效"}));
+            continue;
+        };
+        let r = api::pet_energy_as(&login);
+        if let Some(err) = r.get("error") {
+            accounts.push(json!({"uid": a.uid, "nickname": a.nickname, "has_login": true, "error": err}));
+            continue;
+        }
+        let balance = r.get("energy_balance").and_then(|x| x.as_f64()).unwrap_or(0.0);
+        let cost = r.get("cost_per_open").and_then(|x| x.as_f64()).unwrap_or(0.0);
+        let affordable = r.get("affordable").and_then(|x| x.as_i64()).unwrap_or(0);
+        let max_open = r.get("max_open_count").and_then(|x| x.as_i64()).unwrap_or(0);
+        let earned = r.get("energy_earned").and_then(|x| x.as_f64()).unwrap_or(0.0);
+        let consumed = r.get("energy_consumed").and_then(|x| x.as_f64()).unwrap_or(0.0);
+        let is_full = r.get("is_full").and_then(|x| x.as_bool()).unwrap_or(false);
+        accounts.push(json!({
+            "uid": a.uid, "nickname": a.nickname, "has_login": true,
+            "energy_balance": balance, "cost_per_open": cost,
+            "affordable": affordable, "max_open_count": max_open,
+            "energy_earned": earned, "energy_consumed": consumed,
+            "is_full": is_full
+        }));
+    }
+    json!({ "ok": true, "accounts": accounts })
+}
+
+/// 单个账号：抽盲盒（用其 vault 快照登录态 token 发请求）。
+/// count 默认抽满当前可抽数量（受能量与每日上限限制）；返回 { ok, status, message?, data?, error? }
+#[tauri::command]
+fn pet_draw_for(uid: String, count: Option<u64>) -> Value {
+    let vault = ops::vault_dir();
+    let Some(login) = account_login(&vault, &uid) else {
+        return json!({"uid": uid, "ok": false, "error": "登录态文件缺失或无效"});
+    };
+    let cnt = count.unwrap_or(1);
+    api::pet_draw_as(&login, cnt)
+}
+
 // ---------- 模型 / API 管理（wb_api::models） ----------
 
 #[tauri::command]
@@ -686,6 +739,8 @@ pub fn run() {
             buddy_all_claim,
             buddy_depart_for,
             buddy_claim_for,
+            pet_energy_all,
+            pet_draw_for,
             list_accounts,
             snapshot_current,
             ensure_snapshot,
