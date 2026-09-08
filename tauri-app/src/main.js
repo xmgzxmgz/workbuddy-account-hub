@@ -338,6 +338,20 @@ function adaptParsed(p) {
   };
 }
 function renderQuota(payload) {
+  // 权限受限：桌面 token 无计费读取权限（官方网关限制），给出清晰说明而非空白
+  if (payload && payload.permission_denied) {
+    const set = (id, v) => { const el = $(id); if (el) el.textContent = v; };
+    set('ov-gift', '—'); set('ov-gift-m', '无读取权限');
+    set('ov-trial', '—'); set('ov-trial-m', '无读取权限');
+    set('ov-grand', '—'); set('ov-grand-m', '无读取权限');
+    set('q-use', '—'); set('q-use-m', '—');
+    set('q-count', '—'); set('q-expire', '受限');
+    const en = $('expire-note'); if (en) en.innerHTML = '⚠ 该账号桌面登录态无计费额度读取权限（官方网关限制：计费资源需经客户端 daemon 代理，桌面 token 不可直接读取）。签到与宠物能量不受影响。';
+    const tb = $('pkg-body'); if (tb) tb.innerHTML = '<tr><td colspan="8" class="perm-denied">无计费读取权限（官方限制）· 当前无法读取额度</td></tr>';
+    const track = $('axis-track'); if (track) track.querySelectorAll('.axis-dot').forEach(n => n.remove());
+    window.__quota = null;
+    return;
+  }
   // 优先用后端标准化解析（parsed：含别名兼容/合并/企业不限量），失败回退前端 parseQuota 解析原始 body
   let q;
   if (payload && payload.parsed && Array.isArray(payload.parsed.packages)) {
@@ -1004,6 +1018,10 @@ function renderQuotaAll(results, opts) {
     const nick = acctLabel(r);
     const uid = r.uid;
     const nameCell = (rankNo ? `<b style="color:var(--amber)">#${idx + 1}</b> ` : '') + `<b>${escapeHtml(nick || uid)}</b><br><span style="font-size:10px;color:var(--muted)">${acctUidMask(uid)}</span>`;
+    if (r.permission_denied) {
+      const tip = escapeHtml(r.permission_msg || '该账号桌面登录态无计费额度读取权限（官方网关限制）');
+      return `<tr><td>${nameCell}</td><td colspan="6" class="perm-denied" title="${tip}">⚠ 桌面 token 无计费读取权限<small style="display:block;color:var(--muted);font-weight:400;font-size:10px;">官方网关限制 · 签到/能量不受影响</small></td></tr>`;
+    }
     if (r.error && !r.body) {
       const msg = r.skipped ? '无登录态快照' : escapeHtml(r.error);
       return `<tr><td>${nameCell}</td><td colspan="6" style="color:var(--muted)">${msg}</td></tr>`;
@@ -1122,6 +1140,7 @@ function exportQuotaMd() {
   for (const r of lastQuotaAllResults) {
     const uidm = r.uid ? acctUidMask(r.uid) : '?';
     const nick = acctLabel(r) || '?';
+    if (r.permission_denied) { lines.push(`- **${nick}** (\`${uidm}\`)：桌面 token 无计费读取权限（官方网关限制，无法读取额度）`); continue; }
     if (r.error && !r.body) { lines.push(`- **${nick}** (\`${uidm}\`)：${r.skipped ? '无登录态快照' : (r.error || '失败')}`); continue; }
     const q = (r.parsed && Array.isArray(r.parsed.packages)) ? adaptParsed(r.parsed) : parseQuota(r.body);
     if (!q) { lines.push(`- **${nick}** (\`${uidm}\`)：解析失败 / 无数据`); continue; }
@@ -1479,7 +1498,7 @@ function loadNetworkParts() {
     });
   };
   retry(() => invoke('get_quota').then(j => {
-    if (j && j.status === 200) { renderQuota(j); return true; }
+    if (j && (j.status === 200 || j.permission_denied)) { renderQuota(j); return true; }
     return false;   // 静默失败，交给重试兜底，避免启动时反复弹 toast
   }).catch(e => { console.warn('quota err', e); return false; }), 0);
 
@@ -1517,7 +1536,7 @@ async function loadQuota() {
   try {
     const j = await invoke('get_quota');
     $('raw-out').textContent = JSON.stringify(j, null, 2);
-    if (j.status === 200) renderQuota(j);
+    if (j.status === 200 || j.permission_denied) renderQuota(j);
   } catch (e) { $('raw-out').textContent = '错误：' + e; }
 }
 async function doCheckin() {
