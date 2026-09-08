@@ -252,7 +252,7 @@ fn quota_all() -> Value {
     let vault = ops::vault_dir();
     let accs = ops::list_accounts(&vault);
     let mut results = Vec::new();
-    let mut ok = 0u32; let mut fail = 0u32; let mut skipped = 0u32;
+    let mut ok = 0u32; let mut fail = 0u32; let mut skipped = 0u32; let mut denied = 0u32;
     for a in &accs {
         if !a.has_snapshot {
             results.push(json!({"uid": a.uid, "nickname": a.nickname, "ok": false, "skipped": true, "error": "无登录态快照"}));
@@ -263,6 +263,19 @@ fn quota_all() -> Value {
             skipped += 1; continue;
         };
         let r = api::get_quota_as(&login);
+        // 桌面 token 无计费读取权限（官方网关限制）：透传 permission_denied
+        if r.get("permission_denied").and_then(|x| x.as_bool()).unwrap_or(false) {
+            denied += 1;
+            let cached = r.get("cached").is_some();
+            results.push(json!({
+                "uid": a.uid, "nickname": a.nickname, "ok": false, "permission_denied": true,
+                "permission_msg": r.get("permission_msg").and_then(|x| x.as_str()).unwrap_or(""),
+                "cached": cached,
+                "body": r.get("body").cloned().unwrap_or(Value::Null),
+                "parsed": r.get("parsed").cloned().unwrap_or(Value::Null)
+            }));
+            continue;
+        }
         if let Some(err) = r.get("error") {
             let emsg = err.as_str().unwrap_or("");
             let (kind, cooldown) = classify_checkin_err(emsg);
@@ -278,7 +291,7 @@ fn quota_all() -> Value {
             "parsed": r.get("parsed").cloned().unwrap_or(Value::Null)
         }));
     }
-    json!({ "ok": true, "results": results, "summary": { "total": results.len(), "ok": ok, "fail": fail, "skipped": skipped } })
+    json!({ "ok": true, "results": results, "summary": { "total": results.len(), "ok": ok, "fail": fail, "skipped": skipped, "denied": denied } })
 }
 
 /// 单个账号签到（用于全部账号额度表格里的逐行操作，幂等：已签则跳过）
