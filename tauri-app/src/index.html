@@ -451,6 +451,26 @@
       </div>
     </div>
 
+    <div class="section-title">宠物能量 · 盲盒抽奖 🎁</div>
+    <div class="grid">
+      <div class="panel">
+        <h2>全部账号宠物能量 <span class="tag">/activity/growth/energy · 满即可抽盲盒解锁新 buddy</span>
+          <span style="flex:1"></span>
+          <button class="mini" onclick="loadPetEnergyAll()">查询全部能量</button>
+        </h2>
+        <div class="kv" style="margin-bottom:10px;">
+          <div class="item" style="border-bottom:none;"><span class="k">说明</span><span class="v" style="max-width:100%;white-space:normal;font-weight:400;">「能量已满」= 当前能量 ≥ 每抽消耗（即 affordable ≥ 1），此时点「抽盲盒」可消耗能量抽盲盒解锁新 buddy。每个账号用各自登录态分别查询。</span></div>
+        </div>
+        <div style="max-height:340px;overflow:auto;">
+          <table>
+            <thead><tr><th>账号</th><th class="num">当前能量</th><th class="num">每抽消耗</th><th class="num">可抽</th><th>状态</th><th>操作</th></tr></thead>
+            <tbody id="pet-energy-tbody"><tr><td colspan="6" class="empty">点击「🐾 宠物」或「查询全部能量」加载各账号宠物能量</td></tr></tbody>
+          </table>
+        </div>
+        <div id="pet-energy-log" class="buddy-log" style="margin-top:10px;display:none;"></div>
+      </div>
+    </div>
+
     <div class="section-title">AI 记忆 · 环境</div>
     <div class="grid">
       <div class="panel">
