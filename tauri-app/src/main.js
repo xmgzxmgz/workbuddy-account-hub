@@ -285,6 +285,14 @@ function renderJwt(j) {
   $('jwt-days').textContent = days;
   $('ov-jwt').textContent = days + ' 天';
   $('ov-jwt-m').textContent = '过期 ' + (j.expires_at || '—').slice(0, 10);
+  // 2026-09-08 实测：本机 JWT 的 iat 每天都在变（客户端重新认证时自动续签），
+  // 所以剩余天数总是 ≈60 天——这是官方会话机制，不是显示错误。如实标注避免误解。
+  const note = $('jwt-note');
+  if (note) {
+    note.innerHTML = 'ℹ️ 剩余天数总是 ≈60 天属正常现象：官方 Keycloak 会话会自动续签，' +
+      '客户端每次重新认证都会刷新 token（签发时间更新、剩余天数重置）。' +
+      '只有长期不打开客户端、或官方吊销会话时剩余天数才会真正下降。';
+  }
 }
 function renderEnv(j) {
   if (!j) { $('kv-env').innerHTML = '<span class="empty">无数据</span>'; return; }
@@ -1095,11 +1103,23 @@ function recordTrend(uid, remain) {
   try { localStorage.setItem(trendKey(uid), JSON.stringify(arr)); } catch {}
 }
 function getTrend(uid) { try { return JSON.parse(localStorage.getItem(trendKey(uid)) || '[]'); } catch { return []; } }
+function fmtQty(n) {
+  if (n == null || isNaN(n)) return '—';
+  const v = Number(n);
+  if (Math.abs(v) >= 1000) return v.toFixed(0);
+  if (Math.abs(v) >= 100) return v.toFixed(1);
+  return v.toFixed(2);
+}
 function renderTrend(uid) {
   const svg = $('q-trend'); if (!svg) return;
+  const info = $('q-trend-info');
   const arr = getTrend(uid);
-  if (!arr.length) { svg.innerHTML = '<text x="160" y="58" fill="var(--muted)" font-size="11" text-anchor="middle">暂无趋势数据（打开/刷新额度后记录）</text>'; return; }
-  const W = 320, H = 110, p = 8;
+  if (!arr.length) {
+    if (info) info.innerHTML = '<span class="empty">暂无趋势数据（打开/刷新额度后记录）</span>';
+    svg.innerHTML = '';
+    return;
+  }
+  const W = 680, H = 130, p = 10;
   const vals = arr.map(x => x.remain);
   const max = Math.max(1, ...vals), min = Math.min(0, ...vals), span = (max - min) || 1;
   const n = arr.length;
@@ -1107,12 +1127,19 @@ function renderTrend(uid) {
   const Y = v => H - p - ((v - min) / span) * (H - 2 * p);
   const pts = arr.map((x, i) => `${X(i).toFixed(1)},${Y(x.remain).toFixed(1)}`).join(' ');
   const area = `${X(0).toFixed(1)},${(H - p).toFixed(1)} ${pts} ${X(n - 1).toFixed(1)},${(H - p).toFixed(1)}`;
-  const lab = n > 1 ? `<text x="${X(0).toFixed(1)}" y="${H - 1}" fill="var(--muted)" font-size="8">${arr[0].date.slice(5)}</text><text x="${X(n - 1).toFixed(1)}" y="${H - 1}" fill="var(--muted)" font-size="8" text-anchor="end">${arr[n - 1].date.slice(5)}</text>` : '';
   svg.innerHTML =
-    `<polygon points="${area}" fill="rgba(80,200,140,.12)"/>` +
-    `<polyline points="${pts}" fill="none" stroke="var(--green)" stroke-width="1.6"/>` +
-    arr.map((x, i) => `<circle cx="${X(i).toFixed(1)}" cy="${Y(x.remain).toFixed(1)}" r="1.8" fill="var(--green)"/>`).join('') +
-    `<text x="${W - p}" y="${p + 8}" fill="var(--muted)" font-size="8" text-anchor="end">峰值 ${max.toFixed(1)}</text>` + lab;
+    `<polygon points="${area}" fill="rgba(61,220,151,.10)"/>` +
+    `<polyline points="${pts}" fill="none" stroke="var(--green)" stroke-width="1.8" vector-effect="non-scaling-stroke"/>` +
+    arr.map((x, i) => `<circle cx="${X(i).toFixed(1)}" cy="${Y(x.remain).toFixed(1)}" r="2.2" fill="var(--green)" vector-effect="non-scaling-stroke"/>`).join('');
+  // 文字信息放 HTML 行，避免被 preserveAspectRatio=none 拉伸变形
+  const last = arr[n - 1];
+  if (info) {
+    info.innerHTML =
+      `<span>峰值 <b style="color:var(--green);">${fmtQty(max)}</b></span>` +
+      `<span>当前 <b>${fmtQty(last.remain)}</b></span>` +
+      `<span>区间 <b>${arr[0].date.slice(5)} ~ ${last.date.slice(5)}</b></span>` +
+      `<span>记录 <b>${n}</b> 天</span>`;
+  }
 }
 function renderBudgetBar(q) {
   const fill = $('q-budget-fill'), txt = $('q-budget-txt');
