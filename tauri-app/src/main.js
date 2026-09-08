@@ -160,14 +160,37 @@ function privacy(val, opt) {
   return `<span class="psec"><span class="pre">${escapeHtml(pre)}</span><span class="${midCls}">${escapeHtml(mid)}</span><span class="suf">${escapeHtml(suf)}</span></span>`;
 }
 
+// ===== 账号列展示（干净脱敏，避免 privacy 拆三段导致的乱码观感） =====
+// 手机号 → 138****7093；中文昵称/名字原样；无昵称时回退脱敏 uid（3913••d3）
+function acctUidMask(uid) {
+  const s = String(uid == null ? '' : uid);
+  if (!s) return '—';
+  if (s.length <= 6) return s;
+  return s.slice(0, 4) + '••' + s.slice(-2);
+}
+function acctLabel(a) {
+  const nick = (a && (a.nickname || a.name)) || '';
+  if (/^\d{11}$/.test(nick)) return nick.slice(0, 3) + '****' + nick.slice(-4); // 11 位手机号脱敏
+  if (nick) return nick; // 昵称/中文名等原样显示
+  return acctUidMask(a && a.uid);
+}
+
+// 手机号/数字账号脱敏：138****7093（长度不足或空直接原样/—）
+function maskPhone(p) {
+  const s = String(p == null ? '' : p);
+  if (!s || s === '—') return '—';
+  if (s.length <= 6) return s;
+  return s.slice(0, 3) + '****' + s.slice(-4);
+}
+
 // ===== 侧边栏：账号管理（快照 / 切换） =====
 let accountsCache = [];
 function renderSidebar(j) {
   const cur = j.current_uid || (j.login && j.login.uid);
   if (j.login) {
     $('me-av').textContent = '👤';
-    $('me-nm').innerHTML = privacy(j.login.nickname || j.login.uid, { head: 3, tail: 4, safe: false });
-    $('me-id').innerHTML = privacy(j.login.uid, { head: 4, tail: 4, safe: false });
+    $('me-nm').innerHTML = escapeHtml(acctLabel({ nickname: j.login.nickname, uid: j.login.uid }));
+    $('me-id').innerHTML = escapeHtml(acctUidMask(j.login.uid));
     $('me-type').textContent = j.login.type === 'personal' ? '个人账号' : (j.login.type || '—');
   }
   const al = $('acc-list'); al.innerHTML = '';
@@ -216,9 +239,9 @@ function showAccountDetail(a, all) {
   const curUid = (window.__login && window.__login.uid) || ((all.find(x => x.current) || {}).uid);
   const isCur = a.current === true || (curUid && a.uid === curUid);
   const items = [
-    ['昵称', a.nickname ? privacy(a.nickname, { head: 3, tail: 4 }) : '—'],
-    ['UID', privacy(a.uid, { head: 4, tail: 4 })],
-    ['手机号', privacy(a.phoneNumber || '—', { head: 3, tail: 4, safe: !a.phoneNumber })],
+    ['昵称', acctLabel(a)],
+    ['UID', acctUidMask(a.uid)],
+    ['手机号', maskPhone(a.phoneNumber)],
     ['账号类型', escapeHtml(a.type === 'personal' ? '个人' : '—')], ['最近登录', a.lastLogin ? '是' : '否'],
     ['创建者', a.isCreator ? '是' : '否'], ['管理员', a.isAdmin ? '是' : '否'],
   ];
@@ -226,7 +249,7 @@ function showAccountDetail(a, all) {
   $('kv-jwt').innerHTML = '<span class="empty">已选账号非当前登录态，JWT/积分需切换 WorkBuddy 登录后查看</span>';
   $('memo-foryou').textContent = isCur ? '（当前登录账号，刷新全部可加载记忆画像）' : '（需在 WorkBuddy 中切换到该账号后才能读取其记忆画像）';
   $('pkg-body').innerHTML = '';
-  $('raw-out').innerHTML = '已选中账号：' + (a.nickname ? privacy(a.nickname, { head: 3, tail: 4 }) : '') + ' (' + privacy(a.uid, { head: 4, tail: 4 }) + ')\n<span class="dim">' +
+  $('raw-out').innerHTML = '已选中账号：' + acctLabel(a) + ' (' + acctUidMask(a.uid) + ')\n<span class="dim">' +
     (isCur ? '即当前登录态，点「刷新全部」加载完整数据。' : '非当前登录态。本工具只读当前登录态文件，无法直接拉取该账号远程数据（需先在 WorkBuddy 切换账号）。') + '</span>';
 }
 
@@ -234,15 +257,15 @@ function showAccountDetail(a, all) {
 function renderAccount(j) {
   if (!j || !j.uid) { $('kv-account').innerHTML = '<span class="empty">未找到登录态</span>'; return; }
   const items = [
-    ['昵称', j.nickname ? privacy(j.nickname, { head: 3, tail: 4 }) : '—'],
-    ['UID', privacy(j.uid, { head: 4, tail: 4 })],
-    ['UIN', privacy(j.uin || '—', { head: 3, tail: 3, safe: !j.uin })],
+    ['昵称', acctLabel({ nickname: j.nickname, uid: j.uid })],
+    ['UID', acctUidMask(j.uid)],
+    ['UIN', maskPhone(j.uin)],
     ['账号类型', escapeHtml(j.type === 'personal' ? '个人账号' : (j.type || '—'))],
-    ['手机号', privacy(j.phoneNumber || '—', { head: 3, tail: 4, safe: !j.phoneNumber })],
+    ['手机号', maskPhone(j.phoneNumber)],
     ['最近登录', j.lastLogin ? '是' : '否'], ['管理员', j.isAdmin ? '是' : '否'],
   ];
   $('kv-account').innerHTML = items.map(([k, v]) => `<div class="item"><span class="k">${k}</span><span class="v">${v}</span></div>`).join('');
-  const st = $('status-text'); if (st) st.innerHTML = '已读取 ' + (j.nickname ? privacy(j.nickname, { head: 3, tail: 4 }) : '') + ' · ' + privacy(j.uid, { head: 4, tail: 4 });
+  const st = $('status-text'); if (st) st.innerHTML = '已读取 ' + acctLabel({ nickname: j.nickname, uid: j.uid }) + ' · ' + acctUidMask(j.uid);
 }
 function renderJwt(j) {
   if (!j || j.error) { $('kv-jwt').innerHTML = '<span class="empty">解析失败</span>'; $('jwt-ring').style.setProperty('--p', 0); return; }
@@ -397,8 +420,8 @@ function renderMemory(body) {
   const d = body?.data;
   if (!d) { $('kv-memory').innerHTML = '<span class="empty">无数据</span>'; return; }
   const items = [
-    ['用户 ID', privacy(d.user_id, { head: 4, tail: 4, safe: !d.user_id })],
-    ['用户名', privacy(d.user_name, { head: 3, tail: 3, safe: !d.user_name })],
+    ['用户 ID', acctUidMask(d.user_id)],
+    ['用户名', escapeHtml(acctLabel({ nickname: d.user_name }))],
     ['更新时间', (d.updated_at || d.updatedAt || '—')], ['版本', d.version ?? '—'],
   ];
   $('kv-memory').innerHTML = items.map(([k, v]) => `<div class="item"><span class="k">${k}</span><span class="v">${v || '—'}</span></div>`).join('');
@@ -601,7 +624,7 @@ function showAccountList(accs, cur) {
     div.dataset.uid = a.uid;
     div.innerHTML = `
       <div class="dot">${initial}</div>
-      <div class="info"><div class="n">${a.nickname ? privacy(a.nickname, { head: 3, tail: 4 }) : '(无昵称)'}</div><div class="s">${privacy(a.uid, { head: 4, tail: 4 })}</div></div>
+      <div class="info"><div class="n">${escapeHtml(a.nickname ? acctLabel(a) : '(无昵称)')}</div><div class="s">${escapeHtml(acctUidMask(a.uid))}</div></div>
       ${badge}
       <div class="acc-actions">${starBtn}${tagBtn}</div>`;
     div.onclick = () => selectAccount(a, accs);
@@ -650,7 +673,7 @@ async function renderBackups() {
     const items = groups[uid].sort((a, b) => (b.ts > a.ts ? 1 : -1));
     const sec = document.createElement('div');
     sec.style.marginBottom = '14px';
-    sec.innerHTML = `<div style="font-size:11px;color:var(--muted);margin:6px 2px 6px;font-weight:600;">账号 ${privacy(uid, { head: 4, tail: 4, safe: false })} · ${items.length} 份</div>`;
+    sec.innerHTML = `<div style="font-size:11px;color:var(--muted);margin:6px 2px 6px;font-weight:600;">账号 ${escapeHtml(acctUidMask(uid))} · ${items.length} 份</div>`;
     const list = document.createElement('div');
     items.forEach(b => {
       const row = document.createElement('div');
@@ -675,10 +698,10 @@ async function openBackupDetail(uid, ts) {
   catch (e) { toast('读取备份详情失败: ' + e); return; }
   if (!meta) return;
   const head = $('bk-detail-head');
-  head.innerHTML = `备份详情 · ${privacy(uid, { head: 4, tail: 4, safe: false })} @ ${fmtTs(ts)}${meta.is_latest ? ' <span class="badge bk-latest">最新</span>' : ''}`;
+  head.innerHTML = `备份详情 · ${escapeHtml(acctUidMask(uid))} @ ${fmtTs(ts)}${meta.is_latest ? ' <span class="badge bk-latest">最新</span>' : ''}`;
   const kv = [
     ['备份时间', fmtTs(meta.ts)],
-    ['UID', privacy(meta.uid, { head: 4, tail: 4, safe: false })],
+    ['UID', acctUidMask(meta.uid)],
     ['文件数量', (meta.file_count ?? 0) + ' 个'],
     ['含登录态', meta.auth_included ? '是（auth.info）' : '否'],
     ['总大小', fmtBytes(meta.bytes)],
@@ -928,7 +951,7 @@ function renderCheckinAll(results) {
   const tb = $('ck-all-tbody'); if (!tb) return;
   if (!results.length) { tb.innerHTML = '<tr><td colspan="4" class="empty">无已登录账号</td></tr>'; return; }
   tb.innerHTML = results.map(r => {
-    const nick = r.nickname ? privacy(r.nickname, { head: 3, tail: 4 }) : '';
+    const nick = acctLabel(r);
     const uid = r.uid;
     const skipped = r.skipped;
     // 修复：无登录态快照等「未执行」情形后端标记 skipped=true（与宠物批量口径一致），
@@ -940,7 +963,7 @@ function renderCheckinAll(results) {
     const statusTxt = r.error ? (r.skipped ? '跳过' : '—') : (skipped ? '已签' : (r.ok ? '新签' : '—'));
     const msg = r.error ? escapeHtml(r.error) : (r.message || (skipped ? '今日已签到' : '签到成功'));
     return `<tr>
-      <td><b>${escapeHtml(nick || uid)}</b><br><span style="font-size:10px;color:var(--muted)">${privacy(uid, { head: 4, tail: 4 })}</span></td>
+      <td><b>${escapeHtml(nick || uid)}</b><br><span style="font-size:10px;color:var(--muted)">${acctUidMask(uid)}</span></td>
       <td>${state}</td>
       <td>${statusTxt}</td>
       <td style="color:var(--muted)">${msg}</td>
@@ -978,9 +1001,9 @@ function renderQuotaAll(results, opts) {
   let sg = 0, st = 0, sq = 0, cnt = 0;
   const rankNo = !!opts.rank;
   tb.innerHTML = rows.map((r, idx) => {
-    const nick = r.nickname ? privacy(r.nickname, { head: 3, tail: 4 }) : '';
+    const nick = acctLabel(r);
     const uid = r.uid;
-    const nameCell = (rankNo ? `<b style="color:var(--amber)">#${idx + 1}</b> ` : '') + `<b>${escapeHtml(nick || uid)}</b><br><span style="font-size:10px;color:var(--muted)">${privacy(uid, { head: 4, tail: 4 })}</span>`;
+    const nameCell = (rankNo ? `<b style="color:var(--amber)">#${idx + 1}</b> ` : '') + `<b>${escapeHtml(nick || uid)}</b><br><span style="font-size:10px;color:var(--muted)">${acctUidMask(uid)}</span>`;
     if (r.error && !r.body) {
       const msg = r.skipped ? '无登录态快照' : escapeHtml(r.error);
       return `<tr><td>${nameCell}</td><td colspan="6" style="color:var(--muted)">${msg}</td></tr>`;
@@ -1097,8 +1120,8 @@ function exportQuotaMd() {
   if (!lastQuotaAllResults) { toast('请先查询全部额度', 'err'); return; }
   const lines = ['# WorkBuddy 账户中枢 · 额度导出（脱敏）', '', `> 导出时间：${new Date().toLocaleString('zh-CN')}`, ''];
   for (const r of lastQuotaAllResults) {
-    const uidm = r.uid ? privacy(r.uid, { head: 4, tail: 4, safe: false }) : '?';
-    const nick = r.nickname ? privacy(r.nickname, { head: 3, tail: 4 }) : '?';
+    const uidm = r.uid ? acctUidMask(r.uid) : '?';
+    const nick = acctLabel(r) || '?';
     if (r.error && !r.body) { lines.push(`- **${nick}** (\`${uidm}\`)：${r.skipped ? '无登录态快照' : (r.error || '失败')}`); continue; }
     const q = (r.parsed && Array.isArray(r.parsed.packages)) ? adaptParsed(r.parsed) : parseQuota(r.body);
     if (!q) { lines.push(`- **${nick}** (\`${uidm}\`)：解析失败 / 无数据`); continue; }
@@ -1139,15 +1162,15 @@ function renderMemoryAll(results) {
   const box = $('memory-all'); if (!box) return;
   if (!results || !results.length) { box.innerHTML = '<span class="empty">无已登录账号</span>'; return; }
   box.innerHTML = results.map(r => {
-    const nick = r.nickname ? privacy(r.nickname, { head: 3, tail: 4 }) : '';
+    const nick = acctLabel(r);
     const uid = r.uid;
-    const head = `<div class="mem-head">🗂 <b>${escapeHtml(nick || uid)}</b> <span style="font-size:10px;color:var(--muted)">${privacy(uid, { head: 4, tail: 4 })}</span></div>`;
+    const head = `<div class="mem-head">🗂 <b>${escapeHtml(nick || uid)}</b> <span style="font-size:10px;color:var(--muted)">${acctUidMask(uid)}</span></div>`;
     if (r.error && !r.body) { const msg = r.skipped ? '无登录态快照' : escapeHtml(r.error); return `<div class="mem-card">${head}<div class="sec-body" style="margin-top:6px;color:var(--muted)">${msg}</div></div>`; }
     const d = r.body?.data;
     if (!d) { return `<div class="mem-card">${head}<div class="sec-body" style="margin-top:6px;color:var(--red)">无数据 / 解析失败</div></div>`; }
     const items = [
-      ['用户 ID', privacy(d.user_id, { head: 4, tail: 4, safe: !d.user_id })],
-      ['用户名', privacy(d.user_name, { head: 3, tail: 3, safe: !d.user_name })],
+      ['用户 ID', acctUidMask(d.user_id)],
+      ['用户名', escapeHtml(acctLabel({ nickname: d.user_name }))],
       ['更新时间', (d.updated_at || d.updatedAt || '—')], ['版本', d.version ?? '—'],
     ];
     const kv = items.map(([k, v]) => `<div class="item"><span class="k">${k}</span><span class="v">${v || '—'}</span></div>`).join('');
@@ -1178,7 +1201,7 @@ function renderBuddyAll(accounts) {
   const tb = $('buddy-all-tbody'); if (!tb) return;
   if (!accounts.length) { tb.innerHTML = '<tr><td colspan="6" class="empty">无账号</td></tr>'; return; }
   tb.innerHTML = accounts.map(a => {
-    const nick = a.nickname ? privacy(a.nickname, { head: 3, tail: 4 }) : '';
+    const nick = acctLabel(a);
     const uid = a.uid;
     const noLogin = !a.has_login;
     const stateBadge = noLogin ? '<span class="soon">无登录态</span>'
@@ -1192,7 +1215,7 @@ function renderBuddyAll(accounts) {
     const departBtn = `<button class="mini" ${idle ? '' : 'disabled'} onclick="buddyDepartFor('${uid}')">派出</button>`;
     const claimBtn = `<button class="mini" ${arrived ? '' : 'disabled'} onclick="buddyClaimFor('${uid}')">领取</button>`;
     return `<tr>
-      <td><b>${escapeHtml(nick || uid)}</b><br><span style="font-size:10px;color:var(--muted)">${privacy(uid, { head: 4, tail: 4 })}</span></td>
+      <td><b>${escapeHtml(nick || uid)}</b><br><span style="font-size:10px;color:var(--muted)">${acctUidMask(uid)}</span></td>
       <td>${stateBadge}</td>
       <td>${loc}</td>
       <td>${escapeHtml(String(reward))}</td>
@@ -1228,7 +1251,7 @@ function renderBuddyDepartAll(results) {
   const tb = $('buddy-all-tbody'); if (!tb) return;
   if (!results.length) { tb.innerHTML = '<tr><td colspan="6" class="empty">无已登录账号</td></tr>'; return; }
   tb.innerHTML = results.map(r => {
-    const nick = r.nickname ? privacy(r.nickname, { head: 3, tail: 4 }) : '';
+    const nick = acctLabel(r);
     const uid = r.uid;
     let outcome, reason;
     if (r.error) { outcome = '<span class="soon">请求失败</span>'; reason = r.error; }
@@ -1236,7 +1259,7 @@ function renderBuddyDepartAll(results) {
     else if (r.ok) { outcome = '<span class="ok">派出成功</span>'; reason = r.reason || r.message || '已出发'; }
     else { outcome = '<span class="soon">失败</span>'; reason = r.reason || r.message || ('HTTP ' + (r.status || '?')); }
     return `<tr>
-      <td><b>${escapeHtml(nick || uid)}</b><br><span style="font-size:10px;color:var(--muted)">${privacy(uid, { head: 4, tail: 4 })}</span></td>
+      <td><b>${escapeHtml(nick || uid)}</b><br><span style="font-size:10px;color:var(--muted)">${acctUidMask(uid)}</span></td>
       <td>${outcome}</td>
       <td colspan="3" style="color:var(--muted)">${escapeHtml(String(reason))}</td>
       <td style="white-space:nowrap;">—</td>
@@ -1260,35 +1283,35 @@ async function buddyClaimAll() {
 async function buddyDepartFor(uid) {
   const lid = allLocId();
   if (!lid) { toast('请先选择派出地点'); return; }
-  buddyLogAdd('派出账号 ' + privacy(uid, { head: 4, tail: 4 }) + ' → ' + lid, 'info');
+  buddyLogAdd('派出账号 ' + acctUidMask(uid) + ' → ' + lid, 'info');
   const r = await invoke('buddy_depart_for', { uid: uid, locationId: String(lid) }).catch(e => ({ error: String(e) }));
   if (r && r.error) { toast('派出失败: ' + r.error); buddyLogAdd('派出失败: ' + r.error, 'err'); return; }
   if (r.skipped) {
     toast('已跳过: ' + (r.reason || '无法派出'));
-    buddyLogAdd('账号 ' + privacy(uid, { head: 4, tail: 4 }) + ' 跳过: ' + (r.reason || ''), 'info');
+    buddyLogAdd('账号 ' + acctUidMask(uid) + ' 跳过: ' + (r.reason || ''), 'info');
   } else if (r.ok) {
-    buddyLogAdd('账号 ' + privacy(uid, { head: 4, tail: 4 }) + ' 派出成功', 'ok');
+    buddyLogAdd('账号 ' + acctUidMask(uid) + ' 派出成功', 'ok');
   } else {
     const em = r.reason || r.message || JSON.stringify(r.body || '');
     toast('派出失败: ' + em);
-    buddyLogAdd('账号 ' + privacy(uid, { head: 4, tail: 4 }) + ' 派出失败: ' + String(em).slice(0, 80), 'err');
+    buddyLogAdd('账号 ' + acctUidMask(uid) + ' 派出失败: ' + String(em).slice(0, 80), 'err');
   }
   setTimeout(refreshBuddyAll, 1200);
 }
 
 async function buddyClaimFor(uid) {
-  buddyLogAdd('领取账号 ' + privacy(uid, { head: 4, tail: 4 }) + ' 奖励', 'info');
+  buddyLogAdd('领取账号 ' + acctUidMask(uid) + ' 奖励', 'info');
   const r = await invoke('buddy_claim_for', { uid: uid }).catch(e => ({ error: String(e) }));
   if (r && r.error) { toast('领取失败: ' + r.error); buddyLogAdd('领取失败: ' + r.error, 'err'); return; }
   if (r.skipped) {
     toast('无需领取: ' + (r.reason || '无待领取奖励'));
-    buddyLogAdd('账号 ' + privacy(uid, { head: 4, tail: 4 }) + ' 跳过领取: ' + (r.reason || ''), 'info');
+    buddyLogAdd('账号 ' + acctUidMask(uid) + ' 跳过领取: ' + (r.reason || ''), 'info');
   } else if (r.ok) {
-    buddyLogAdd('账号 ' + privacy(uid, { head: 4, tail: 4 }) + ' 领取成功', 'ok');
+    buddyLogAdd('账号 ' + acctUidMask(uid) + ' 领取成功', 'ok');
   } else {
     const em = r.reason || r.message || JSON.stringify(r.body || '');
     toast('领取失败: ' + em);
-    buddyLogAdd('账号 ' + privacy(uid, { head: 4, tail: 4 }) + ' 领取失败: ' + String(em).slice(0, 80), 'err');
+    buddyLogAdd('账号 ' + acctUidMask(uid) + ' 领取失败: ' + String(em).slice(0, 80), 'err');
   }
   setTimeout(refreshBuddyAll, 1200);
 }
@@ -1318,8 +1341,8 @@ function renderPetEnergyAll(accounts) {
   if (!accounts.length) { tb.innerHTML = '<tr><td colspan="6" class="empty">无账号</td></tr>'; return; }
   tb.innerHTML = accounts.map(a => {
     const uid = a.uid;
-    const nick = a.nickname ? privacy(a.nickname, { head: 3, tail: 4 }) : '';
-    const uidCell = `<td><b>${escapeHtml(nick || uid)}</b><br><span style="font-size:10px;color:var(--muted)">${privacy(uid, { head: 4, tail: 4 })}</span></td>`;
+    const nick = acctLabel(a);
+    const uidCell = `<td><b>${escapeHtml(nick || uid)}</b><br><span style="font-size:10px;color:var(--muted)">${acctUidMask(uid)}</span></td>`;
     if (!a.has_login) {
       return `<tr>${uidCell}<td colspan="5" class="soon">无登录态</td></tr>`;
     }
@@ -1354,16 +1377,16 @@ async function petDrawFor(uid) {
     const cap = info.max_open_count && info.max_open_count > 0 ? info.max_open_count : info.affordable;
     count = Math.max(1, Math.min(info.affordable || 1, cap || info.affordable || 1));
   }
-  petLogAdd('为账号 ' + privacy(uid, { head: 4, tail: 4 }) + ' 抽取 ' + count + ' 个盲盒…', 'info');
+  petLogAdd('为账号 ' + acctUidMask(uid) + ' 抽取 ' + count + ' 个盲盒…', 'info');
   const r = await invoke('pet_draw_for', { uid: uid, count: count }).catch(e => ({ ok: false, error: String(e) }));
   if (!r || r.error) {
     const em = (r && r.error) ? r.error : '未知错误';
     toast('抽盲盒失败: ' + em);
-    petLogAdd('账号 ' + privacy(uid, { head: 4, tail: 4 }) + ' 抽奖失败: ' + em, 'err');
+    petLogAdd('账号 ' + acctUidMask(uid) + ' 抽奖失败: ' + em, 'err');
     return;
   }
-  petLogAdd('账号 ' + privacy(uid, { head: 4, tail: 4 }) + ' 抽奖成功 🎉', 'ok');
-  toast('抽盲盒成功（账号 ' + privacy(uid, { head: 4, tail: 4 }) + '）');
+  petLogAdd('账号 ' + acctUidMask(uid) + ' 抽奖成功 🎉', 'ok');
+  toast('抽盲盒成功（账号 ' + acctUidMask(uid) + '）');
   setTimeout(loadPetEnergyAll, 800);   // 刷新能量（消耗后已变化）
 }
 
