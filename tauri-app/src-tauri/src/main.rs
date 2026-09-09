@@ -92,6 +92,17 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
+/// 把阻塞任务挪到独立线程池执行。
+/// 性能关键：Tauri 2 同步命令在主线程执行，网络请求（超时上限 15s/请求）
+/// 期间整个窗口会冻结（点击/滚动全部无响应）—— v0.6.2 卡顿根因。
+/// async 命令 + spawn_blocking 让 UI 永不为网络等待而卡死。
+async fn offload<F>(f: F) -> Value
+where F: FnOnce() -> Value + Send + 'static {
+    tauri::async_runtime::spawn_blocking(f)
+        .await
+        .unwrap_or_else(|e| json!({ "ok": false, "error": format!("后台任务异常: {}", e) }))
+}
+
 #[tauri::command]
 fn get_all() -> Value {
     let mut v = api::get_all();
@@ -106,45 +117,61 @@ fn get_all() -> Value {
 }
 
 #[tauri::command]
-fn get_quota() -> Value {
-    api::get_quota()
+async fn get_quota() -> Value {
+    offload(move || {
+        api::get_quota()
+    }).await
 }
 
 #[tauri::command]
-fn get_checkin() -> Value {
-    api::get_checkin()
+async fn get_checkin() -> Value {
+    offload(move || {
+        api::get_checkin()
+    }).await
 }
 
 #[tauri::command]
-fn get_memory() -> Value {
-    api::get_memory()
+async fn get_memory() -> Value {
+    offload(move || {
+        api::get_memory()
+    }).await
 }
 
 #[tauri::command]
-fn do_checkin() -> Value {
-    api::do_checkin()
+async fn do_checkin() -> Value {
+    offload(move || {
+        api::do_checkin()
+    }).await
 }
 
 // ---------- 宠物旅行（buddy travel） ----------
 
 #[tauri::command]
-fn buddy_status() -> Value {
-    api::buddy_status()
+async fn buddy_status() -> Value {
+    offload(move || {
+        api::buddy_status()
+    }).await
 }
 
 #[tauri::command]
-fn buddy_config() -> Value {
-    api::buddy_config()
+async fn buddy_config() -> Value {
+    offload(move || {
+        api::buddy_config()
+    }).await
 }
 
 #[tauri::command]
-fn buddy_depart(location_id: String) -> Value {
-    api::buddy_depart(&location_id)
+async fn buddy_depart(location_id: String) -> Value {
+    offload(move || {
+        api::buddy_depart(&location_id)
+    }).await
 }
 
 #[tauri::command]
-fn buddy_claim() -> Value {
-    api::buddy_claim()
+async fn buddy_claim() -> Value {
+    offload(move || {
+        api::buddy_claim()
+    }).await
 }
 
 // ---------- 多账号批量操作（每个账号用各自 vault 快照里的登录态 token 发起请求） ----------
@@ -176,218 +203,286 @@ fn do_checkin_retry(login: &wb_api::LoginInfo) -> Value {
 /// 请求级轮转（#1）：round-robin 起始位，避免每次都从同一账号开始。
 /// 临近过期（#1）：token JWT exp 在 10m 内 → 标记 needs_refresh 并跳过（无刷新端点，提示重新登录）。
 #[tauri::command]
-fn checkin_all() -> Value {
-    let vault = ops::vault_dir();
-    let accs = ops::list_accounts(&vault);
-    let now = now_ms();
-    // #1 请求级轮转：round-robin 起始位（进程内原子计数，每次调用 +1）
-    let n = accs.len();
-    let rotate = if n > 0 { ROTATE_INDEX.fetch_add(1, Ordering::Relaxed) % n } else { 0 };
-    let order: Vec<usize> = if n > 0 { (0..n).map(|i| (i + rotate) % n).collect() } else { Vec::new() };
-    let mut results = Vec::new();
-    let mut ok = 0u32; let mut fail = 0u32; let mut skipped = 0u32;
-    // #23：账号列表去重（同一 uid 只签到一次）+ 上限保护，避免异常重复触发风暴
-    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for idx in order {
-        let a = &accs[idx];
-        if seen.len() >= 100 { break; }              // #23 总量上限
-        if !seen.insert(a.uid.clone()) { continue; }  // #23 去重
-        if !a.has_snapshot {
-            results.push(json!({"uid": a.uid, "nickname": a.nickname, "ok": false, "skipped": true, "error": "无登录态快照"}));
-            skipped += 1; continue;
+async fn checkin_all() -> Value {
+    offload(move || {
+        let vault = ops::vault_dir();
+        let accs = ops::list_accounts(&vault);
+        let now = now_ms();
+        // #1 请求级轮转：round-robin 起始位（进程内原子计数，每次调用 +1）
+        let n = accs.len();
+        let rotate = if n > 0 { ROTATE_INDEX.fetch_add(1, Ordering::Relaxed) % n } else { 0 };
+        let order: Vec<usize> = if n > 0 { (0..n).map(|i| (i + rotate) % n).collect() } else { Vec::new() };
+        let mut results = Vec::new();
+        let mut ok = 0u32; let mut fail = 0u32; let mut skipped = 0u32;
+        // #23：账号列表去重（同一 uid 只签到一次）+ 上限保护，避免异常重复触发风暴
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for idx in order {
+            let a = &accs[idx];
+            if seen.len() >= 100 { break; }              // #23 总量上限
+            if !seen.insert(a.uid.clone()) { continue; }  // #23 去重
+            if !a.has_snapshot {
+                results.push(json!({"uid": a.uid, "nickname": a.nickname, "ok": false, "skipped": true, "error": "无登录态快照"}));
+                skipped += 1; continue;
+            }
+            let Some(login) = account_login(&vault, &a.uid) else {
+                results.push(json!({"uid": a.uid, "nickname": a.nickname, "ok": false, "skipped": true, "error": "登录态文件缺失或无效"}));
+                skipped += 1; continue;
+            };
+            // #1 临近过期：token JWT exp 在 10m 内 → 标记 needs_refresh 并跳过
+            let near_exp = api::jwt_payload(&login.token)
+                .and_then(|pl| pl.get("exp").and_then(|x| x.as_u64()))
+                .map(|exp| (exp as i64) * 1000 - (now as i64) < 10 * 60 * 1000)
+                .unwrap_or(false);
+            if near_exp {
+                results.push(json!({"uid": a.uid, "nickname": a.nickname, "ok": false, "skipped": true,
+                    "needs_refresh": true, "error": "token 临近过期，请重新登录以刷新"}));
+                skipped += 1; continue;
+            }
+            let r = do_checkin_retry(&login);
+            if let Some(err) = r.get("error") {
+                let emsg = err.as_str().unwrap_or("");
+                let (kind, cooldown) = classify_checkin_err(emsg);
+                results.push(json!({"uid": a.uid, "nickname": a.nickname, "ok": false, "skipped": false,
+                    "error": err, "kind": kind, "cooldown": cooldown}));
+                fail += 1; continue;
+            }
+            let status = r.get("status").and_then(|x| x.as_u64()).unwrap_or(0);
+            let sk = r.get("skipped").and_then(|x| x.as_bool()).unwrap_or(false);
+            let body = r.get("body");
+            let d = body.and_then(|b| b.get("data")).or(body);
+            let msg = d.and_then(|x| x.get("message")).and_then(|x| x.as_str())
+                .or_else(|| r.get("body").and_then(|b| b.get("message")).and_then(|x| x.as_str()))
+                .unwrap_or("").to_string();
+            if status == 200 && !sk { ok += 1; } else if sk { skipped += 1; } else { fail += 1; }
+            results.push(json!({
+                "uid": a.uid, "nickname": a.nickname, "ok": status == 200, "skipped": sk,
+                "status": status, "message": msg
+            }));
+            // 账号间限速 250ms，避免触发风控（对标 daemon.js:2221-2235 CHECKIN_QUEUE_DELAY_MS）
+            std::thread::sleep(std::time::Duration::from_millis(250));
         }
-        let Some(login) = account_login(&vault, &a.uid) else {
-            results.push(json!({"uid": a.uid, "nickname": a.nickname, "ok": false, "skipped": true, "error": "登录态文件缺失或无效"}));
-            skipped += 1; continue;
-        };
-        // #1 临近过期：token JWT exp 在 10m 内 → 标记 needs_refresh 并跳过
-        let near_exp = api::jwt_payload(&login.token)
-            .and_then(|pl| pl.get("exp").and_then(|x| x.as_u64()))
-            .map(|exp| (exp as i64) * 1000 - (now as i64) < 10 * 60 * 1000)
-            .unwrap_or(false);
-        if near_exp {
-            results.push(json!({"uid": a.uid, "nickname": a.nickname, "ok": false, "skipped": true,
-                "needs_refresh": true, "error": "token 临近过期，请重新登录以刷新"}));
-            skipped += 1; continue;
-        }
-        let r = do_checkin_retry(&login);
-        if let Some(err) = r.get("error") {
-            let emsg = err.as_str().unwrap_or("");
-            let (kind, cooldown) = classify_checkin_err(emsg);
-            results.push(json!({"uid": a.uid, "nickname": a.nickname, "ok": false, "skipped": false,
-                "error": err, "kind": kind, "cooldown": cooldown}));
-            fail += 1; continue;
-        }
-        let status = r.get("status").and_then(|x| x.as_u64()).unwrap_or(0);
-        let sk = r.get("skipped").and_then(|x| x.as_bool()).unwrap_or(false);
-        let body = r.get("body");
-        let d = body.and_then(|b| b.get("data")).or(body);
-        let msg = d.and_then(|x| x.get("message")).and_then(|x| x.as_str())
-            .or_else(|| r.get("body").and_then(|b| b.get("message")).and_then(|x| x.as_str()))
-            .unwrap_or("").to_string();
-        if status == 200 && !sk { ok += 1; } else if sk { skipped += 1; } else { fail += 1; }
-        results.push(json!({
-            "uid": a.uid, "nickname": a.nickname, "ok": status == 200, "skipped": sk,
-            "status": status, "message": msg
-        }));
-        // 账号间限速 250ms，避免触发风控（对标 daemon.js:2221-2235 CHECKIN_QUEUE_DELAY_MS）
-        std::thread::sleep(std::time::Duration::from_millis(250));
-    }
-    json!({ "ok": true, "results": results, "summary": { "total": results.len(), "ok": ok, "fail": fail, "skipped": skipped } })
+        json!({ "ok": true, "results": results, "summary": { "total": results.len(), "ok": ok, "fail": fail, "skipped": skipped } })
+    }).await
 }
 
 /// 查询单个账号额度（用其 vault 快照登录态 token 发请求，覆盖全部已登记账号）
 #[tauri::command]
-fn quota_for(uid: String) -> Value {
-    let vault = ops::vault_dir();
-    let Some(login) = account_login(&vault, &uid) else {
-        return json!({ "uid": uid, "ok": false, "error": "登录态文件缺失或无效" });
-    };
-    api::get_quota_as(&login)
+async fn quota_for(uid: String) -> Value {
+    offload(move || {
+        let vault = ops::vault_dir();
+        let Some(login) = account_login(&vault, &uid) else {
+            return json!({ "uid": uid, "ok": false, "error": "登录态文件缺失或无效" });
+        };
+        api::get_quota_as(&login)
+    }).await
 }
 
 /// 查询所有「已保存登录态」账号的额度，按登记表原始顺序返回。
+/// v0.6.2 性能重写：async + spawn_blocking（不冻结 UI）+ 账号间并行请求
+/// （原串行 5 账号 × 每账号最多 15s → 现总耗时 = 最慢单账号，通常 1~3s）。
 #[tauri::command]
-fn quota_all() -> Value {
-    let vault = ops::vault_dir();
-    let accs = ops::list_accounts(&vault);
-    let mut results = Vec::new();
-    let mut ok = 0u32; let mut fail = 0u32; let mut skipped = 0u32; let mut denied = 0u32;
-    for a in &accs {
-        if !a.has_snapshot {
-            results.push(json!({"uid": a.uid, "nickname": a.nickname, "ok": false, "skipped": true, "error": "无登录态快照"}));
-            skipped += 1; continue;
-        }
-        let Some(login) = account_login(&vault, &a.uid) else {
-            results.push(json!({"uid": a.uid, "nickname": a.nickname, "ok": false, "skipped": true, "error": "登录态文件缺失或无效"}));
-            skipped += 1; continue;
-        };
-        let r = api::get_quota_as(&login);
-        // 桌面 token 无计费读取权限（官方网关限制）：透传 permission_denied
-        if r.get("permission_denied").and_then(|x| x.as_bool()).unwrap_or(false) {
-            denied += 1;
-            let cached = r.get("cached").is_some();
+async fn quota_all() -> Value {
+    offload(move || {
+        let vault = ops::vault_dir();
+        let accs = ops::list_accounts(&vault);
+        // 有快照的账号并行拉取（std::thread::scope 逐账号一线程，结果按登记顺序收集）
+        let fetched: Vec<(String, String, Value)> =         std::thread::scope(|s| {
+            // vault shadow 成共享引用：多线程各自捕获 &Path（Copy），避免重复 move
+            let vault: &std::path::Path = vault.as_path();
+            let handles: Vec<_> = accs
+                .iter()
+                .filter(|a| a.has_snapshot)
+                .map(|a| {
+                    let uid = a.uid.clone();
+                    let nick = a.nickname.clone();
+                    s.spawn(move || {
+                        let r = match account_login(&vault, &uid) {
+                            Some(login) => api::get_quota_as(&login),
+                            None => Value::Null, // 登录态文件缺失 → 上层记 skipped
+                        };
+                        (uid, nick, r)
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .map(|h| h.join().unwrap_or_else(|_| (String::new(), String::new(), Value::Null)))
+                .collect()
+        });
+        let mut results = Vec::new();
+        let mut ok = 0u32; let mut fail = 0u32; let mut skipped = 0u32; let mut denied = 0u32;
+        let mut fi = 0usize;
+        for a in &accs {
+            if !a.has_snapshot {
+                results.push(json!({"uid": a.uid, "nickname": a.nickname, "ok": false, "skipped": true, "error": "无登录态快照"}));
+                skipped += 1; continue;
+            }
+            let (uid, nick, r) = &fetched[fi]; fi += 1;
+            if r.is_null() {
+                results.push(json!({"uid": uid, "nickname": nick, "ok": false, "skipped": true, "error": "登录态文件缺失或无效"}));
+                skipped += 1; continue;
+            }
+            if r.get("permission_denied").and_then(|x| x.as_bool()).unwrap_or(false) {
+                denied += 1;
+                let cached = r.get("cached").is_some();
+                results.push(json!({
+                    "uid": uid, "nickname": nick, "ok": false, "permission_denied": true,
+                    "permission_msg": r.get("permission_msg").and_then(|x| x.as_str()).unwrap_or(""),
+                    "cached": cached,
+                    "body": r.get("body").cloned().unwrap_or(Value::Null),
+                    "parsed": r.get("parsed").cloned().unwrap_or(Value::Null)
+                }));
+                continue;
+            }
+            if let Some(err) = r.get("error") {
+                let emsg = err.as_str().unwrap_or("");
+                let (kind, cooldown) = classify_checkin_err(emsg);
+                results.push(json!({"uid": uid, "nickname": nick, "ok": false, "skipped": false, "error": err, "kind": kind, "cooldown": cooldown}));
+                fail += 1; continue;
+            }
+            let status = r.get("status").and_then(|x| x.as_u64()).unwrap_or(0);
+            if status == 200 { ok += 1; } else { fail += 1; }
             results.push(json!({
-                "uid": a.uid, "nickname": a.nickname, "ok": false, "permission_denied": true,
-                "permission_msg": r.get("permission_msg").and_then(|x| x.as_str()).unwrap_or(""),
-                "cached": cached,
+                "uid": uid, "nickname": nick, "ok": status == 200, "skipped": false,
+                "status": status,
                 "body": r.get("body").cloned().unwrap_or(Value::Null),
                 "parsed": r.get("parsed").cloned().unwrap_or(Value::Null)
             }));
-            continue;
         }
-        if let Some(err) = r.get("error") {
-            let emsg = err.as_str().unwrap_or("");
-            let (kind, cooldown) = classify_checkin_err(emsg);
-            results.push(json!({"uid": a.uid, "nickname": a.nickname, "ok": false, "skipped": false, "error": err, "kind": kind, "cooldown": cooldown}));
-            fail += 1; continue;
-        }
-        let status = r.get("status").and_then(|x| x.as_u64()).unwrap_or(0);
-        if status == 200 { ok += 1; } else { fail += 1; }
-        results.push(json!({
-            "uid": a.uid, "nickname": a.nickname, "ok": status == 200, "skipped": false,
-            "status": status,
-            "body": r.get("body").cloned().unwrap_or(Value::Null),
-            "parsed": r.get("parsed").cloned().unwrap_or(Value::Null)
-        }));
-    }
-    json!({ "ok": true, "results": results, "summary": { "total": results.len(), "ok": ok, "fail": fail, "skipped": skipped, "denied": denied } })
+        json!({ "ok": true, "results": results, "summary": { "total": results.len(), "ok": ok, "fail": fail, "skipped": skipped, "denied": denied } })
+    }).await
 }
 
 /// 单个账号签到（用于全部账号额度表格里的逐行操作，幂等：已签则跳过）
 #[tauri::command]
-fn checkin_for(uid: String) -> Value {
-    let vault = ops::vault_dir();
-    let Some(login) = account_login(&vault, &uid) else {
-        return json!({ "uid": uid, "ok": false, "error": "登录态文件缺失或无效" });
-    };
-    api::do_checkin_as(&login)
+async fn checkin_for(uid: String) -> Value {
+    offload(move || {
+        let vault = ops::vault_dir();
+        let Some(login) = account_login(&vault, &uid) else {
+            return json!({ "uid": uid, "ok": false, "error": "登录态文件缺失或无效" });
+        };
+        api::do_checkin_as(&login)
+    }).await
 }
 
 /// 查询单个账号的 AI 记忆画像（用其 vault 快照登录态 token 发请求，覆盖全部已登记账号）
 #[tauri::command]
-fn memory_for(uid: String) -> Value {
-    let vault = ops::vault_dir();
-    let Some(login) = account_login(&vault, &uid) else {
-        return json!({ "uid": uid, "ok": false, "error": "登录态文件缺失或无效" });
-    };
-    api::get_memory_as(&login)
+async fn memory_for(uid: String) -> Value {
+    offload(move || {
+        let vault = ops::vault_dir();
+        let Some(login) = account_login(&vault, &uid) else {
+            return json!({ "uid": uid, "ok": false, "error": "登录态文件缺失或无效" });
+        };
+        api::get_memory_as(&login)
+    }).await
 }
 
 /// 查询所有「已保存登录态」账号的 AI 记忆画像，返回每个账号的画像明细
 /// （与 quota_all 同构，覆盖 dashboard 只能看当前登录态单账号的局限）
 #[tauri::command]
-fn memory_all() -> Value {
-    let vault = ops::vault_dir();
-    let accs = ops::list_accounts(&vault);
-    let mut results = Vec::new();
-    let mut ok = 0u32; let mut fail = 0u32; let mut skipped = 0u32;
-    for a in accs {
-        if !a.has_snapshot {
-            results.push(json!({"uid": a.uid, "nickname": a.nickname, "ok": false, "skipped": true, "error": "无登录态快照"}));
-            skipped += 1; continue;
+async fn memory_all() -> Value {
+    offload(move || {
+        let vault = ops::vault_dir();
+        let accs = ops::list_accounts(&vault);
+        let mut results = Vec::new();
+        let mut ok = 0u32; let mut fail = 0u32; let mut skipped = 0u32;
+        for a in accs {
+            if !a.has_snapshot {
+                results.push(json!({"uid": a.uid, "nickname": a.nickname, "ok": false, "skipped": true, "error": "无登录态快照"}));
+                skipped += 1; continue;
+            }
+            let Some(login) = account_login(&vault, &a.uid) else {
+                results.push(json!({"uid": a.uid, "nickname": a.nickname, "ok": false, "skipped": true, "error": "登录态文件缺失或无效"}));
+                skipped += 1; continue;
+            };
+            let r = api::get_memory_as(&login);
+            if let Some(err) = r.get("error") {
+                results.push(json!({"uid": a.uid, "nickname": a.nickname, "ok": false, "skipped": false, "error": err}));
+                fail += 1; continue;
+            }
+            let status = r.get("status").and_then(|x| x.as_u64()).unwrap_or(0);
+            if status == 200 { ok += 1; } else { fail += 1; }
+            results.push(json!({
+                "uid": a.uid, "nickname": a.nickname, "ok": status == 200, "skipped": false,
+                "status": status, "body": r.get("body").cloned().unwrap_or(Value::Null)
+            }));
         }
-        let Some(login) = account_login(&vault, &a.uid) else {
-            results.push(json!({"uid": a.uid, "nickname": a.nickname, "ok": false, "skipped": true, "error": "登录态文件缺失或无效"}));
-            skipped += 1; continue;
-        };
-        let r = api::get_memory_as(&login);
-        if let Some(err) = r.get("error") {
-            results.push(json!({"uid": a.uid, "nickname": a.nickname, "ok": false, "skipped": false, "error": err}));
-            fail += 1; continue;
-        }
-        let status = r.get("status").and_then(|x| x.as_u64()).unwrap_or(0);
-        if status == 200 { ok += 1; } else { fail += 1; }
-        results.push(json!({
-            "uid": a.uid, "nickname": a.nickname, "ok": status == 200, "skipped": false,
-            "status": status, "body": r.get("body").cloned().unwrap_or(Value::Null)
-        }));
-    }
-    json!({ "ok": true, "results": results, "summary": { "total": results.len(), "ok": ok, "fail": fail, "skipped": skipped } })
+        json!({ "ok": true, "results": results, "summary": { "total": results.len(), "ok": ok, "fail": fail, "skipped": skipped } })
+    }).await
 }
 
 /// 查询所有「已保存登录态」账号的宠物当前状态
+/// v0.6.2 性能重写：async + 账号间并行请求（原串行冻结 UI 且慢）
 #[tauri::command]
-fn buddy_all_status() -> Value {
-    let vault = ops::vault_dir();
-    let accs = ops::list_accounts(&vault);
-    let mut accounts = Vec::new();
-    for a in accs {
-        if !a.has_snapshot {
-            accounts.push(json!({"uid": a.uid, "nickname": a.nickname, "has_login": false, "error": "无登录态快照"}));
-            continue;
-        }
-        let Some(login) = account_login(&vault, &a.uid) else {
-            accounts.push(json!({"uid": a.uid, "nickname": a.nickname, "has_login": false, "error": "登录态文件缺失或无效"}));
-            continue;
-        };
-        let r = api::buddy_status_as(&login);
-        if let Some(err) = r.get("error") {
-            accounts.push(json!({"uid": a.uid, "nickname": a.nickname, "has_login": true, "error": err}));
-            continue;
-        }
-        let status = r.get("status").and_then(|x| x.as_u64()).unwrap_or(0);
-        let body = r.get("body");
-        let d = body.and_then(|b| b.get("data")).or(body);
-        let state = d.and_then(|x| x.get("state")).and_then(|x| x.as_str()).unwrap_or("unknown").to_string();
-        let location = d.and_then(|x| {
-            let l = x.get("location");
-            if let Some(l) = l {
-                if l.is_string() { return l.as_str().map(|s| s.to_string()); }
-                if l.is_object() { return l.get("name").and_then(|s| s.as_str()).map(|s| s.to_string()); }
+async fn buddy_all_status() -> Value {
+    offload(move || {
+        let vault = ops::vault_dir();
+        let accs = ops::list_accounts(&vault);
+        // 单账号响应 → 最终行 JSON 的解析（供并行线程与本地跳过分支共用）
+        let parse_row = |uid: &str, nick: &str, r: &Value| -> Value {
+            if let Some(err) = r.get("error") {
+                return json!({"uid": uid, "nickname": nick, "has_login": true, "error": err});
             }
-            None
+            let status = r.get("status").and_then(|x| x.as_u64()).unwrap_or(0);
+            let body = r.get("body");
+            let d = body.and_then(|b| b.get("data")).or(body);
+            let state = d.and_then(|x| x.get("state")).and_then(|x| x.as_str()).unwrap_or("unknown").to_string();
+            let location = d.and_then(|x| {
+                let l = x.get("location");
+                if let Some(l) = l {
+                    if l.is_string() { return l.as_str().map(|s| s.to_string()); }
+                    if l.is_object() { return l.get("name").and_then(|s| s.as_str()).map(|s| s.to_string()); }
+                }
+                None
+            });
+            let reward = d.and_then(|x| x.get("reward_credit")).cloned();
+            let arrive_at = d.and_then(|x| x.get("arrive_at")).and_then(|x| x.as_u64()).unwrap_or(0);
+            let daily = d.and_then(|x| x.get("daily_limit_reached")).and_then(|x| x.as_bool()).unwrap_or(false);
+            json!({
+                "uid": uid, "nickname": nick, "has_login": true, "status": status,
+                "state": state, "location": location, "reward_credit": reward,
+                "arrive_at": arrive_at, "daily_limit_reached": daily
+            })
+        };
+        let fetched: Vec<(String, String, Value)> =         std::thread::scope(|s| {
+            // vault shadow 成共享引用：多线程各自捕获 &Path（Copy），避免重复 move
+            let vault: &std::path::Path = vault.as_path();
+            let handles: Vec<_> = accs
+                .iter()
+                .filter(|a| a.has_snapshot)
+                .map(|a| {
+                    let uid = a.uid.clone();
+                    let nick = a.nickname.clone();
+                    s.spawn(move || {
+                        let r = match account_login(&vault, &uid) {
+                            Some(login) => api::buddy_status_as(&login),
+                            None => Value::Null,
+                        };
+                        (uid, nick, r)
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .map(|h| h.join().unwrap_or_else(|_| (String::new(), String::new(), Value::Null)))
+                .collect()
         });
-        let reward = d.and_then(|x| x.get("reward_credit")).cloned();
-        let arrive_at = d.and_then(|x| x.get("arrive_at")).and_then(|x| x.as_u64()).unwrap_or(0);
-        let daily = d.and_then(|x| x.get("daily_limit_reached")).and_then(|x| x.as_bool()).unwrap_or(false);
-        accounts.push(json!({
-            "uid": a.uid, "nickname": a.nickname, "has_login": true, "status": status,
-            "state": state, "location": location, "reward_credit": reward,
-            "arrive_at": arrive_at, "daily_limit_reached": daily
-        }));
-    }
-    json!({ "ok": true, "accounts": accounts })
+        let mut accounts = Vec::new();
+        let mut fi = 0usize;
+        for a in &accs {
+            if !a.has_snapshot {
+                accounts.push(json!({"uid": a.uid, "nickname": a.nickname, "has_login": false, "error": "无登录态快照"}));
+                continue;
+            }
+            let (uid, nick, r) = &fetched[fi]; fi += 1;
+            if r.is_null() {
+                accounts.push(json!({"uid": uid, "nickname": nick, "has_login": false, "error": "登录态文件缺失或无效"}));
+                continue;
+            }
+            accounts.push(parse_row(uid, nick, r));
+        }
+        json!({ "ok": true, "accounts": accounts })
+    }).await
 }
 
 /// 判断宠物接口返回的 message 是否是「未激活宠物」类业务错误（无法派出）
@@ -467,27 +562,29 @@ fn depart_one(login: &wb_api::LoginInfo, location_id: &str, uid: &str, nickname:
 
 /// 一键派出所有「已保存登录态」账号的宠物到同一地点（预检 + 三级计数）
 #[tauri::command]
-fn buddy_all_depart(location_id: String) -> Value {
-    let vault = ops::vault_dir();
-    let accs = ops::list_accounts(&vault);
-    let mut results = Vec::new();
-    let mut ok = 0u32; let mut fail = 0u32; let mut skipped = 0u32;
-    for a in accs {
-        if !a.has_snapshot {
-            results.push(json!({"uid": a.uid, "nickname": a.nickname, "ok": false, "skipped": true, "reason": "无登录态快照"}));
-            skipped += 1; continue;
+async fn buddy_all_depart(location_id: String) -> Value {
+    offload(move || {
+        let vault = ops::vault_dir();
+        let accs = ops::list_accounts(&vault);
+        let mut results = Vec::new();
+        let mut ok = 0u32; let mut fail = 0u32; let mut skipped = 0u32;
+        for a in accs {
+            if !a.has_snapshot {
+                results.push(json!({"uid": a.uid, "nickname": a.nickname, "ok": false, "skipped": true, "reason": "无登录态快照"}));
+                skipped += 1; continue;
+            }
+            let Some(login) = account_login(&vault, &a.uid) else {
+                results.push(json!({"uid": a.uid, "nickname": a.nickname, "ok": false, "skipped": true, "reason": "登录态文件缺失或无效"}));
+                skipped += 1; continue;
+            };
+            let res = depart_one(&login, &location_id, &a.uid, a.nickname.as_deref().unwrap_or(""));
+            let okf = res.get("ok").and_then(|x| x.as_bool()).unwrap_or(false);
+            let skf = res.get("skipped").and_then(|x| x.as_bool()).unwrap_or(false);
+            if okf { ok += 1; } else if skf { skipped += 1; } else { fail += 1; }
+            results.push(res);
         }
-        let Some(login) = account_login(&vault, &a.uid) else {
-            results.push(json!({"uid": a.uid, "nickname": a.nickname, "ok": false, "skipped": true, "reason": "登录态文件缺失或无效"}));
-            skipped += 1; continue;
-        };
-        let res = depart_one(&login, &location_id, &a.uid, a.nickname.as_deref().unwrap_or(""));
-        let okf = res.get("ok").and_then(|x| x.as_bool()).unwrap_or(false);
-        let skf = res.get("skipped").and_then(|x| x.as_bool()).unwrap_or(false);
-        if okf { ok += 1; } else if skf { skipped += 1; } else { fail += 1; }
-        results.push(res);
-    }
-    json!({ "ok": true, "results": results, "summary": { "total": results.len(), "ok": ok, "fail": fail, "skipped": skipped } })
+        json!({ "ok": true, "results": results, "summary": { "total": results.len(), "ok": ok, "fail": fail, "skipped": skipped } })
+    }).await
 }
 
 /// 单账号宠物奖励领取（含幂等预检）：HTTP 200 算成功；
@@ -514,47 +611,53 @@ fn claim_one(login: &wb_api::LoginInfo, uid: &str, nickname: &str) -> Value {
 
 /// 一键领取所有「已保存登录态」账号的宠物奖励（三级计数）
 #[tauri::command]
-fn buddy_all_claim() -> Value {
-    let vault = ops::vault_dir();
-    let accs = ops::list_accounts(&vault);
-    let mut results = Vec::new();
-    let mut ok = 0u32; let mut fail = 0u32; let mut skipped = 0u32;
-    for a in accs {
-        if !a.has_snapshot {
-            results.push(json!({"uid": a.uid, "nickname": a.nickname, "ok": false, "skipped": true, "reason": "无登录态快照"}));
-            skipped += 1; continue;
+async fn buddy_all_claim() -> Value {
+    offload(move || {
+        let vault = ops::vault_dir();
+        let accs = ops::list_accounts(&vault);
+        let mut results = Vec::new();
+        let mut ok = 0u32; let mut fail = 0u32; let mut skipped = 0u32;
+        for a in accs {
+            if !a.has_snapshot {
+                results.push(json!({"uid": a.uid, "nickname": a.nickname, "ok": false, "skipped": true, "reason": "无登录态快照"}));
+                skipped += 1; continue;
+            }
+            let Some(login) = account_login(&vault, &a.uid) else {
+                results.push(json!({"uid": a.uid, "nickname": a.nickname, "ok": false, "skipped": true, "reason": "登录态文件缺失或无效"}));
+                skipped += 1; continue;
+            };
+            let res = claim_one(&login, &a.uid, a.nickname.as_deref().unwrap_or(""));
+            let okf = res.get("ok").and_then(|x| x.as_bool()).unwrap_or(false);
+            let skf = res.get("skipped").and_then(|x| x.as_bool()).unwrap_or(false);
+            if okf { ok += 1; } else if skf { skipped += 1; } else { fail += 1; }
+            results.push(res);
         }
-        let Some(login) = account_login(&vault, &a.uid) else {
-            results.push(json!({"uid": a.uid, "nickname": a.nickname, "ok": false, "skipped": true, "reason": "登录态文件缺失或无效"}));
-            skipped += 1; continue;
-        };
-        let res = claim_one(&login, &a.uid, a.nickname.as_deref().unwrap_or(""));
-        let okf = res.get("ok").and_then(|x| x.as_bool()).unwrap_or(false);
-        let skf = res.get("skipped").and_then(|x| x.as_bool()).unwrap_or(false);
-        if okf { ok += 1; } else if skf { skipped += 1; } else { fail += 1; }
-        results.push(res);
-    }
-    json!({ "ok": true, "results": results, "summary": { "total": results.len(), "ok": ok, "fail": fail, "skipped": skipped } })
+        json!({ "ok": true, "results": results, "summary": { "total": results.len(), "ok": ok, "fail": fail, "skipped": skipped } })
+    }).await
 }
 
 /// 单个账号：派出宠物到指定地点（用于全部账号表格里的逐行操作，含预检）
 #[tauri::command]
-fn buddy_depart_for(uid: String, location_id: String) -> Value {
-    let vault = ops::vault_dir();
-    let Some(login) = account_login(&vault, &uid) else {
-        return json!({"uid": uid, "ok": false, "skipped": false, "error": "登录态文件缺失或无效"});
-    };
-    depart_one(&login, &location_id, &uid, "")
+async fn buddy_depart_for(uid: String, location_id: String) -> Value {
+    offload(move || {
+        let vault = ops::vault_dir();
+        let Some(login) = account_login(&vault, &uid) else {
+            return json!({"uid": uid, "ok": false, "skipped": false, "error": "登录态文件缺失或无效"});
+        };
+        depart_one(&login, &location_id, &uid, "")
+    }).await
 }
 
 /// 单个账号：领取宠物奖励（用于全部账号表格里的逐行操作，含幂等预检）
 #[tauri::command]
-fn buddy_claim_for(uid: String) -> Value {
-    let vault = ops::vault_dir();
-    let Some(login) = account_login(&vault, &uid) else {
-        return json!({"uid": uid, "ok": false, "skipped": false, "error": "登录态文件缺失或无效"});
-    };
-    claim_one(&login, &uid, "")
+async fn buddy_claim_for(uid: String) -> Value {
+    offload(move || {
+        let vault = ops::vault_dir();
+        let Some(login) = account_login(&vault, &uid) else {
+            return json!({"uid": uid, "ok": false, "skipped": false, "error": "登录态文件缺失或无效"});
+        };
+        claim_one(&login, &uid, "")
+    }).await
 }
 
 // ---------- 宠物能量 / 盲盒抽奖（growth center） ----------
@@ -562,52 +665,82 @@ fn buddy_claim_for(uid: String) -> Value {
 /// 查询所有「已保存登录态」账号的宠物能量与抽奖额度，返回每个账号的能量是否已满。
 /// 与 buddy_all_status / quota_all 同构，覆盖 dashboard 只能看当前账号的局限。
 #[tauri::command]
-fn pet_energy_all() -> Value {
-    let vault = ops::vault_dir();
-    let accs = ops::list_accounts(&vault);
-    let mut accounts = Vec::new();
-    for a in accs {
-        if !a.has_snapshot {
-            accounts.push(json!({"uid": a.uid, "nickname": a.nickname, "has_login": false, "error": "无登录态快照"}));
-            continue;
+/// 全部账号宠物能量（v0.6.2：async + 账号间并行，原串行会冻结 UI 且慢）
+#[tauri::command]
+async fn pet_energy_all() -> Value {
+    offload(move || {
+        let vault = ops::vault_dir();
+        let accs = ops::list_accounts(&vault);
+        let fetched: Vec<(String, String, Value)> =         std::thread::scope(|s| {
+            // vault shadow 成共享引用：多线程各自捕获 &Path（Copy），避免重复 move
+            let vault: &std::path::Path = vault.as_path();
+            let handles: Vec<_> = accs
+                .iter()
+                .filter(|a| a.has_snapshot)
+                .map(|a| {
+                    let uid = a.uid.clone();
+                    let nick = a.nickname.clone();
+                    s.spawn(move || {
+                        let r = match account_login(&vault, &uid) {
+                            Some(login) => api::pet_energy_as(&login),
+                            None => Value::Null,
+                        };
+                        (uid, nick, r)
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .map(|h| h.join().unwrap_or_else(|_| (String::new(), String::new(), Value::Null)))
+                .collect()
+        });
+        let mut accounts = Vec::new();
+        let mut fi = 0usize;
+        for a in &accs {
+            if !a.has_snapshot {
+                accounts.push(json!({"uid": a.uid, "nickname": a.nickname, "has_login": false, "error": "无登录态快照"}));
+                continue;
+            }
+            let (uid, nick, r) = &fetched[fi]; fi += 1;
+            if r.is_null() {
+                accounts.push(json!({"uid": uid, "nickname": nick, "has_login": false, "error": "登录态文件缺失或无效"}));
+                continue;
+            }
+            if let Some(err) = r.get("error") {
+                accounts.push(json!({"uid": uid, "nickname": nick, "has_login": true, "error": err}));
+                continue;
+            }
+            let balance = r.get("energy_balance").and_then(|x| x.as_f64()).unwrap_or(0.0);
+            let cost = r.get("cost_per_open").and_then(|x| x.as_f64()).unwrap_or(0.0);
+            let affordable = r.get("affordable").and_then(|x| x.as_i64()).unwrap_or(0);
+            let max_open = r.get("max_open_count").and_then(|x| x.as_i64()).unwrap_or(0);
+            let earned = r.get("energy_earned").and_then(|x| x.as_f64()).unwrap_or(0.0);
+            let consumed = r.get("energy_consumed").and_then(|x| x.as_f64()).unwrap_or(0.0);
+            let is_full = r.get("is_full").and_then(|x| x.as_bool()).unwrap_or(false);
+            accounts.push(json!({
+                "uid": uid, "nickname": nick, "has_login": true,
+                "energy_balance": balance, "cost_per_open": cost,
+                "affordable": affordable, "max_open_count": max_open,
+                "energy_earned": earned, "energy_consumed": consumed,
+                "is_full": is_full
+            }));
         }
-        let Some(login) = account_login(&vault, &a.uid) else {
-            accounts.push(json!({"uid": a.uid, "nickname": a.nickname, "has_login": false, "error": "登录态文件缺失或无效"}));
-            continue;
-        };
-        let r = api::pet_energy_as(&login);
-        if let Some(err) = r.get("error") {
-            accounts.push(json!({"uid": a.uid, "nickname": a.nickname, "has_login": true, "error": err}));
-            continue;
-        }
-        let balance = r.get("energy_balance").and_then(|x| x.as_f64()).unwrap_or(0.0);
-        let cost = r.get("cost_per_open").and_then(|x| x.as_f64()).unwrap_or(0.0);
-        let affordable = r.get("affordable").and_then(|x| x.as_i64()).unwrap_or(0);
-        let max_open = r.get("max_open_count").and_then(|x| x.as_i64()).unwrap_or(0);
-        let earned = r.get("energy_earned").and_then(|x| x.as_f64()).unwrap_or(0.0);
-        let consumed = r.get("energy_consumed").and_then(|x| x.as_f64()).unwrap_or(0.0);
-        let is_full = r.get("is_full").and_then(|x| x.as_bool()).unwrap_or(false);
-        accounts.push(json!({
-            "uid": a.uid, "nickname": a.nickname, "has_login": true,
-            "energy_balance": balance, "cost_per_open": cost,
-            "affordable": affordable, "max_open_count": max_open,
-            "energy_earned": earned, "energy_consumed": consumed,
-            "is_full": is_full
-        }));
-    }
-    json!({ "ok": true, "accounts": accounts })
+        json!({ "ok": true, "accounts": accounts })
+    }).await
 }
 
 /// 单个账号：抽盲盒（用其 vault 快照登录态 token 发请求）。
 /// count 默认抽满当前可抽数量（受能量与每日上限限制）；返回 { ok, status, message?, data?, error? }
 #[tauri::command]
-fn pet_draw_for(uid: String, count: Option<u64>) -> Value {
-    let vault = ops::vault_dir();
-    let Some(login) = account_login(&vault, &uid) else {
-        return json!({"uid": uid, "ok": false, "error": "登录态文件缺失或无效"});
-    };
-    let cnt = count.unwrap_or(1);
-    api::pet_draw_as(&login, cnt)
+async fn pet_draw_for(uid: String, count: Option<u64>) -> Value {
+    offload(move || {
+        let vault = ops::vault_dir();
+        let Some(login) = account_login(&vault, &uid) else {
+            return json!({"uid": uid, "ok": false, "error": "登录态文件缺失或无效"});
+        };
+        let cnt = count.unwrap_or(1);
+        api::pet_draw_as(&login, cnt)
+    }).await
 }
 
 // ---------- 模型 / API 管理（wb_api::models） ----------
@@ -633,13 +766,17 @@ fn delete_custom_model(id: String) -> Result<Value, String> {
 }
 
 #[tauri::command]
-fn test_custom_model(model: Value) -> Value {
-    api::models::test_model(&model)
+async fn test_custom_model(model: Value) -> Value {
+    offload(move || {
+        api::models::test_model(&model)
+    }).await
 }
 
 #[tauri::command]
-fn official_models() -> Value {
-    api::models::official_list()
+async fn official_models() -> Value {
+    offload(move || {
+        api::models::official_list()
+    }).await
 }
 
 #[tauri::command]
