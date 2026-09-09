@@ -294,7 +294,7 @@ async fn quota_all() -> Value {
                 .filter(|a| a.has_snapshot)
                 .map(|a| {
                     let uid = a.uid.clone();
-                    let nick = a.nickname.clone();
+                    let nick = a.nickname.clone().unwrap_or_default();
                     s.spawn(move || {
                         let r = match account_login(&vault, &uid) {
                             Some(login) => api::get_quota_as(&login),
@@ -452,7 +452,7 @@ async fn buddy_all_status() -> Value {
                 .filter(|a| a.has_snapshot)
                 .map(|a| {
                     let uid = a.uid.clone();
-                    let nick = a.nickname.clone();
+                    let nick = a.nickname.clone().unwrap_or_default();
                     s.spawn(move || {
                         let r = match account_login(&vault, &uid) {
                             Some(login) => api::buddy_status_as(&login),
@@ -664,7 +664,6 @@ async fn buddy_claim_for(uid: String) -> Value {
 
 /// 查询所有「已保存登录态」账号的宠物能量与抽奖额度，返回每个账号的能量是否已满。
 /// 与 buddy_all_status / quota_all 同构，覆盖 dashboard 只能看当前账号的局限。
-#[tauri::command]
 /// 全部账号宠物能量（v0.6.2：async + 账号间并行，原串行会冻结 UI 且慢）
 #[tauri::command]
 async fn pet_energy_all() -> Value {
@@ -679,7 +678,7 @@ async fn pet_energy_all() -> Value {
                 .filter(|a| a.has_snapshot)
                 .map(|a| {
                     let uid = a.uid.clone();
-                    let nick = a.nickname.clone();
+                    let nick = a.nickname.clone().unwrap_or_default();
                     s.spawn(move || {
                         let r = match account_login(&vault, &uid) {
                             Some(login) => api::pet_energy_as(&login),
