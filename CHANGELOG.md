@@ -7,6 +7,19 @@
 
 ---
 
+## v0.6.7（2026-09-20）— $wbEncrypted 信封自动解密（加密登录态全功能恢复）
+
+**背景**：v0.6.6 实现了加密登录态的检测与提示。本版进一步实现**自动解密**，加密环境用户的全部功能（额度/签到/记忆/切换）恢复可用。加密体系规则逐行取自官方 `app.asar` 的 `at-rest-crypto` chunk（勿凭记忆改动），并与 88lin/workbuddy-auto-signin#7、WorkDaddy#244 的同类实现相互印证：
+
+- **解密实现**：`wb_api::decrypt_envelope_fields` —— 识别登录态（内存视图）中的 `$wbEncrypted` 字段信封（accessToken/refreshToken/昵称/手机号），整段解密脚本跑在官方 WorkBuddy.exe（`ELECTRON_RUN_AS_NODE=1` node 模式）内：native binding 取编译期 `atRestSecretKey` → `sha256` 推导 protectorKey 与 keyId → 按官方 AAD 规则（`WB-AAD` domain + WBEV1 + sym-v1 + field framing）AES-256-GCM 解密。密钥不落盘、不出进程；**绝不回写原登录态文件**
+- **load_login 集成**：accessToken 为信封时自动解密，解出 token 后走原有全链路（额度/签到/记忆/仪表盘全部恢复）；解密失败（无官方 exe / 规则失效）回退 v0.6.6 的明确提示
+- **get_all 集成**：账号列表昵称/手机号为信封时批量解密展示，不再出现乱码/空昵称
+- **本地自测通过**：官方规则加密 → 解密往返一致（含中文昵称），keyId 校验 `9127dea1…`
+- 已知未验证点：加密客户端环境下，Hub 切换账号写回的明文快照能否被新版客户端接受（本机无法构造该环境）；切换校验对加密 token 快照仍拒绝（v0.6.6 行为）
+- bump 0.6.6 -> 0.6.7
+
+---
+
 ## v0.6.6（2026-09-20）— 新版客户端加密登录态（$wbEncrypted）检测与兼容提示
 
 **背景**：部分用户反馈 Hub 显示「未找到登录态 / 无本地数据目录」。排查确认：新版官方客户端把登录态文件的 `auth.accessToken` 改为加密存储——值从 `eyJ...` 明文字符串变为 `{"$wbEncrypted":1,"envelope":"..."}` dict。Hub 的 `accessToken.as_str()` 取不到值，被误判为「无 token / 未登录」。加密密钥在客户端内部，Hub 无法解密，本版做精准检测与明确提示（不再误导排查）：
