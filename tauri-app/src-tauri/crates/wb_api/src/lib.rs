@@ -128,11 +128,10 @@ fn auth_candidates() -> Vec<std::path::PathBuf> {
     cands
 }
 
-/// 诊断：返回候选登录态路径及其存在情况（供 macOS 找不到登录态时定位真实目录）
 /// 检测登录态文件中的 accessToken 是否为「新版客户端加密格式」：
 /// 值为 Object 且含 "$wbEncrypted" 标记（如 {"$wbEncrypted":1,"envelope":"..."}）。
-/// 该格式由官方客户端加密落盘，密钥在客户端内部，Hub 无法解密 → 只能检测并明确告知，
-/// 不能像旧版那样静默判为「无 token / 未登录」误导排查。返回命中的文件路径。
+/// 该格式由官方客户端加密落盘（5.6.0 起，AES-256-GCM 字段级信封），Hub 通过官方
+/// WorkBuddy.exe 取钥解密（见 decrypt_envelope_fields）；本函数保留用于诊断与前端提示。
 pub fn auth_token_encrypted() -> Option<String> {
     for p in auth_candidates() {
         if let Ok(s) = std::fs::read_to_string(&p) {
@@ -148,6 +147,192 @@ pub fn auth_token_encrypted() -> Option<String> {
     None
 }
 
+// ---------------------------------------------------------------------------
+// $wbEncrypted 字段信封解密（WorkBuddy 5.6.0+）
+//
+// 加密体系（规则逐行取自官方 app.asar 的 at-rest-crypto chunk，勿凭记忆改动）：
+//   key   = sha256(utf8(atRestSecretKey))            —— atRestSecretKey 来自官方
+//           WorkBuddy.exe 的 native binding（loggerGet），经 ELECTRON_RUN_AS_NODE=1 调用；
+//   keyId = sha256(key).hex[..16]；
+//   字段信封 = base64(JSON {suite:1, keyId, nonce(b64,12B), authTag(b64,16B), ciphertext(b64)})；
+//   解密   = AES-256-GCM(key, nonce, authTagLen 16)，
+//   AAD    = "WB-AAD\0" | 0x01 | lenPrefixed("WBEV1") | lenPrefixed("sym-v1")
+//            | uint32BE(suite) | lenPrefixed(keyId) | [2 /*field framing*/]
+//            | [0 /*无 sequence*/] | [0 /*final undefined*/]。
+//
+// 实现方式：整段解密脚本跑在官方 WorkBuddy.exe（node 模式）内——binding 取钥与
+// crypto 解密同进程完成，密钥不落盘、不出进程；Hub 仅投递信封字段、回收明文。
+// 只解用户本机自己的登录态（与 88lin/workbuddy-auto-signin#7、WorkDaddy#244 同类实现）。
+// ---------------------------------------------------------------------------
+
+const WB_DECRYPT_JS: &str = r#"
+const node_crypto = require('crypto');
+function lp(s) { const b = Buffer.from(s, 'utf8'); const l = Buffer.alloc(4); l.writeUInt32BE(b.length); return Buffer.concat([l, b]); }
+function u32(v) { const b = Buffer.alloc(4); b.writeUInt32BE(v); return b; }
+function buildAad(keyId, suite) {
+  return Buffer.concat([
+    Buffer.from('WB-AAD\0', 'ascii'),
+    Buffer.from([1]),
+    lp('WBEV1'),
+    lp('sym-v1'),
+    u32(suite),
+    lp(keyId),
+    Buffer.from([2]),
+    Buffer.from([0]),
+    Buffer.from([0])
+  ]);
+}
+function isWrapper(v) { return v && typeof v === 'object' && v.$wbEncrypted === 1 && typeof v.envelope === 'string' && !v.scheme; }
+function open(key, wrap) {
+  const envBytes = Buffer.from(wrap.envelope, 'base64');
+  const env = JSON.parse(envBytes.toString('utf8'));
+  if (env.suite !== 1) throw new Error('unsupported suite ' + env.suite);
+  const d = node_crypto.createDecipheriv('aes-256-gcm', key, Buffer.from(env.nonce, 'base64'), { authTagLength: 16 });
+  d.setAAD(buildAad(env.keyId, env.suite));
+  d.setAuthTag(Buffer.from(env.authTag, 'base64'));
+  return Buffer.concat([d.update(Buffer.from(env.ciphertext, 'base64')), d.final()]).toString('utf8');
+}
+let input = '';
+process.stdin.on('data', (c) => { input += c; });
+process.stdin.on('end', () => {
+  try {
+    const n = process._linkedBinding('electron_browser_workbuddy_storage');
+    const payload = JSON.parse(n.loggerGet());
+    const key = node_crypto.createHash('sha256').update(payload.atRestSecretKey, 'utf8').digest();
+    const fields = JSON.parse(input).fields || {};
+    const out = {};
+    for (const [name, v] of Object.entries(fields)) {
+      if (isWrapper(v)) {
+        try { out[name] = { ok: true, value: open(key, v) }; }
+        catch (e) { out[name] = { ok: false, err: String((e && e.message) || e) }; }
+      } else if (typeof v === 'string') {
+        out[name] = { ok: true, value: v };
+      } else {
+        out[name] = { ok: false, err: 'unsupported value type' };
+      }
+    }
+    process.stdout.write(JSON.stringify({ ok: true, out }));
+  } catch (e) {
+    process.stdout.write(JSON.stringify({ ok: false, err: String((e && e.message) || e) }));
+  }
+});
+"#;
+
+fn wb_exe_candidates() -> Vec<std::path::PathBuf> {
+    let mut v = Vec::new();
+    if cfg!(target_os = "windows") {
+        if let Ok(local) = std::env::var("LOCALAPPDATA") {
+            v.push(std::path::Path::new(&local).join("Programs").join("WorkBuddy").join("WorkBuddy.exe"));
+        }
+        if let Ok(pf) = std::env::var("ProgramFiles") {
+            v.push(std::path::Path::new(&pf).join("WorkBuddy").join("WorkBuddy.exe"));
+        }
+    } else if cfg!(target_os = "macos") {
+        v.push(std::path::PathBuf::from("/Applications/WorkBuddy.app/Contents/MacOS/WorkBuddy"));
+    }
+    v
+}
+
+fn is_field_envelope(v: &Value) -> bool {
+    v.is_object()
+        && v.get("$wbEncrypted").and_then(|x| x.as_i64()) == Some(1)
+        && v.get("envelope").map(|e| e.is_string()).unwrap_or(false)
+        && v.get("scheme").is_none()
+}
+
+/// 调官方 WorkBuddy.exe（node 模式）批量解密信封字段；input_json = {"fields": {...}}。
+/// 成功返回 stdout 的最后一行 JSON，失败返回 None。
+fn run_wb_decrypt_worker(input_json: &str) -> Option<String> {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    for exe in wb_exe_candidates() {
+        if !exe.is_file() { continue; }
+        let spawned = Command::new(&exe)
+            .env("ELECTRON_RUN_AS_NODE", "1")
+            .arg("-e")
+            .arg(WB_DECRYPT_JS)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn();
+        let Ok(mut child) = spawned else { continue; };
+        if let Some(mut si) = child.stdin.take() {
+            let _ = si.write_all(input_json.as_bytes());
+        } // drop 关闭 stdin，worker 收到 end 事件
+        match child.wait_with_output() {
+            Ok(o) if o.status.success() => {
+                let s = String::from_utf8_lossy(&o.stdout);
+                let s = s.trim();
+                let line = s.rsplit('\n').next().unwrap_or(s);
+                if line.starts_with('{') { return Some(line.to_string()); }
+            }
+            _ => continue,
+        }
+    }
+    None
+}
+
+/// 批量解密登录态（内存视图）中的 $wbEncrypted 字段信封：auth.accessToken/refreshToken、
+/// account.nickname/phoneNumber、allAccounts[].nickname/phoneNumber。绝不回写原文件。
+/// 返回是否有字段被解密替换（替换失败的信封保持原样，由上层诊断兜底）。
+pub fn decrypt_envelope_fields(d: &mut Value) -> bool {
+    let mut fields = serde_json::Map::new();
+    if let Some(auth) = d.get("auth") {
+        for k in ["accessToken", "refreshToken"] {
+            if let Some(v) = auth.get(k) {
+                if is_field_envelope(v) { fields.insert(k.to_string(), v.clone()); }
+            }
+        }
+    }
+    if let Some(acc) = d.get("account") {
+        for k in ["nickname", "phoneNumber"] {
+            if let Some(v) = acc.get(k) {
+                if is_field_envelope(v) { fields.insert(format!("account.{k}"), v.clone()); }
+            }
+        }
+    }
+    if let Some(arr) = d.get("allAccounts").and_then(|x| x.as_array()) {
+        for (i, a) in arr.iter().enumerate() {
+            for k in ["nickname", "phoneNumber"] {
+                if let Some(v) = a.get(k) {
+                    if is_field_envelope(v) { fields.insert(format!("allAccounts.{i}.{k}"), v.clone()); }
+                }
+            }
+        }
+    }
+    if fields.is_empty() { return false; }
+    let Some(out_line) = run_wb_decrypt_worker(&json!({ "fields": fields }).to_string()) else { return false; };
+    let Ok(parsed) = serde_json::from_str::<Value>(&out_line) else { return false; };
+    if parsed.get("ok").and_then(|x| x.as_bool()) != Some(true) { return false; }
+    let Some(res) = parsed.get("out").and_then(|x| x.as_object()) else { return false; };
+    let mut any = false;
+    for (name, entry) in res {
+        if entry.get("ok").and_then(|x| x.as_bool()) != Some(true) { continue; }
+        let Some(val) = entry.get("value").and_then(|x| x.as_str()) else { continue; };
+        let new_v = Value::String(val.to_string());
+        if let Some(rest) = name.strip_prefix("auth.") {
+            if let Some(a) = d.get_mut("auth") {
+                if a.get(rest).is_some() { a[rest] = new_v; any = true; }
+            }
+        } else if let Some(rest) = name.strip_prefix("account.") {
+            if let Some(a) = d.get_mut("account") {
+                if a.get(rest).is_some() { a[rest] = new_v; any = true; }
+            }
+        } else if let Some(rest) = name.strip_prefix("allAccounts.") {
+            let mut it = rest.splitn(2, '.');
+            if let (Some(idx), Some(k)) = (it.next(), it.next()) {
+                if let Ok(i) = idx.parse::<usize>() {
+                    if let Some(a) = d.get_mut("allAccounts").and_then(|x| x.get_mut(i)) {
+                        if a.get(k).is_some() { a[k] = new_v; any = true; }
+                    }
+                }
+            }
+        }
+    }
+    any
+}
+
+/// 诊断：返回候选登录态路径及其存在情况（供 macOS 找不到登录态时定位真实目录）
 pub fn auth_probe() -> Value {
     let platform = if cfg!(target_os = "windows") { "windows" } else { "macos" };
     let home = std::env::var("HOME").unwrap_or_default();
@@ -225,7 +410,13 @@ fn base64_decode(s: &str) -> Option<Vec<u8>> {
 pub fn load_login() -> Option<LoginInfo> {
     for p in auth_candidates() {
         if let Ok(s) = std::fs::read_to_string(&p) {
-            if let Ok(d) = serde_json::from_str::<Value>(&s) {
+            if let Ok(mut d) = serde_json::from_str::<Value>(&s) {
+                // 新版客户端（5.6.0+）字段级加密感知：accessToken 为 $wbEncrypted 信封时，
+                // 调官方 WorkBuddy.exe 取钥解密为内存视图（绝不回写原文件）
+                let tok_is_env = d.get("auth").and_then(|a| a.get("accessToken")).map_or(false, is_field_envelope);
+                if tok_is_env && !decrypt_envelope_fields(&mut d) {
+                    continue; // 解密失败（无官方 exe / 规则失效）→ 维持「未登录」，get_all 的 auth_encrypted 给诊断
+                }
                 let token = d.get("auth").and_then(|a| a.get("accessToken")).and_then(|t| t.as_str()).unwrap_or("").to_string();
                 if token.is_empty() { continue; }
                 let uid = d.get("account")
@@ -444,7 +635,13 @@ pub fn jwt_info() -> Value {
 /// 网络部分由前端分批独立调用 get_quota / get_checkin / get_memory 加载。
 pub fn get_all() -> Value {
     let login = load_login();
-    let auth_file = load_auth_file();
+    let mut auth_file = load_auth_file();
+    // 加密登录态环境：allAccounts 的昵称/手机号也是信封 → 解密为内存视图供展示
+    if let Some(af) = auth_file.as_mut() {
+        if af.get("auth").and_then(|a| a.get("accessToken")).map_or(false, is_field_envelope) {
+            decrypt_envelope_fields(af);
+        }
+    }
     let cur = login.as_ref().map(|l| l.uid.clone()).unwrap_or_default();
 
     let mut result = json!({
