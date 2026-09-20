@@ -255,7 +255,15 @@ function showAccountDetail(a, all) {
 
 // ===== 渲染各板块（与 web 版一致） =====
 function renderAccount(j) {
-  if (!j || !j.uid) { $('kv-account').innerHTML = '<span class="empty">未找到登录态</span>'; return; }
+  if (!j || !j.uid) {
+    // 区分「真没登录」与「新版客户端加密登录态（$wbEncrypted）：token 读不出但文件在」
+    if (window.__authEncrypted) {
+      $('kv-account').innerHTML = '<span class="perm-denied">⚠ 检测到登录态已加密（$wbEncrypted，新版客户端行为）<br><small style="color:var(--muted);">Hub 当前版本无法解密读取 token。<br>请确认官方客户端处于已登录状态；若客户端刚更新，可反馈等待适配。</small></span>';
+    } else {
+      $('kv-account').innerHTML = '<span class="empty">未找到登录态</span>';
+    }
+    return;
+  }
   const items = [
     ['昵称', acctLabel({ nickname: j.nickname, uid: j.uid })],
     ['UID', acctUidMask(j.uid)],
@@ -1563,6 +1571,8 @@ async function loadAll() {
     bootLog('启动加载：get_all 返回 ' + (j && typeof j), 'ok');
     if (ro) ro.textContent = JSON.stringify(j, null, 2);
 
+    window.__authEncrypted = !!(j && j.auth_encrypted && j.auth_encrypted.hit);
+    if (window.__authEncrypted) bootLog('登录态为加密格式（$wbEncrypted），无法直接读取 token', 'err');
     window.__login = j.login || {};
     try { renderSidebar(j); bootLog('启动加载：侧边栏已渲染'); }
     catch (e) { bootLog('启动加载：侧边栏渲染失败 ' + e.message, 'err'); }
@@ -1604,8 +1614,10 @@ function autoCheckin() {
     .finally(() => { checkinInFlight = false; });
 }
 function loadNetworkParts() {
+  // 回调可能同步返回 false（如无登录态时），必须包一层 Promise.resolve 再 .then，
+  // 否则 false.then 抛 TypeError 并沿同步链炸掉整个启动加载（他人机器无登录态必现）
   const retry = (fn, tries) => {
-    fn().then(ok => {
+    Promise.resolve(fn()).then(ok => {
       if (!ok && tries < 4) setTimeout(() => retry(fn, tries + 1), 800 * (tries + 1));
     });
   };
@@ -1633,7 +1645,7 @@ function loadNetworkParts() {
   // 用量与对话历史：进入软件默认获取（无需手动点刷新）
   retry(() => {
     const cur = (window.__login && window.__login.uid) || '';
-    if (!cur) return false;
+    if (!cur) return Promise.resolve(false);  // 无登录态：静默跳过，不视为错误
     return uhRefresh(cur, true).then(() => true).catch(() => false);
   }, 0);
 

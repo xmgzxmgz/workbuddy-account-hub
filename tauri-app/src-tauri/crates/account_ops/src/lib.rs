@@ -1199,9 +1199,13 @@ fn switch_auth_to(src_auth: &Path, uid: &str) -> Result<(), String> {
     // ⚠️ 关键校验：目标快照必须含真实 auth.accessToken。
     // materialize 生成的占位快照无 token（实测 allAccounts 条目不含 token），
     // 若放行，写回登录态后 WorkBuddy 将以无 token 状态启动 → 登录态失效。
-    let has_token = target
-        .get("auth")
-        .and_then(|a| a.get("accessToken"))
+    // 新版客户端加密格式（{"$wbEncrypted":...} dict）同样视为无效：Hub 无法解密，
+    // 写回后客户端也读不出 token，必须明确报错而非静默放行。
+    let tok = target.get("auth").and_then(|a| a.get("accessToken"));
+    if tok.map(|t| t.is_object() && t.get("$wbEncrypted").is_some()).unwrap_or(false) {
+        return Err("目标快照的 accessToken 是新版客户端加密格式（$wbEncrypted），Hub 无法解密、切换后无法使用。请在官方客户端登录该账号后重新保存登录态".into());
+    }
+    let has_token = tok
         .and_then(|t| t.as_str())
         .map(|t| !t.is_empty())
         .unwrap_or(false);

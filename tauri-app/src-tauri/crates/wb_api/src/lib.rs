@@ -129,6 +129,25 @@ fn auth_candidates() -> Vec<std::path::PathBuf> {
 }
 
 /// 诊断：返回候选登录态路径及其存在情况（供 macOS 找不到登录态时定位真实目录）
+/// 检测登录态文件中的 accessToken 是否为「新版客户端加密格式」：
+/// 值为 Object 且含 "$wbEncrypted" 标记（如 {"$wbEncrypted":1,"envelope":"..."}）。
+/// 该格式由官方客户端加密落盘，密钥在客户端内部，Hub 无法解密 → 只能检测并明确告知，
+/// 不能像旧版那样静默判为「无 token / 未登录」误导排查。返回命中的文件路径。
+pub fn auth_token_encrypted() -> Option<String> {
+    for p in auth_candidates() {
+        if let Ok(s) = std::fs::read_to_string(&p) {
+            if let Ok(d) = serde_json::from_str::<Value>(&s) {
+                if let Some(t) = d.get("auth").and_then(|a| a.get("accessToken")) {
+                    if t.is_object() && t.get("$wbEncrypted").is_some() {
+                        return Some(p.to_string_lossy().into_owned());
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
 pub fn auth_probe() -> Value {
     let platform = if cfg!(target_os = "windows") { "windows" } else { "macos" };
     let home = std::env::var("HOME").unwrap_or_default();
@@ -470,6 +489,12 @@ pub fn get_all() -> Value {
     if login.is_none() {
         result["auth_probe"] = auth_probe();
     }
+    // 新版客户端加密登录态检测：accessToken 为 {"$wbEncrypted":...} dict 时 load_login 取不到
+    // token 会判「未登录」，这里单独暴露标记，前端据此给出明确提示而非误导性「未找到登录态」
+    result["auth_encrypted"] = match auth_token_encrypted() {
+        Some(p) => json!({ "hit": true, "file": p }),
+        None => json!({ "hit": false }),
+    };
     result
 }
 
