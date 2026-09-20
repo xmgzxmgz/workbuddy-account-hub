@@ -1005,6 +1005,67 @@ async function loadQuotaAll() {
   } catch (e) { toast('查询全部额度失败: ' + e); }
 }
 
+// ===== 积分池智能调度（提醒式，参考 changexbc/workbuddy-switch 的保守策略） =====
+// 全池算出「remain>0 且未过期的最早积分包」所属账号，与当前登录账号比较：
+// 只有推荐账号比当前账号早到期 ≥24h（或当前账号无紧迫到期积分）才提示，
+// 避免 prompt 缓存（按账号维度）频繁失效造成隐性浪费。切换复用现有 switchTo
+// （自动备份当前账号 → 优雅退出 WorkBuddy → 换入目标登录态 → 自动重启）。
+const POOL_ADVANCE_MS = 24 * 3600 * 1000;
+
+// 单账号：remain>0、未过期、非不限量、非体验版包里最早的到期时间 → { ms, remain } | null
+function acctEarliest(r) {
+  const q = (r.parsed && Array.isArray(r.parsed.packages)) ? adaptParsed(r.parsed) : parseQuota(r.body);
+  if (!q) return null;
+  let best = null;
+  for (const p of (q.pkgs || [])) {
+    if (p.is_unlimited || p.trial) continue;
+    if (!(Number(p.remain) > 0)) continue;
+    if (!p.deduction_end) continue;
+    const t = new Date(p.deduction_end < 1e12 ? p.deduction_end * 1000 : p.deduction_end);
+    const ms = t.getTime();
+    if (isNaN(ms) || ms <= Date.now()) continue;
+    if (!best || ms < best.ms) best = { ms, remain: Number(p.remain) };
+  }
+  return best;
+}
+
+// 全池推荐：最早过期时间最小者；并列取总余量大者。返回 { uid, nick, ms, remain, grand } | null
+function pickExpiryFirst(results) {
+  let best = null;
+  for (const r of results || []) {
+    if (!r || r.uid == null || r.permission_denied) continue;
+    if (r.error && !r.body) continue;
+    const e = acctEarliest(r);
+    if (!e) continue;
+    const q = (r.parsed && Array.isArray(r.parsed.packages)) ? adaptParsed(r.parsed) : parseQuota(r.body);
+    const grand = q ? q.grandRemain : 0;
+    if (!best || e.ms < best.ms || (e.ms === best.ms && grand > best.grand)) {
+      best = { uid: r.uid, nick: acctLabel(r), ms: e.ms, remain: e.remain, grand };
+    }
+  }
+  return best;
+}
+
+function renderPoolSuggest(results) {
+  const box = $('qa-suggest'); if (!box) return;
+  const rec = pickExpiryFirst(results);
+  const curUid = (window.__login || {}).uid;
+  if (!rec || rec.uid === curUid) { box.innerHTML = ''; return; }
+  const cur = (results || []).find(x => x && x.uid === curUid);
+  const curE = cur ? acctEarliest(cur) : null;
+  // 当前账号有紧迫积分且与推荐差距 <24h → 不打扰（缓存保护阈值）
+  if (curE && (curE.ms - rec.ms) < POOL_ADVANCE_MS) { box.innerHTML = ''; return; }
+  const curTxt = curE ? fmt(curE.ms) : null;
+  box.innerHTML =
+    `<div class="pool-suggest">🎯 积分池调度建议：切到 <b>${escapeHtml(rec.nick || rec.uid)}</b>` +
+    ` — 积分 <b>${fmt(rec.ms)}</b> 最早过期（余 ${fmtQty(rec.remain)}）` +
+    (curTxt ? `，当前账号最早 ${curTxt}` : '，当前账号无紧迫到期积分') +
+    ` <button class="mini" onclick="poolSwitchTo('${rec.uid}')">⚡ 一键切换</button></div>`;
+}
+
+// 提醒式调度入口：复用现有 switchTo（防重入 + 自动备份 + 优雅退出 + 自动重启）
+async function poolSwitchTo(uid) { await switchTo(uid); }
+
 function renderQuotaAll(results, opts) {
   opts = opts || {};
   const tb = $('qa-tbody'); if (!tb) return;
@@ -1012,8 +1073,13 @@ function renderQuotaAll(results, opts) {
   // 全量加载时记录原始结果，供搜索/排名过滤重渲染（不覆盖）
   if (opts.full !== false) lastQuotaAllResults = results;
   let rows = results.slice();
-  // 排名模式：按全部剩余额度降序（仅影响展示顺序）
-  if (opts.rank) {
+  // 排名模式：1=按全部剩余额度降序、2=按最快过期升序（仅影响展示顺序）
+  if (opts.rank === 2) {
+    rows.sort((a, b) => {
+      const ea = acctEarliest(a), eb = acctEarliest(b);
+      return (ea ? ea.ms : Infinity) - (eb ? eb.ms : Infinity);
+    });
+  } else if (opts.rank) {
     rows.sort((a, b) => {
       const qa = (a.parsed && Array.isArray(a.parsed.packages)) ? adaptParsed(a.parsed) : parseQuota(a.body);
       const qb = (b.parsed && Array.isArray(b.parsed.packages)) ? adaptParsed(b.parsed) : parseQuota(b.body);
@@ -1043,6 +1109,9 @@ function renderQuotaAll(results, opts) {
     const typ = r.status === 200 ? '<span class="ok">✓</span>' : (r.error ? '<span class="soon">失败</span>' : (r.skipped ? '跳过' : '—'));
     const exp = q.soonest ? qaExpChip(q.soonest.dl) : '长期';
     const ckBtn = `<button class="mini" onclick="qaCheckinFor('${uid}')">签到</button>`;
+    const curUid = (window.__login || {}).uid;
+    const swBtn = (uid === curUid) ? '<span class="pool-cur">当前</span>'
+      : `<button class="mini" title="切到此账号对话（自动备份当前账号并重启 WorkBuddy）" onclick="poolSwitchTo('${uid}')">切换</button>`;
     return `<tr>
       <td>${nameCell}</td>
       <td>${typ}</td>
@@ -1050,9 +1119,11 @@ function renderQuotaAll(results, opts) {
       <td class="num">${q.trialRemain.toFixed(2)}</td>
       <td class="num">${q.grandRemain.toFixed(2)}</td>
       <td>${exp}</td>
-      <td style="white-space:nowrap;">${ckBtn}</td>
+      <td style="white-space:nowrap;">${ckBtn} ${swBtn}</td>
     </tr>`;
   }).join('');
+  // 积分池调度建议（基于全量结果，不受搜索过滤影响）
+  if (opts.full !== false) renderPoolSuggest(results);
   // 过滤（搜索）时保留全量汇总，避免数字随筛选跳变
   if (opts.full !== false) {
     $('qa-count').textContent = cnt;
@@ -1071,7 +1142,7 @@ function qaExpChip(dl) {
 }
 
 // ===== Batch C：趋势 / 预算 / 排名 / 搜索 / 星标 / 标签 / 导出（纯前端，localStorage 持久化） =====
-let qaRankMode = false;
+let qaRankMode = 0; // 0=关 1=按剩余额度 2=按最快过期（积分池调度视角）
 let lastQuotaAllResults = null;
 
 // ---- 账号星标 / 标签（按 UID，localStorage） ----
@@ -1158,7 +1229,11 @@ function applyQuotaAllFilters() {
   if (q) rows = rows.filter(r => (r.nickname || '').toLowerCase().includes(q) || (r.uid || '').toLowerCase().includes(q));
   renderQuotaAll(rows, { full: false, rank: qaRankMode });
 }
-function qaToggleRank() { qaRankMode = !qaRankMode; applyQuotaAllFilters(); toast(qaRankMode ? '已按剩余额度排名' : '已关闭排名'); }
+function qaToggleRank() {
+  qaRankMode = (qaRankMode + 1) % 3;
+  applyQuotaAllFilters();
+  toast(['已关闭排名', '已按剩余额度排名', '已按最快过期排名（积分池调度视角）'][qaRankMode]);
+}
 
 // ---- 导出脱敏 Markdown ----
 function exportQuotaMd() {
