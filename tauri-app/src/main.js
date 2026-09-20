@@ -316,8 +316,9 @@ function parseQuota(body) {
   const gift = pkgs.filter(p => !p.trial);
   const trial = pkgs.filter(p => p.trial);
   const sum = (arr, k) => arr.reduce((s, x) => s + x[k], 0);
+  // 最早到期只看「还有剩余积分」的包；已用尽的包到期即失效，不参与任何展示
   let soonest = null;
-  for (const a of gift) { const dl = daysLeft(a.deduction_end); if (dl === null) continue; if (!soonest || dl < soonest.dl) soonest = { dl, a }; }
+  for (const a of gift) { if (!(a.remain > 0)) continue; const dl = daysLeft(a.deduction_end); if (dl === null) continue; if (!soonest || dl < soonest.dl) soonest = { dl, a }; }
   return {
     pkgs, gift, trial,
     giftRemain: sum(gift, 'remain'), giftUsed: sum(gift, 'used'), giftSize: sum(gift, 'size'),
@@ -335,8 +336,9 @@ function adaptParsed(p) {
   }));
   const gift = pkgs.filter(x => !x.trial), trial = pkgs.filter(x => x.trial);
   const sum = (a, k) => a.reduce((s, x) => s + (x[k] || 0), 0);
+  // 最早到期只看「还有剩余积分」的包；已用尽的包到期即失效，不参与任何展示
   let soonest = null;
-  for (const a of gift) { const dl = daysLeft(a.deduction_end); if (dl === null) continue; if (!soonest || dl < soonest.dl) soonest = { dl, a }; }
+  for (const a of gift) { if (!(a.remain > 0)) continue; const dl = daysLeft(a.deduction_end); if (dl === null) continue; if (!soonest || dl < soonest.dl) soonest = { dl, a }; }
   return {
     pkgs, gift, trial,
     giftRemain: sum(gift, 'remain'), giftUsed: sum(gift, 'used'), giftSize: sum(gift, 'size'),
@@ -369,18 +371,22 @@ function renderQuota(payload) {
   }
   if (!q) return;
   const { pkgs, gift, trial, giftRemain, giftUsed, giftSize, trialRemain, grandRemain, grandUsed, grandSize, soonest, usePct } = q;
+  // 已用尽（remain≤0）的包不参与任何展示：计数、时间轴、明细表全部过滤
+  const visPkgs = pkgs.filter(p => p.remain > 0);
+  const visGift = gift.filter(p => p.remain > 0);
+  const visTrial = trial.filter(p => p.remain > 0);
   $('ov-gift').textContent = giftRemain.toFixed(2);
-  $('ov-gift-m').textContent = `已用 ${giftUsed.toFixed(2)} / ${giftSize.toFixed(2)} · ${gift.length} 包`;
+  $('ov-gift-m').textContent = `已用 ${giftUsed.toFixed(2)} / ${giftSize.toFixed(2)} · ${visGift.length} 包`;
   $('ov-trial').textContent = trialRemain.toFixed(2);
-  $('ov-trial-m').textContent = `体验版 · ${trial.length} 个`;
+  $('ov-trial-m').textContent = `体验版 · ${visTrial.length} 个`;
   $('ov-grand').textContent = grandRemain.toFixed(2);
   $('ov-grand-m').textContent = `已用 ${grandUsed.toFixed(2)} / ${grandSize.toFixed(2)}`;
   $('q-use').textContent = usePct + '%';
   $('q-use-m').textContent = `${grandUsed.toFixed(2)} / ${grandSize.toFixed(2)}`;
-  $('q-count').textContent = pkgs.length;
+  $('q-count').textContent = visPkgs.length;
   $('q-expire').textContent = soonest ? (soonest.dl <= 0 ? '已过期' : soonest.dl + ' 天') : '长期';
   const track = $('axis-track');
-  const dots = gift.map(p => {
+  const dots = visGift.map(p => {
     const dl = daysLeft(p.deduction_end);
     if (dl === null) return '';
     const pos = Math.max(6, Math.min(94, 6 + (dl / 90) * 88));
@@ -391,7 +397,7 @@ function renderQuota(payload) {
   track.querySelectorAll('.axis-dot').forEach(n => n.remove());
   track.insertAdjacentHTML('beforeend', dots);
   const tb = $('pkg-body'); tb.innerHTML = '';
-  for (const a of pkgs) {
+  for (const a of visPkgs) {
     const pct = a.size > 0 ? Math.round(a.used / a.size * 100) : 0;
     const dl = daysLeft(a.deduction_end);
     const pill = a.trial ? '<span class="pill trial">体验版</span>' : '<span class="pill gift">赠送包</span>';
@@ -487,14 +493,18 @@ function buildReport() {
   lines.push(`- 类型：${L.type === 'personal' ? '个人账号' : '—'}`);
   lines.push(`- 登录态剩余：${($('jwt-days').textContent || '—')} 天（过期 ${($('ov-jwt-m').textContent || '').replace('过期 ', '')}）`);
   if (q.pkgs) {
+    // 已用尽的包不展示：明细与包数只统计 remain>0
+    const visPkgsMd = q.pkgs.filter(p => p.remain > 0);
+    const visGiftMd = q.gift.filter(p => p.remain > 0);
+    const visTrialMd = q.trial.filter(p => p.remain > 0);
     lines.push(''); lines.push('## 积分额度');
-    lines.push(`- 权益赠送包剩余：${q.giftRemain.toFixed(2)}（已用 ${q.giftUsed.toFixed(2)} / ${q.giftSize.toFixed(2)}，${q.gift.length} 包）`);
-    lines.push(`- 体验版剩余：${q.trialRemain.toFixed(2)}（${q.trial.length} 个）`);
+    lines.push(`- 权益赠送包剩余：${q.giftRemain.toFixed(2)}（已用 ${q.giftUsed.toFixed(2)} / ${q.giftSize.toFixed(2)}，${visGiftMd.length} 包）`);
+    lines.push(`- 体验版剩余：${q.trialRemain.toFixed(2)}（${visTrialMd.length} 个）`);
     lines.push(`- 全部剩余：${q.grandRemain.toFixed(2)}（已用 ${q.grandUsed.toFixed(2)} / ${q.grandSize.toFixed(2)}）`);
     lines.push(`- 总使用率：${q.usePct}%`);
     lines.push(`- 最早到期：${($('q-expire').textContent || '—')}`);
     lines.push('- 套餐明细：');
-    q.pkgs.forEach(p => {
+    visPkgsMd.forEach(p => {
       const dl = daysLeft(p.deduction_end);
       lines.push(`  - ${p.name} [${p.trial ? '体验版' : '赠送包'}] 剩余 ${p.remain.toFixed(2)} / ${p.size.toFixed(2)}，抵扣到期 ${p.deduction_end || '—'}${dl !== null ? ` (${dl}天)` : ''}`);
     });
