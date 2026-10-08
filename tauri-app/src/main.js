@@ -258,7 +258,7 @@ function renderAccount(j) {
   if (!j || !j.uid) {
     // 区分「真没登录」与「新版客户端加密登录态（$wbEncrypted）：token 读不出但文件在」
     if (window.__authEncrypted) {
-      $('kv-account').innerHTML = '<span class="perm-denied">⚠ 登录态已加密（$wbEncrypted）且自动解密失败<br><small style="color:var(--muted);">通常是未找到官方 WorkBuddy.exe（自定义安装路径）。<br>请设置环境变量 WORKBUDDY_EXE 指向 WorkBuddy.exe 后重启 Hub 重试。</small></span>';
+      $('kv-account').innerHTML = '<span class="perm-denied">⚠ 登录态已加密（$wbEncrypted）且自动解密失败<br>未找到官方 WorkBuddy.exe —— <a href="#" onclick="openSettings();return false;" style="color:var(--amber);text-decoration:underline;">打开 ⚙ 设置手动指定路径</a></span>';
     } else {
       $('kv-account').innerHTML = '<span class="empty">未找到登录态</span>';
     }
@@ -1923,6 +1923,55 @@ async function restartWB() {
 })();
 
 // 一键「刷新全部」：本地信息 + 网络部分 + 宠物面板一次性全部刷新（含宠物，避免只点宠物按钮才出）
+// ===== 设置面板（v0.6.13）：WorkBuddy.exe 自动检测 / 手选兜底 =====
+function openSettings() {
+  $('settings-modal').classList.add('show');
+  loadExeSettings();
+}
+function closeSettings() { $('settings-modal').classList.remove('show'); }
+function showSetErr(msg) { const el = $('set-err'); el.textContent = msg; el.style.display = 'block'; }
+async function loadExeSettings() {
+  const eff = $('set-effective'), err = $('set-err');
+  eff.textContent = '读取中…'; err.style.display = 'none';
+  try {
+    const j = await invoke('get_exe_settings');
+    if (j.effective) {
+      eff.innerHTML = '<span style="color:#7bc47f;">✓ 已检测到</span> <code>' + escapeHtml(j.effective) + '</code>';
+    } else {
+      eff.innerHTML = '<span style="color:var(--red);">✗ 未检测到 WorkBuddy.exe</span>（客户端未运行且无标准安装）——请在下方手动指定';
+    }
+    $('set-manual').value = j.manual || '';
+    $('set-candidates').innerHTML = (j.candidates || []).map(c =>
+      (c.exists ? '✓' : '✗') + ' ' + escapeHtml(c.path)).join('<br>');
+  } catch (e) {
+    eff.textContent = '读取失败：' + e;
+  }
+}
+async function browseExe() {
+  try {
+    const j = await invoke('pick_workbuddy_exe');
+    if (j.ok && j.path) $('set-manual').value = j.path;
+    else if (j.cancelled) return;
+    else showSetErr(j.error || '选择失败');
+  } catch (e) { showSetErr(String(e)); }
+}
+async function saveExeSetting() {
+  const path = $('set-manual').value.trim();
+  if (!path) { showSetErr('路径为空：如需恢复自动检测请点「恢复自动检测」'); return; }
+  try {
+    const j = await invoke('save_exe_setting', { path });
+    if (j.ok) { closeSettings(); bootLog('已保存 WorkBuddy 路径，重新加载…', 'ok'); loadAll(); }
+    else showSetErr(j.error || '保存失败');
+  } catch (e) { showSetErr(String(e)); }
+}
+async function clearExeSetting() {
+  try {
+    const j = await invoke('save_exe_setting', { path: '' });
+    if (j.ok) { closeSettings(); bootLog('已清除手动路径，恢复自动检测', 'ok'); loadAll(); }
+    else showSetErr(j.error || '清除失败');
+  } catch (e) { showSetErr(String(e)); }
+}
+
 function refreshAll() { loadAll(); loadBuddy(); }
 
 // ===== 用量与对话历史面板 =====

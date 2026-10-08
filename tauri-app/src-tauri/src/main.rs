@@ -123,6 +123,37 @@ async fn get_quota() -> Value {
     }).await
 }
 
+// ===== v0.6.13 设置面板：WorkBuddy.exe 自动检测诊断 / 手选兜底 / 原生浏览框 =====
+
+#[tauri::command]
+fn get_exe_settings() -> Value {
+    api::wb_exe_diagnostics()
+}
+
+#[tauri::command]
+fn save_exe_setting(path: String) -> Value {
+    match api::save_manual_exe(&path) {
+        Ok(()) => json!({ "ok": true }),
+        Err(e) => json!({ "ok": false, "error": e }),
+    }
+}
+
+/// 原生「浏览…」文件选择框。rfd 的 AsyncFileDialog 内部处理主线程调度
+/// （macOS 上对话框必须在主线程弹，Windows 上走 COM），故用异步 API + tauri 执行器等待。
+#[tauri::command]
+async fn pick_workbuddy_exe() -> Value {
+    tauri::async_runtime::spawn_blocking(move || {
+        let dlg = rfd::AsyncFileDialog::new().set_title("选择 WorkBuddy 客户端可执行文件");
+        #[cfg(windows)]
+        let dlg = dlg.add_filter("WorkBuddy.exe", &["exe"]);
+        let picked = tauri::async_runtime::block_on(dlg.pick_file());
+        match picked {
+            Some(f) => json!({ "ok": true, "path": f.path().to_string_lossy().into_owned() }),
+            None => json!({ "ok": false, "cancelled": true }),
+        }
+    }).await.unwrap_or_else(|e| json!({ "ok": false, "error": format!("对话框异常: {}", e) }))
+}
+
 #[tauri::command]
 async fn get_checkin() -> Value {
     offload(move || {
@@ -874,6 +905,9 @@ pub fn run() {
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
             get_all,
+            get_exe_settings,
+            save_exe_setting,
+            pick_workbuddy_exe,
             get_quota,
             get_checkin,
             get_memory,

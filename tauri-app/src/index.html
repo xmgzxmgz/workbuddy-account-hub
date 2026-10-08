@@ -496,6 +496,7 @@
       <button class="secondary" onclick="openReport()">导出报告</button>
       <button class="secondary" onclick="openBackups()" title="查看每个账号的历史自动/手动备份">🕘 历史备份</button>
       <button class="secondary eye-global off" id="eye-global" title="显示所有隐私数据中段（Key/UID/Token 等）" onclick="toggleAllKeys()">👁 隐私</button>
+      <button class="secondary" id="settings-btn" title="设置（WorkBuddy 路径等）" onclick="openSettings()">⚙</button>
       <div class="notify-wrap" id="notify-wrap">
         <button class="secondary notify-btn" id="notify-btn" title="历史消息" onclick="toggleNotify()">🔔</button>
         <span class="notify-badge" id="notify-badge">0</span>
@@ -759,6 +760,36 @@
       <pre id="raw-out">点击「刷新全部」…</pre>
     </div>
   </main>
+
+  <!-- 设置弹窗（v0.6.13）：WorkBuddy.exe 路径 -->
+  <div class="modal" id="settings-modal">
+    <div class="modal-box" style="width:560px;max-width:92vw;">
+      <div class="modal-head"><span>⚙ 设置 — WorkBuddy 客户端路径</span><button onclick="closeSettings()">×</button></div>
+      <div class="modal-body" style="padding:15px 17px;display:flex;flex-direction:column;gap:12px;">
+        <div>
+          <label style="font-size:11px;color:var(--muted);">自动检测结果（当前生效）</label>
+          <div id="set-effective" style="font-size:12px;margin-top:4px;word-break:break-all;">读取中…</div>
+        </div>
+        <div>
+          <label style="font-size:11px;color:var(--muted);">手动指定路径（自动检测失败时的兜底，留空恢复自动）</label>
+          <div style="display:flex;gap:8px;margin-top:4px;">
+            <input id="set-manual" type="text" placeholder="例如 D:\Soft\WorkBuddy\WorkBuddy.exe"
+                   style="flex:1;font-size:12px;padding:7px 9px;background:var(--bg2,#131722);border:1px solid var(--line);border-radius:8px;color:var(--fg);" />
+            <button class="secondary" onclick="browseExe()">浏览…</button>
+          </div>
+          <div class="modal-err" id="set-err" style="display:none;"></div>
+        </div>
+        <details style="font-size:11px;color:var(--muted);">
+          <summary style="cursor:pointer;">候选路径明细</summary>
+          <div id="set-candidates" style="margin-top:6px;line-height:1.7;word-break:break-all;"></div>
+        </details>
+      </div>
+      <div class="modal-foot">
+        <button class="secondary" onclick="clearExeSetting()">恢复自动检测</button>
+        <button onclick="saveExeSetting()">保存</button>
+      </div>
+    </div>
+  </div>
 
   <!-- 模型编辑弹窗 -->
   <div class="modal" id="model-modal">

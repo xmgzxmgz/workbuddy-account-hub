@@ -218,34 +218,190 @@ process.stdin.on('end', () => {
 });
 "#;
 
-fn wb_exe_candidates() -> Vec<std::path::PathBuf> {
-    let mut v = Vec::new();
-    // 自定义安装路径支持：WORKBUDDY_EXE 环境变量优先（如 D 盘安装 / junction 映射）
-    if let Ok(p) = std::env::var("WORKBUDDY_EXE") {
-        if !p.trim().is_empty() {
-            v.push(std::path::PathBuf::from(p.trim()));
+// ===== v0.6.13 WorkBuddy.exe 解析：自动检测优先，手选兜底 =====
+// 优先级：①正在运行的客户端进程真实路径（最可靠，客户端开着就能抓到）
+//        ②注册表 NSIS 卸载信息 InstallLocation（客户端没开也能找到）
+//        ③标准安装路径（LOCALAPPDATA / Program Files / macOS /Applications）
+//        ④设置面板手选路径（hub_settings.json，自动检测全失败时兜底）
+//        ⑤WORKBUDDY_EXE 环境变量（向后兼容）
+// 昂贵检测（进程/注册表）带 60s TTL 缓存，且只在缓存失效时执行一次。
+
+const DETECT_TTL: std::time::Duration = std::time::Duration::from_secs(60);
+
+fn detect_cache() -> &'static std::sync::Mutex<
+    std::collections::HashMap<&'static str, (std::time::Instant, Option<std::path::PathBuf>)>,
+> {
+    use std::sync::OnceLock;
+    static CACHE: OnceLock<std::sync::Mutex<std::collections::HashMap<&'static str, (std::time::Instant, Option<std::path::PathBuf>)>>> = OnceLock::new();
+    CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+fn cached_detect(key: &'static str, f: impl FnOnce() -> Option<std::path::PathBuf>) -> Option<std::path::PathBuf> {
+    let now = std::time::Instant::now();
+    if let Ok(mut m) = detect_cache().lock() {
+        if let Some((t, v)) = m.get(key) {
+            if now.duration_since(*t) < DETECT_TTL { return v.clone(); }
         }
+        let val = f();
+        m.insert(key, (now, val.clone()));
+        val
+    } else {
+        None
     }
-    if cfg!(target_os = "windows") {
-        // LOCALAPPDATA 缺失时从 USERPROFILE 推导（任务计划/服务上下文可能给最小环境块）
+}
+
+/// 隐藏控制台窗口（GUI 父进程 spawn 子进程时避免黑框闪烁）
+fn hidden_cmd(program: &str) -> std::process::Command {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        let mut c = std::process::Command::new(program);
+        c.creation_flags(0x08000000); // CREATE_NO_WINDOW
+        c
+    }
+    #[cfg(not(windows))]
+    {
+        std::process::Command::new(program)
+    }
+}
+
+/// 自动检测①：正在运行的 WorkBuddy.exe 的真实路径
+fn detect_running_exe() -> Option<std::path::PathBuf> {
+    cached_detect("running", || {
+        if cfg!(windows) {
+            let out = hidden_cmd("powershell")
+                .args(["-NoProfile", "-Command",
+                    "(Get-Process WorkBuddy -ErrorAction SilentlyContinue | Select-Object -First 1).Path"])
+                .output().ok()?;
+            let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if s.ends_with(".exe") { Some(std::path::PathBuf::from(s)) } else { None }
+        } else if cfg!(target_os = "macos") {
+            let out = std::process::Command::new("pgrep")
+                .args(["-x", "WorkBuddy"]).output().ok()?;
+            let pid = String::from_utf8_lossy(&out.stdout).lines().next()?.trim().to_string();
+            let out2 = std::process::Command::new("ps").args(["-p", &pid, "-o", "command="]).output().ok()?;
+            let s = String::from_utf8_lossy(&out2.stdout).trim().to_string();
+            Some(std::path::PathBuf::from(s))
+        } else {
+            None
+        }
+    })
+}
+
+/// 自动检测②：注册表 NSIS 卸载信息里的 InstallLocation
+fn detect_registry_exe() -> Option<std::path::PathBuf> {
+    cached_detect("registry", || {
+        if !cfg!(windows) { return None; }
+        for key in [
+            r"HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\WorkBuddy",
+            r"HKLM\Software\Microsoft\Windows\CurrentVersion\Uninstall\WorkBuddy",
+            r"HKLM\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\WorkBuddy",
+        ] {
+            if let Ok(out) = hidden_cmd("reg").args(["query", key, "/v", "InstallLocation"]).output() {
+                let s = String::from_utf8_lossy(&out.stdout);
+                for line in s.lines() {
+                    if let Some(idx) = line.find("REG_SZ") {
+                        let dir = line[idx + 6..].trim().trim_matches('"');
+                        if !dir.is_empty() {
+                            let p = std::path::Path::new(dir).join("WorkBuddy.exe");
+                            if p.is_file() { return Some(p); }
+                        }
+                    }
+                }
+            }
+        }
+        None
+    })
+}
+
+/// 手选路径（设置面板写 hub_settings.json；便携式，与 hub exe 同目录）
+pub fn hub_settings_file() -> Option<std::path::PathBuf> {
+    std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.join("hub_settings.json")))
+}
+
+pub fn load_manual_exe() -> Option<std::path::PathBuf> {
+    let f = hub_settings_file()?;
+    let Ok(s) = std::fs::read_to_string(&f) else { return None; };
+    let Ok(v) = serde_json::from_str::<Value>(&s) else { return None; };
+    let p = v.get("workbuddy_exe")?.as_str()?.trim().to_string();
+    if p.is_empty() { return None; }
+    Some(std::path::PathBuf::from(p))
+}
+
+pub fn save_manual_exe(path: &str) -> Result<(), String> {
+    let Some(f) = hub_settings_file() else { return Err("无法定位设置文件目录".into()); };
+    // 空路径 = 清除手选，恢复纯自动检测
+    if path.trim().is_empty() {
+        serde_json::to_writer_pretty(std::fs::File::create(&f).map_err(|e| e.to_string())?,
+            &json!({ "workbuddy_exe": Value::Null, "saved_at": chrono::Local::now().to_rfc3339() }))
+            .map_err(|e| e.to_string())?;
+        return Ok(());
+    }
+    let p = std::path::Path::new(path.trim());
+    if !p.is_file() { return Err(format!("文件不存在：{}", path.trim())); }
+    let name_ok = p.file_name().map(|n| {
+        let n = n.to_string_lossy().to_lowercase();
+        n == "workbuddy.exe" || n == "workbuddy"
+    }).unwrap_or(false);
+    if !name_ok { return Err("请选择名为 WorkBuddy.exe 的文件".into()); }
+    serde_json::to_writer_pretty(std::fs::File::create(&f).map_err(|e| e.to_string())?,
+        &json!({ "workbuddy_exe": path.trim(), "saved_at": chrono::Local::now().to_rfc3339() }))
+        .map_err(|e| e.to_string())
+}
+
+/// 候选列表（顺序即优先级；调用方自行过滤 is_file）
+fn wb_exe_candidates() -> Vec<std::path::PathBuf> {
+    let mut v: Vec<std::path::PathBuf> = Vec::new();
+    let mut push = |p: Option<std::path::PathBuf>, v: &mut Vec<std::path::PathBuf>| {
+        if let Some(p) = p { if !v.contains(&p) { v.push(p); } }
+    };
+    // ①自动：正在运行的客户端
+    push(detect_running_exe(), &mut v);
+    // ②自动：注册表
+    push(detect_registry_exe(), &mut v);
+    // ③自动：标准路径（LOCALAPPDATA 缺失时从 USERPROFILE 推导，任务计划/服务上下文可能给最小环境块）
+    if cfg!(windows) {
         let local = std::env::var("LOCALAPPDATA").ok().or_else(|| {
             std::env::var("USERPROFILE").ok().map(|h| {
                 std::path::Path::new(&h).join("AppData").join("Local").to_string_lossy().into_owned()
             })
         });
         if let Some(local) = local {
-            v.push(std::path::Path::new(&local).join("Programs").join("WorkBuddy").join("WorkBuddy.exe"));
+            push(Some(std::path::Path::new(&local).join("Programs").join("WorkBuddy").join("WorkBuddy.exe")), &mut v);
         }
         if let Ok(pf) = std::env::var("ProgramFiles") {
-            v.push(std::path::Path::new(&pf).join("WorkBuddy").join("WorkBuddy.exe"));
+            push(Some(std::path::Path::new(&pf).join("WorkBuddy").join("WorkBuddy.exe")), &mut v);
         }
         if let Ok(pf86) = std::env::var("ProgramFiles(x86)") {
-            v.push(std::path::Path::new(&pf86).join("WorkBuddy").join("WorkBuddy.exe"));
+            push(Some(std::path::Path::new(&pf86).join("WorkBuddy").join("WorkBuddy.exe")), &mut v);
         }
     } else if cfg!(target_os = "macos") {
-        v.push(std::path::PathBuf::from("/Applications/WorkBuddy.app/Contents/MacOS/WorkBuddy"));
+        push(Some(std::path::PathBuf::from("/Applications/WorkBuddy.app/Contents/MacOS/WorkBuddy")), &mut v);
+    }
+    // ④兜底：设置面板手选  ⑤兜底：环境变量（向后兼容）
+    push(load_manual_exe(), &mut v);
+    if let Ok(p) = std::env::var("WORKBUDDY_EXE") {
+        if !p.trim().is_empty() { push(Some(std::path::PathBuf::from(p.trim())), &mut v); }
     }
     v
+}
+
+/// 诊断视图：给设置面板展示检测结果（每次现算）
+pub fn wb_exe_diagnostics() -> Value {
+    let all = wb_exe_candidates();
+    let items: Vec<Value> = all.iter().map(|p| json!({
+        "path": p.to_string_lossy(),
+        "exists": p.is_file(),
+    })).collect();
+    let effective = all.iter().find(|p| p.is_file()).map(|p| p.to_string_lossy().into_owned());
+    let manual = load_manual_exe().map(|p| p.to_string_lossy().into_owned());
+    json!({
+        "effective": effective,
+        "candidates": items,
+        "manual": manual,
+        "env": std::env::var("WORKBUDDY_EXE").ok(),
+        "settings_file": hub_settings_file().map(|p| p.to_string_lossy().into_owned()),
+    })
 }
 
 fn is_field_envelope(v: &Value) -> bool {
