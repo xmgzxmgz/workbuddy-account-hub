@@ -7,6 +7,18 @@
 
 ---
 
+## v0.6.12（2026-10-08）— 真正根治「自动解密失败」：token 回填键名错位修复
+
+**这是加密客户端下「自动解密失败」的真正根因**——v0.6.7 引入解密以来，token 回填从未真正生效过：
+
+- **Bug**：`decrypt_envelope_fields` 采集 token 时用裸键名 `accessToken`/`refreshToken`，而回填循环按 `auth.`/`account.`/`allAccounts.` **前缀分发** → 裸名 token 永远匹配不上，**从未被回填**。nickname/phone 带前缀能回填 → 函数返回 true → `load_login` 从仍是密文信封的 accessToken 上取不出字符串 → 返回 None → 整个 UI 显示「⚠ 登录态已加密且自动解密失败」。
+- **为何一直没发现**：解密 worker 本身完全正常（v0.6.11 黑匣子 194 次调用全 OK、python 复现测试全过）——所有测试都验证了 worker 层，唯独没验证 Rust 侧「解密结果 → 文档回填」这一步。
+- **修复**：采集键改为 `auth.accessToken`/`auth.refreshToken`，与回填前缀规则一致。该修复同时打通 `switch_auth_to` 的加密快照切换（同样依赖此回填）。
+- **加固**：`load_login` 每个失败分支（解密失败 / token 空 / uid 空）与成功路径（uid、token 长度）写入黑匣子日志 `decrypt_debug.log`，今后「未登录」原因一眼可见。
+- bump 0.6.11 → 0.6.12
+
+---
+
 ## v0.6.11（2026-10-08）— 冷启动解密失败修复 + 解密黑匣子日志
 
 > 现象：hub 冷启动首次加载偶发「登录态已加密且自动解密失败」（10:02、11:08 两次复现），稍后手动刷新又正常。外部复现全部失败：python 同命令/同环境/并发 4 路/计划任务上下文均 100% 成功。

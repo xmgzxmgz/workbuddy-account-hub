@@ -356,11 +356,15 @@ fn run_wb_decrypt_worker(input_json: &str) -> Option<String> {
 /// account.nickname/phoneNumber、allAccounts[].nickname/phoneNumber。绝不回写原文件。
 /// 返回是否有字段被解密替换（替换失败的信封保持原样，由上层诊断兜底）。
 pub fn decrypt_envelope_fields(d: &mut Value) -> bool {
+    // v0.6.12 关键修复：token 采集键必须带 "auth." 前缀 —— 回填循环按
+    // "auth."/"account."/"allAccounts." 前缀分发，裸名 "accessToken" 永远匹配不上，
+    // 导致 token 从未被回填（nickname 却能回填→函数返回 true），load_login 拿到
+    // 空 token 返回 None，整个 UI 表现为「自动解密失败」。
     let mut fields = serde_json::Map::new();
     if let Some(auth) = d.get("auth") {
         for k in ["accessToken", "refreshToken"] {
             if let Some(v) = auth.get(k) {
-                if is_field_envelope(v) { fields.insert(k.to_string(), v.clone()); }
+                if is_field_envelope(v) { fields.insert(format!("auth.{k}"), v.clone()); }
             }
         }
     }
@@ -495,17 +499,25 @@ pub fn load_login() -> Option<LoginInfo> {
                 // 调官方 WorkBuddy.exe 取钥解密为内存视图（绝不回写原文件）
                 let tok_is_env = d.get("auth").and_then(|a| a.get("accessToken")).map_or(false, is_field_envelope);
                 if tok_is_env && !decrypt_envelope_fields(&mut d) {
+                    dbg_log(&format!("load_login: {} 解密失败 → 未登录", p.display()));
                     continue; // 解密失败（无官方 exe / 规则失效）→ 维持「未登录」，get_all 的 auth_encrypted 给诊断
                 }
                 let token = d.get("auth").and_then(|a| a.get("accessToken")).and_then(|t| t.as_str()).unwrap_or("").to_string();
-                if token.is_empty() { continue; }
+                if token.is_empty() {
+                    dbg_log(&format!("load_login: {} token 为空（疑似回填未生效）→ 未登录", p.display()));
+                    continue;
+                }
                 let uid = d.get("account")
                     .and_then(|a| a.get("uid"))
                     .and_then(|u| u.as_str())
                     .map(|s| s.to_string())
                     .or_else(|| jwt_payload(&token).and_then(|pl| pl.get("sub").and_then(|x| x.as_str()).map(|s| s.to_string())))
                     .unwrap_or_default();
-                if uid.is_empty() { continue; }
+                if uid.is_empty() {
+                    dbg_log(&format!("load_login: {} uid 为空（account.uid 缺失且 JWT 无 sub）→ 未登录", p.display()));
+                    continue;
+                }
+                dbg_log(&format!("load_login: OK uid={} token_len={}", &uid[..uid.len().min(8)], token.len()));
                 return Some(LoginInfo {
                     uid,
                     token,
