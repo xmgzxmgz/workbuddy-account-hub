@@ -264,7 +264,7 @@ fn dbg_log(msg: &str) {
     else { return; };
     use std::io::Write;
     if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(exe) {
-        let _ = writeln!(f, "[{}] {}", std::chrono::Local::now().format("%m-%d %H:%M:%S%.3f"), msg);
+        let _ = writeln!(f, "[{}] {}", chrono::Local::now().format("%m-%d %H:%M:%S%.3f"), msg);
     }
 }
 
@@ -329,13 +329,13 @@ fn run_wb_decrypt_worker(input_json: &str) -> Option<String> {
                         dbg_log(&format!("OK attempt {} exe={} {:.1}s", attempt, exe.display(), t0.elapsed().as_secs_f32()));
                         return Some(line.to_string());
                     }
-                    dbg_log(&format!("BAD-STDOUT attempt {} exe={} {:.1}s rc={} stdout_tail={:?} stderr_tail={:?}",
+                    dbg_log(&format!("BAD-STDOUT attempt {} exe={} {:.1}s rc={:?} stdout_tail={:?} stderr_tail={:?}",
                         attempt, exe.display(), t0.elapsed().as_secs_f32(), o.status.code(),
                         s.chars().rev().take(160).collect::<String>().chars().rev().collect::<String>(),
                         String::from_utf8_lossy(&o.stderr).chars().rev().take(200).collect::<String>().chars().rev().collect::<String>(),
                     ));
                 } else {
-                    dbg_log(&format!("NONZERO attempt {} exe={} {:.1}s rc={} stdout_tail={:?} stderr_tail={:?}",
+                    dbg_log(&format!("NONZERO attempt {} exe={} {:.1}s rc={:?} stdout_tail={:?} stderr_tail={:?}",
                         attempt, exe.display(), t0.elapsed().as_secs_f32(), o.status.code(),
                         String::from_utf8_lossy(&o.stdout).chars().rev().take(160).collect::<String>().chars().rev().collect::<String>(),
                         String::from_utf8_lossy(&o.stderr).chars().rev().take(200).collect::<String>().chars().rev().collect::<String>(),
