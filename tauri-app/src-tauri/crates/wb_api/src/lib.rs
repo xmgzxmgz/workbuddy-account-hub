@@ -227,7 +227,13 @@ fn wb_exe_candidates() -> Vec<std::path::PathBuf> {
         }
     }
     if cfg!(target_os = "windows") {
-        if let Ok(local) = std::env::var("LOCALAPPDATA") {
+        // LOCALAPPDATA 缺失时从 USERPROFILE 推导（任务计划/服务上下文可能给最小环境块）
+        let local = std::env::var("LOCALAPPDATA").ok().or_else(|| {
+            std::env::var("USERPROFILE").ok().map(|h| {
+                std::path::Path::new(&h).join("AppData").join("Local").to_string_lossy().into_owned()
+            })
+        });
+        if let Some(local) = local {
             v.push(std::path::Path::new(&local).join("Programs").join("WorkBuddy").join("WorkBuddy.exe"));
         }
         if let Ok(pf) = std::env::var("ProgramFiles") {
@@ -249,27 +255,50 @@ fn is_field_envelope(v: &Value) -> bool {
         && v.get("scheme").is_none()
 }
 
+/// 解密黑匣子日志（v0.6.11）：hub 冷启动首次解密偶发失败且无法从外部复现
+/// （python 同命令同环境并发均 100% 成功），故把每次 worker 调用的完整现场落盘，
+/// 路径：<hub exe 同目录>/decrypt_debug.log（含候选列表/spawn 错误/退出码/stdout·stderr 尾部/耗时）。
+fn dbg_log(msg: &str) {
+    let Some(exe) = std::env::current_exe().ok()
+        .and_then(|p| p.parent().map(|d| d.join("decrypt_debug.log")))
+    else { return; };
+    use std::io::Write;
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(exe) {
+        let _ = writeln!(f, "[{}] {}", std::chrono::Local::now().format("%m-%d %H:%M:%S%.3f"), msg);
+    }
+}
+
 /// 调官方 WorkBuddy.exe（node 模式）批量解密信封字段；input_json = {"fields": {...}}。
 /// 成功返回 stdout 的最后一行 JSON，失败返回 None。
-/// 健壮性（v0.6.9）：每个候选 exe 最多尝试 2 次 + 单次 20s 超时——
-/// 客户端刚升级/重启落盘登录态的瞬间，可能出现一次性 spawn 失败或 worker 卡住，
-/// 此前该瞬时失败会让整个 get_all 报「自动解密失败」。
+/// 健壮性（v0.6.11）：每个候选 exe 最多尝试 3 次（间隔 400ms/900ms）+ 单次 20s 超时 +
+/// 子进程 cwd 设为 exe 所在目录（schtasks 启动时 cwd=System32，规避一切 cwd 相关怪异）。
 fn run_wb_decrypt_worker(input_json: &str) -> Option<String> {
     use std::io::Write;
     use std::process::{Command, Stdio};
     use std::time::{Duration, Instant};
-    for exe in wb_exe_candidates() {
-        if !exe.is_file() { continue; }
-        for attempt in 0..2 {
+    let cands = wb_exe_candidates();
+    dbg_log(&format!("=== call: input {} bytes, candidates {:?}, cwd {:?}",
+        input_json.len(),
+        cands.iter().map(|c| c.to_string_lossy().into_owned()).collect::<Vec<_>>(),
+        std::env::current_dir().map(|d| d.to_string_lossy().into_owned()),
+    ));
+    for exe in cands {
+        if !exe.is_file() { dbg_log(&format!("skip (not file): {}", exe.display())); continue; }
+        for attempt in 0..3 {
+            let t0 = Instant::now();
             let spawned = Command::new(&exe)
                 .env("ELECTRON_RUN_AS_NODE", "1")
+                .current_dir(exe.parent().unwrap_or(std::path::Path::new(".")))
                 .arg("-e")
                 .arg(WB_DECRYPT_JS)
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
                 .spawn();
-            let Ok(mut child) = spawned else { continue; };
+            let Ok(mut child) = spawned else {
+                dbg_log(&format!("spawn FAILED attempt {}: {:?} exe={}", attempt, spawned.err(), exe.display()));
+                continue;
+            };
             if let Some(mut si) = child.stdin.take() {
                 let _ = si.write_all(input_json.as_bytes());
             } // drop 关闭 stdin，worker 收到 end 事件
@@ -296,12 +325,30 @@ fn run_wb_decrypt_worker(input_json: &str) -> Option<String> {
                     let s = String::from_utf8_lossy(&o.stdout);
                     let s = s.trim();
                     let line = s.rsplit('\n').next().unwrap_or(s);
-                    if line.starts_with('{') { return Some(line.to_string()); }
+                    if line.starts_with('{') {
+                        dbg_log(&format!("OK attempt {} exe={} {:.1}s", attempt, exe.display(), t0.elapsed().as_secs_f32()));
+                        return Some(line.to_string());
+                    }
+                    dbg_log(&format!("BAD-STDOUT attempt {} exe={} {:.1}s rc={} stdout_tail={:?} stderr_tail={:?}",
+                        attempt, exe.display(), t0.elapsed().as_secs_f32(), o.status.code(),
+                        s.chars().rev().take(160).collect::<String>().chars().rev().collect::<String>(),
+                        String::from_utf8_lossy(&o.stderr).chars().rev().take(200).collect::<String>().chars().rev().collect::<String>(),
+                    ));
+                } else {
+                    dbg_log(&format!("NONZERO attempt {} exe={} {:.1}s rc={} stdout_tail={:?} stderr_tail={:?}",
+                        attempt, exe.display(), t0.elapsed().as_secs_f32(), o.status.code(),
+                        String::from_utf8_lossy(&o.stdout).chars().rev().take(160).collect::<String>().chars().rev().collect::<String>(),
+                        String::from_utf8_lossy(&o.stderr).chars().rev().take(200).collect::<String>().chars().rev().collect::<String>(),
+                    ));
                 }
+            } else {
+                dbg_log(&format!("TIMEOUT/WAIT-ERR attempt {} exe={} {:.1}s", attempt, exe.display(), t0.elapsed().as_secs_f32()));
             }
-            let _ = attempt; // 该次尝试失败（spawn 失败 / 非零退出 / 超时），重试一次
+            // 指数退避后重试（400ms/900ms），避免同刻连打
+            if attempt < 2 { std::thread::sleep(Duration::from_millis(if attempt == 0 { 400 } else { 900 })); }
         }
     }
+    dbg_log("=> ALL ATTEMPTS FAILED");
     None
 }
 
