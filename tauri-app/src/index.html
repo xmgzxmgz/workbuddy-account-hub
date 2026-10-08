@@ -292,6 +292,16 @@
     .empty{color:var(--muted);font-size:12px;padding:6px 0;}
     .note{color:var(--red);font-size:11px;margin-top:8px;}
     .note.ok{color:var(--amber);}
+    /* 30 天内到期：摘要行 + 紧凑日期芯片（v0.6.10） */
+    .exp-sum{color:var(--amber);font-size:11px;margin-bottom:6px;}
+    .exp-sum b{font-weight:700;}
+    .exp-chips{display:flex;flex-wrap:wrap;gap:4px;align-items:center;}
+    .exp-chip{display:inline-flex;align-items:center;gap:5px;padding:2px 8px;border-radius:7px;font-size:10.5px;background:rgba(255,176,32,.10);border:1px solid rgba(255,176,32,.28);color:var(--amber);font-variant-numeric:tabular-nums;}
+    .exp-chip b{font-weight:700;color:#ffd48a;}
+    .exp-chip.urgent{background:rgba(255,77,79,.12);border-color:rgba(255,77,79,.4);color:#ff8a8d;}
+    .exp-chip.urgent b{color:#ffb3b5;}
+    .exp-toggle{cursor:pointer;font-size:10.5px;color:var(--muted);padding:2px 6px;border-radius:7px;border:1px dashed var(--line);user-select:none;}
+    .exp-toggle:hover{color:var(--amber);border-color:rgba(255,176,32,.4);}
     .section-title{font-size:11px;color:var(--muted);margin:22px 4px 9px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;display:flex;align-items:center;gap:8px;}
     .section-title::after{content:"";flex:1;height:1px;background:linear-gradient(90deg,var(--line),transparent);}
     .sec{margin:8px 0;border:1px solid var(--line);border-radius:11px;overflow:hidden;background:rgba(0,0,0,.22);}
