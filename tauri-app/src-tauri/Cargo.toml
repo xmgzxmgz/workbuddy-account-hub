@@ -1,6 +1,6 @@
 [package]
 name = "workbuddy-account-hub"
-version = "0.6.12"
+version = "0.6.13"
 edition = "2021"
 description = "WorkBuddy 账户中枢：秒切多账号且对话历史 100% 保留（本地 Tauri 2 + Rust）"
 authors = ["you"]
@@ -14,6 +14,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 account_ops = { path = "crates/account_ops" }
 wb_api = { path = "crates/wb_api" }
+rfd = "0.15"
 
 [profile.release]
 panic = "abort"
