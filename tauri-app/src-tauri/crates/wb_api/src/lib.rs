@@ -220,12 +220,21 @@ process.stdin.on('end', () => {
 
 fn wb_exe_candidates() -> Vec<std::path::PathBuf> {
     let mut v = Vec::new();
+    // 自定义安装路径支持：WORKBUDDY_EXE 环境变量优先（如 D 盘安装 / junction 映射）
+    if let Ok(p) = std::env::var("WORKBUDDY_EXE") {
+        if !p.trim().is_empty() {
+            v.push(std::path::PathBuf::from(p.trim()));
+        }
+    }
     if cfg!(target_os = "windows") {
         if let Ok(local) = std::env::var("LOCALAPPDATA") {
             v.push(std::path::Path::new(&local).join("Programs").join("WorkBuddy").join("WorkBuddy.exe"));
         }
         if let Ok(pf) = std::env::var("ProgramFiles") {
             v.push(std::path::Path::new(&pf).join("WorkBuddy").join("WorkBuddy.exe"));
+        }
+        if let Ok(pf86) = std::env::var("ProgramFiles(x86)") {
+            v.push(std::path::Path::new(&pf86).join("WorkBuddy").join("WorkBuddy.exe"));
         }
     } else if cfg!(target_os = "macos") {
         v.push(std::path::PathBuf::from("/Applications/WorkBuddy.app/Contents/MacOS/WorkBuddy"));

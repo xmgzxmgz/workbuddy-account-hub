@@ -258,7 +258,7 @@ function renderAccount(j) {
   if (!j || !j.uid) {
     // 区分「真没登录」与「新版客户端加密登录态（$wbEncrypted）：token 读不出但文件在」
     if (window.__authEncrypted) {
-      $('kv-account').innerHTML = '<span class="perm-denied">⚠ 检测到登录态已加密（$wbEncrypted，新版客户端行为）<br><small style="color:var(--muted);">Hub 当前版本无法解密读取 token。<br>请确认官方客户端处于已登录状态；若客户端刚更新，可反馈等待适配。</small></span>';
+      $('kv-account').innerHTML = '<span class="perm-denied">⚠ 登录态已加密（$wbEncrypted）且自动解密失败<br><small style="color:var(--muted);">通常是未找到官方 WorkBuddy.exe（自定义安装路径）。<br>请设置环境变量 WORKBUDDY_EXE 指向 WorkBuddy.exe 后重启 Hub 重试。</small></span>';
     } else {
       $('kv-account').innerHTML = '<span class="empty">未找到登录态</span>';
     }

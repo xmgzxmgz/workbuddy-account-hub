@@ -1193,17 +1193,24 @@ fn open_leveldb_with_retry(dir: &Path) -> Result<Database<BytesKey>, String> {
 ///   使两个账号在登录态里都真实存在、可互相切回，且昵称不被污染。
 fn switch_auth_to(src_auth: &Path, uid: &str) -> Result<(), String> {
     let src_s = std::fs::read_to_string(src_auth).map_err(|e| format!("读取目标登录态失败: {e}"))?;
-    let target: serde_json::Value =
+    let mut target: serde_json::Value =
         serde_json::from_str(&src_s).map_err(|e| format!("目标登录态 JSON 解析失败: {e}"))?;
+
+    // 新版客户端（5.6.0+）保存的快照把 auth.accessToken 等字段落成 $wbEncrypted 信封。
+    // v0.6.7 起已具备解密能力：切换前先在内存中解密（走官方 WorkBuddy.exe node 模式取钥，
+    // 绝不回写快照文件），解出明文后走下方原有校验/写回链路。
+    // 解密失败（无官方 exe / WORKBUDDY_EXE 未配置 / 密钥不匹配）时保持信封原样，
+    // 由下方加密检查给出明确报错。
+    wb_api::decrypt_envelope_fields(&mut target);
 
     // ⚠️ 关键校验：目标快照必须含真实 auth.accessToken。
     // materialize 生成的占位快照无 token（实测 allAccounts 条目不含 token），
     // 若放行，写回登录态后 WorkBuddy 将以无 token 状态启动 → 登录态失效。
-    // 新版客户端加密格式（{"$wbEncrypted":...} dict）同样视为无效：Hub 无法解密，
-    // 写回后客户端也读不出 token，必须明确报错而非静默放行。
+    // 新版客户端加密格式（{"$wbEncrypted":...} dict）若经上方解密仍残留，说明解密
+    // 失败（官方 exe 不可达或密钥不匹配），必须明确报错而非静默放行。
     let tok = target.get("auth").and_then(|a| a.get("accessToken"));
     if tok.map(|t| t.is_object() && t.get("$wbEncrypted").is_some()).unwrap_or(false) {
-        return Err("目标快照的 accessToken 是新版客户端加密格式（$wbEncrypted），Hub 无法解密、切换后无法使用。请在官方客户端登录该账号后重新保存登录态".into());
+        return Err("目标快照的 accessToken 是新版客户端加密格式（$wbEncrypted），且自动解密失败（未找到可用的官方 WorkBuddy.exe）。请确认客户端已安装；若安装在自定义路径，请设置环境变量 WORKBUDDY_EXE 指向 WorkBuddy.exe 后重试".into());
     }
     let has_token = tok
         .and_then(|t| t.as_str())
@@ -1412,6 +1419,13 @@ pub fn workbuddy_exe() -> Option<PathBuf> {
         let p = PathBuf::from(WB_EXE);
         if p.exists() { Some(p) } else { None }
     } else if cfg!(target_os = "windows") {
+        // 自定义安装路径支持：WORKBUDDY_EXE 环境变量优先（如 D 盘安装 / junction 映射）
+        if let Ok(p) = std::env::var("WORKBUDDY_EXE") {
+            let p = PathBuf::from(p.trim());
+            if !p.as_os_str().is_empty() && p.exists() {
+                return Some(p);
+            }
+        }
         let local = PathBuf::from(
             std::env::var("LOCALAPPDATA").unwrap_or_else(|_| {
                 std::env::var("USERPROFILE")

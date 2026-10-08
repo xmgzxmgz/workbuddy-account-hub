@@ -7,6 +7,17 @@
 
 ---
 
+## v0.6.8（2026-10-08）— 加密快照切换打通 + 自定义安装路径支持
+
+> 反馈来源：GitHub issue #1（@change979666）——v0.6.7 下加密快照被 switch_auth_to 直接拒绝，未接入已有解密能力。
+
+- **切换账号支持加密快照**：`switch_auth_to` 在校验前先调用 `wb_api::decrypt_envelope_fields` 对快照做**内存解密**（走官方 WorkBuddy.exe node 模式取钥，绝不回写快照文件），解出明文 token 后走原有校验/写回链路；解密失败（官方 exe 不可达等）才报错，且错误信息给出可操作建议
+- **自定义安装路径支持**：`wb_api::wb_exe_candidates` 与 `account_ops::workbuddy_exe` 均优先读取 `WORKBUDDY_EXE` 环境变量（指向 WorkBuddy.exe），解决 D 盘安装 / junction 映射等场景下解密与重启客户端双双失败的问题；顺带补齐 `ProgramFiles(x86)` 候选
+- **前端提示更新**：账户档案区加密检测文案更新为「解密失败 + WORKBUDDY_EXE 设置指引」，替代 v0.6.6 时「无法解密」的过时描述
+- bump 0.6.7 → 0.6.8
+
+---
+
 ## v0.6.7（2026-09-20）— $wbEncrypted 信封自动解密（加密登录态全功能恢复）
 
 **背景**：v0.6.6 实现了加密登录态的检测与提示。本版进一步实现**自动解密**，加密环境用户的全部功能（额度/签到/记忆/切换）恢复可用。加密体系规则逐行取自官方 `app.asar` 的 `at-rest-crypto` chunk（勿凭记忆改动），并与 88lin/workbuddy-auto-signin#7、WorkDaddy#244 的同类实现相互印证：
