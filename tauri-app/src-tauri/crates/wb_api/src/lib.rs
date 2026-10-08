@@ -251,31 +251,55 @@ fn is_field_envelope(v: &Value) -> bool {
 
 /// 调官方 WorkBuddy.exe（node 模式）批量解密信封字段；input_json = {"fields": {...}}。
 /// 成功返回 stdout 的最后一行 JSON，失败返回 None。
+/// 健壮性（v0.6.9）：每个候选 exe 最多尝试 2 次 + 单次 20s 超时——
+/// 客户端刚升级/重启落盘登录态的瞬间，可能出现一次性 spawn 失败或 worker 卡住，
+/// 此前该瞬时失败会让整个 get_all 报「自动解密失败」。
 fn run_wb_decrypt_worker(input_json: &str) -> Option<String> {
     use std::io::Write;
     use std::process::{Command, Stdio};
+    use std::time::{Duration, Instant};
     for exe in wb_exe_candidates() {
         if !exe.is_file() { continue; }
-        let spawned = Command::new(&exe)
-            .env("ELECTRON_RUN_AS_NODE", "1")
-            .arg("-e")
-            .arg(WB_DECRYPT_JS)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn();
-        let Ok(mut child) = spawned else { continue; };
-        if let Some(mut si) = child.stdin.take() {
-            let _ = si.write_all(input_json.as_bytes());
-        } // drop 关闭 stdin，worker 收到 end 事件
-        match child.wait_with_output() {
-            Ok(o) if o.status.success() => {
-                let s = String::from_utf8_lossy(&o.stdout);
-                let s = s.trim();
-                let line = s.rsplit('\n').next().unwrap_or(s);
-                if line.starts_with('{') { return Some(line.to_string()); }
+        for attempt in 0..2 {
+            let spawned = Command::new(&exe)
+                .env("ELECTRON_RUN_AS_NODE", "1")
+                .arg("-e")
+                .arg(WB_DECRYPT_JS)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn();
+            let Ok(mut child) = spawned else { continue; };
+            if let Some(mut si) = child.stdin.take() {
+                let _ = si.write_all(input_json.as_bytes());
+            } // drop 关闭 stdin，worker 收到 end 事件
+            // 20s 超时兜底：worker 偶发卡住时不拖死整个后端加载
+            let deadline = Instant::now() + Duration::from_secs(20);
+            let output = loop {
+                match child.try_wait() {
+                    Ok(Some(_)) => {
+                        break child.wait_with_output().ok();
+                    }
+                    Ok(None) => {
+                        if Instant::now() >= deadline {
+                            let _ = child.kill();
+                            let _ = child.wait();
+                            break None;
+                        }
+                        std::thread::sleep(Duration::from_millis(50));
+                    }
+                    Err(_) => break None,
+                }
+            };
+            if let Some(o) = output {
+                if o.status.success() {
+                    let s = String::from_utf8_lossy(&o.stdout);
+                    let s = s.trim();
+                    let line = s.rsplit('\n').next().unwrap_or(s);
+                    if line.starts_with('{') { return Some(line.to_string()); }
+                }
             }
-            _ => continue,
+            let _ = attempt; // 该次尝试失败（spawn 失败 / 非零退出 / 超时），重试一次
         }
     }
     None
