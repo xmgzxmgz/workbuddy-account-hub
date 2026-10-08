@@ -417,7 +417,8 @@ function renderQuota(payload) {
       `<div class="bar"><i style="width:${pct}%"></i></div><span class="meta" style="color:var(--muted);font-size:10px;">${pct}%</span>`
     ]));
   }
-  // 30 天内到期：只看「还有剩余额度（remain>0）」的包，避免把已 100% 用完的每日赠送包全罗列；并按 resource_id 去重
+  // 30 天内到期（v0.6.10 重构）：原实现把几十个包用「；」串成一行文字墙，可读性差。
+  // 改为：摘要一行（数量/总额度/最近到期）+ 紧凑日期芯片（默认只展示最近 6 个）+ 点击展开全部。
   const seenRid = new Set();
   const soon = gift.filter(p => {
     const dl = daysLeft(p.deduction_end);
@@ -427,7 +428,27 @@ function renderQuota(payload) {
     seenRid.add(p.resource_id);
     return true;
   }).sort((x, y) => daysLeft(x.deduction_end) - daysLeft(y.deduction_end));
-  $('expire-note').innerHTML = soon.length ? '⏰ 30 天内到期（剩余额度>0）：' + soon.map(p => `${p.name}（${daysLeft(p.deduction_end)}天，${fmt(p.deduction_end)}，余 ${p.remain.toFixed(2)}）`).join('；') : '近期无待用套餐到期。';
+  const $note = $('expire-note');
+  if (!soon.length) {
+    $note.textContent = '近期无待用套餐到期。';
+  } else {
+    const totalRemain = soon.reduce((s, p) => s + p.remain, 0);
+    const firstDl = daysLeft(soon[0].deduction_end);
+    const expChip = p => {
+      const d = daysLeft(p.deduction_end);
+      const md = (p.deduction_end || '').slice(5, 10).replace('-', '/');
+      const rem = (+p.remain.toFixed(2)).toString();
+      return `<span class="exp-chip${d <= 3 ? ' urgent' : ''}" title="${escapeHtml(p.name || '')}｜${fmt(p.deduction_end)}（${d} 天后到期）">${md}<b>余${rem}</b></span>`;
+    };
+    const PREVIEW = 6, rest = soon.length - PREVIEW;
+    const allChips = soon.map(expChip).join('');
+    $note.innerHTML =
+      `<div class="exp-sum">⏰ 30 天内到期 <b>${soon.length}</b> 个包 · 共余 <b>${totalRemain.toFixed(2)}</b> · 最近 <b>${fmt(soon[0].deduction_end)}</b>（${firstDl} 天后）</div>` +
+      `<div class="exp-chips">${soon.slice(0, PREVIEW).map(expChip).join('')}` +
+      (rest > 0 ? `<span class="exp-toggle" onclick="const m=this.parentNode.parentNode.querySelector('#exp-more');const on=m.style.display==='none';m.style.display=on?'':'none';this.textContent=on?'◂ 收起':'▸ 展开全部 ${rest} 个';">▸ 展开全部 ${rest} 个</span>` : '') +
+      `</div>` +
+      (rest > 0 ? `<div class="exp-chips" id="exp-more" style="display:none">${allChips}</div>` : '');
+  }
   window.__quota = q;
   // Batch C：趋势记录 + 预算条（单账号视图）
   const _quid = payload && payload.login && payload.login.uid;
