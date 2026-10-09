@@ -13,6 +13,7 @@ use serde_json::{json, Value};
 use std::path::Path;
 
 pub mod models;
+pub mod wb_enc;
 
 const API_BASE: &str = "https://copilot.tencent.com";
 const BILLING_METER: &str = "/billing/meter";
@@ -541,6 +542,30 @@ pub fn decrypt_envelope_fields(d: &mut Value) -> bool {
         }
     }
     if fields.is_empty() { return false; }
+
+    // macOS 路径：原生 Rust 解密（密钥文件 ~/.workbuddy-account-hub/at-rest-key，
+    // 由 scripts/extract-mac-at-rest-key.mjs 一次性提取）。Win 的解密 worker 依赖
+    // 官方 WorkBuddy.exe，在 macOS 上不存在候选 → 直接走本地密钥解密。
+    if !cfg!(target_os = "windows") {
+        if wb_enc::key_file_path().is_file() {
+            let Ok(key) = wb_enc::load_at_rest_key() else {
+                dbg_log("macOS 原生解密：密钥文件存在但读取/派生失败");
+                return false;
+            };
+            let mut any = false;
+            for (name, v) in &fields {
+                if let Ok(Some(plain)) = wb_enc::auth_field_string(v, &key) {
+                    if set_field_by_path(d, name, plain) { any = true; }
+                }
+            }
+            if any { return true; }
+            dbg_log("macOS 原生解密：全部字段解密失败（密钥可能不匹配，重新跑 extract-mac-at-rest-key.mjs）");
+            return false;
+        }
+        dbg_log("macOS 原生解密：密钥文件缺失，请运行 scripts/extract-mac-at-rest-key.mjs");
+        return false;
+    }
+
     let Some(out_line) = run_wb_decrypt_worker(&json!({ "fields": fields }).to_string()) else { return false; };
     let Ok(parsed) = serde_json::from_str::<Value>(&out_line) else { return false; };
     if parsed.get("ok").and_then(|x| x.as_bool()) != Some(true) { return false; }
@@ -570,6 +595,30 @@ pub fn decrypt_envelope_fields(d: &mut Value) -> bool {
         }
     }
     any
+}
+
+/// 按采集键路径（auth.x / account.x / allAccounts.i.x）把解密明文回填进登录态内存视图。
+fn set_field_by_path(d: &mut Value, name: &str, val: String) -> bool {
+    let new_v = Value::String(val);
+    if let Some(rest) = name.strip_prefix("auth.") {
+        if let Some(a) = d.get_mut("auth") {
+            if a.get(rest).is_some() { a[rest] = new_v; return true; }
+        }
+    } else if let Some(rest) = name.strip_prefix("account.") {
+        if let Some(a) = d.get_mut("account") {
+            if a.get(rest).is_some() { a[rest] = new_v; return true; }
+        }
+    } else if let Some(rest) = name.strip_prefix("allAccounts.") {
+        let mut it = rest.splitn(2, '.');
+        if let (Some(idx), Some(k)) = (it.next(), it.next()) {
+            if let Ok(i) = idx.parse::<usize>() {
+                if let Some(a) = d.get_mut("allAccounts").and_then(|x| x.get_mut(i)) {
+                    if a.get(k).is_some() { a[k] = new_v; return true; }
+                }
+            }
+        }
+    }
+    false
 }
 
 /// 诊断：返回候选登录态路径及其存在情况（供 macOS 找不到登录态时定位真实目录）
