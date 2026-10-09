@@ -1604,7 +1604,7 @@ async function loadAll() {
     try { renderJwt(j.jwt); bootLog('启动加载：JWT 已渲染'); }
     catch (e) { bootLog('启动加载：JWT 渲染失败 ' + e.message, 'err'); }
 
-    try { renderEnv(j.env); bootLog('启动加载：环境已渲染'); }
+    try { renderEnv(j.env); bootLog('启动加载：本机环境信息正常（版本/平台/Node 已加载）'); }
     catch (e) { bootLog('启动加载：环境渲染失败 ' + e.message, 'err'); }
 
     $('updated').textContent = ' · 本地已加载 ' + new Date().toLocaleTimeString();

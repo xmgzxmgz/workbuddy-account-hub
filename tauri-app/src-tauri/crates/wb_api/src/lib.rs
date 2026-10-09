@@ -597,6 +597,51 @@ pub fn decrypt_envelope_fields(d: &mut Value) -> bool {
     any
 }
 
+/// 批量解密独立的 $wbEncrypted 信封字段（不依赖登录态文档形状，供 vault 快照昵称等场景）。
+/// 入参为 name → 信封值 的 map；返回同 key 的 map，解密失败的值为 None。
+/// macOS：进程内原生密钥解密（无额外开销）；
+/// Windows：所有字段合并为一次官方 WorkBuddy.exe worker 调用，避免逐字段起进程。
+pub fn decrypt_envelope_map(
+    fields: &serde_json::Map<String, Value>,
+) -> std::collections::BTreeMap<String, Option<String>> {
+    let mut out: std::collections::BTreeMap<String, Option<String>> = std::collections::BTreeMap::new();
+    for k in fields.keys() {
+        out.insert(k.clone(), None);
+    }
+    if fields.is_empty() {
+        return out;
+    }
+
+    // macOS 路径：原生解密（与 decrypt_envelope_fields 非 Windows 分支同策略）
+    if !cfg!(target_os = "windows") {
+        let Ok(key) = wb_enc::load_at_rest_key() else {
+            dbg_log("批量解密：macOS 密钥文件读取/派生失败");
+            return out;
+        };
+        for (name, v) in fields {
+            if let Ok(Some(plain)) = wb_enc::auth_field_string(v, &key) {
+                out.insert(name.clone(), Some(plain));
+            }
+        }
+        return out;
+    }
+
+    // Windows 路径：一次 worker 调用批量解密（协议同 decrypt_envelope_fields）
+    let payload = json!({ "fields": fields });
+    let Some(out_line) = run_wb_decrypt_worker(&payload.to_string()) else { return out; };
+    let Ok(parsed) = serde_json::from_str::<Value>(&out_line) else { return out; };
+    if parsed.get("ok").and_then(|x| x.as_bool()) != Some(true) { return out; }
+    if let Some(res) = parsed.get("out").and_then(|x| x.as_object()) {
+        for (name, entry) in res {
+            if entry.get("ok").and_then(|x| x.as_bool()) != Some(true) { continue; }
+            if let Some(val) = entry.get("value").and_then(|x| x.as_str()) {
+                out.insert(name.clone(), Some(val.to_string()));
+            }
+        }
+    }
+    out
+}
+
 /// 按采集键路径（auth.x / account.x / allAccounts.i.x）把解密明文回填进登录态内存视图。
 fn set_field_by_path(d: &mut Value, name: &str, val: String) -> bool {
     let new_v = Value::String(val);
@@ -1490,11 +1535,23 @@ pub fn pet_draw(count: u64) -> Value {
 
 /// WorkBuddy 本机数据根目录（跨平台）：
 ///   macOS:   ~/Library/Application Support/CodeBuddyExtension/Data （WorkBuddy 名亦兼容）
-///   Windows: %APPDATA%\CodeBuddyExtension\Data
+///   Windows: %LOCALAPPDATA%\CodeBuddyExtension\Data（新版客户端实际落盘位置，
+///            与 account_ops::auth_file 对齐）；旧版个别环境在 %APPDATA%（Roaming），
+///            故 LOCALAPPDATA 优先、APPDATA 兜底。
 fn data_root() -> std::path::PathBuf {
     if cfg!(target_os = "windows") {
-        std::path::Path::new(&std::env::var("APPDATA").unwrap_or_default())
-            .join("CodeBuddyExtension").join("Data")
+        let local = std::env::var("LOCALAPPDATA").unwrap_or_default();
+        let roaming = std::env::var("APPDATA").unwrap_or_default();
+        let candidates = [
+            std::path::PathBuf::from(&local).join("CodeBuddyExtension").join("Data"),
+            std::path::PathBuf::from(&roaming).join("CodeBuddyExtension").join("Data"),
+        ];
+        candidates
+            .into_iter()
+            .find(|p| p.exists())
+            .unwrap_or_else(|| {
+                std::path::PathBuf::from(&local).join("CodeBuddyExtension").join("Data")
+            })
     } else {
         let home = std::env::var("HOME").unwrap_or_default();
         let asp = std::path::Path::new(&home).join("Library").join("Application Support");
