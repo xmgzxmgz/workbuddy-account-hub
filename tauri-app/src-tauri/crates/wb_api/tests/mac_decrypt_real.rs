@@ -9,6 +9,7 @@ fn mac_decrypt_real_login() {
     println!("token len: {}", login.token.len());
     println!("token head: {}", &login.token[..12.min(login.token.len())]);
     assert!(login.token.starts_with("eyJ"), "token 应为明文 JWT");
-    assert_eq!(login.token.len(), 1498, "与本机 accessToken 长度一致");
+    // 不硬编码长度：官方会话续签会刷新 token，长度随之变化；只做 JWT 形状合理性校验
+    assert!(login.token.len() > 500, "token 应为完整 JWT（当前长度 {}）", login.token.len());
     assert!(!login.uid.is_empty());
 }

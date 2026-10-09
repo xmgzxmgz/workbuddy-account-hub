@@ -219,32 +219,71 @@ fn vault_account_uids(vault: &Path) -> Vec<String> {
     uids
 }
 
-/// 读取某个账号快照中的昵称（vault/<uid>/snapshot/local_storage 登记表或 auth.info 兜底）
-fn nickname_from_vault(vault: &Path, uid: &str) -> Option<String> {
-    // 1) 从该账号快照的 local_storage 登记表找昵称
-    let snap_ls = vault.join(uid).join("snapshot").join("local_storage");
-    if let Ok(rd) = std::fs::read_dir(&snap_ls) {
-        for e in rd.flatten() {
-            let p = e.path();
-            if p.extension().and_then(|s| s.to_str()) != Some("info") { continue; }
-            let Ok(s) = std::fs::read_to_string(&p) else { continue; };
-            let Ok(arr) = serde_json::from_str::<Vec<serde_json::Value>>(&s) else { continue; };
-            for item in arr {
-                if item.get("userId").and_then(|x| x.as_str()) == Some(uid) {
-                    let nick = item.get("data").and_then(|d| d.get("nickname")).and_then(|x| x.as_str()).map(|s| s.to_string());
-                    if nick.is_some() { return nick; }
+/// 从 vault 快照批量解析昵称，返回 uid → 昵称（仅含解析成功的条目）。
+/// 优先级：该账号快照的 local_storage 登记表 > auth.info 兜底。
+/// 新版客户端（5.6.0+）快照落盘为 $wbEncrypted 加密格式，这里统一在内存中解密
+/// （与 switch_auth_to 同策略，绝不回写快照文件）；所有待解字段合并为一次
+/// wb_api::decrypt_envelope_map 调用，Windows 下即一次官方 exe worker spawn，
+/// 避免逐账号起进程拖慢列表刷新。
+fn nicknames_bulk(vault: &Path, uids: &[String]) -> std::collections::HashMap<String, String> {
+    let mut out = std::collections::HashMap::new();
+    let mut pending: serde_json::Map<String, Value> = serde_json::Map::new();
+
+    // 阶段 1：登记表快照（vault/<uid>/snapshot/local_storage/*.info）
+    for uid in uids {
+        let snap_ls = vault.join(uid).join("snapshot").join("local_storage");
+        let mut done = false;
+        if let Ok(rd) = std::fs::read_dir(&snap_ls) {
+            'files: for e in rd.flatten() {
+                let p = e.path();
+                if p.extension().and_then(|s| s.to_str()) != Some("info") { continue; }
+                let Ok(s) = std::fs::read_to_string(&p) else { continue; };
+                let Ok(arr) = serde_json::from_str::<Vec<serde_json::Value>>(&s) else { continue; };
+                for item in &arr {
+                    if item.get("userId").and_then(|x| x.as_str()) != Some(uid.as_str()) { continue; }
+                    match item.get("data").and_then(|d| d.get("nickname")) {
+                        // 明文昵称直接采用（空串视同缺失，回退 auth.info）
+                        Some(Value::String(s)) if !s.is_empty() => {
+                            out.insert(uid.clone(), s.clone());
+                            done = true;
+                        }
+                        // 加密信封：收集起来稍后批量解密
+                        Some(env) if env.is_object() && env.get("$wbEncrypted").is_some() => {
+                            pending.insert(format!("reg:{uid}"), env.clone());
+                            done = true;
+                        }
+                        _ => {}
+                    }
+                    if done { break 'files; }
                 }
             }
         }
     }
-    // 2) 兜底：auth.info 里的 nickname / uid
-    let auth_p = vault.join(uid).join("snapshot").join("auth.info");
-    let Ok(s) = std::fs::read_to_string(&auth_p) else { return None; };
-    let Ok(v) = serde_json::from_str::<Value>(&s) else { return None; };
-    if let Some(nick) = v.get("account").and_then(|a| a.get("nickname")).and_then(|x| x.as_str()) {
-        return Some(nick.to_string());
+
+    // 阶段 2：auth.info 兜底（登记表没给昵称的账号）
+    for uid in uids {
+        if out.contains_key(uid) || pending.contains_key(&format!("reg:{uid}")) { continue; }
+        let auth_p = vault.join(uid).join("snapshot").join("auth.info");
+        let Ok(s) = std::fs::read_to_string(&auth_p) else { continue; };
+        let Ok(v) = serde_json::from_str::<Value>(&s) else { continue; };
+        match v.get("account").and_then(|a| a.get("nickname")) {
+            Some(Value::String(s)) if !s.is_empty() => { out.insert(uid.clone(), s.clone()); }
+            Some(env) if env.is_object() && env.get("$wbEncrypted").is_some() => {
+                pending.insert(format!("acct:{uid}"), env.clone());
+            }
+            _ => {}
+        }
     }
-    None
+
+    // 阶段 3：一次批量解密并回填（macOS 进程内原生解密；Windows 合并为一次 worker 调用）
+    let resolved = wb_api::decrypt_envelope_map(&pending);
+    for (key, val) in resolved {
+        let Some(plain) = val else { continue; };
+        if let Some(uid) = key.strip_prefix("reg:").or_else(|| key.strip_prefix("acct:")) {
+            out.insert(uid.to_string(), plain);
+        }
+    }
+    out
 }
 
 fn snapshot_exists(vault: &Path, uid: &str) -> bool {
@@ -257,60 +296,61 @@ fn snapshot_exists(vault: &Path, uid: &str) -> bool {
 ///   1. local_storage 所有登记表并集（find_registry）
 ///   2. vault 目录下所有已有 snapshot/history 的账号（兜底，防登记表被官方压缩丢账号）
 ///   3. 当前登录账号（永远展示）
-/// 昵称优先级：登记表 > vault 快照兜底。
+/// 昵称优先级：在线文件/登记表明文 > vault 快照兜底（批量内存解密加密快照）。
 pub fn list_accounts(vault: &Path) -> Vec<AccountInfo> {
     let cur = current_uid();
+    let mut order: Vec<String> = Vec::new();
     let mut seen = std::collections::HashSet::new();
-    let mut out = Vec::new();
+    let mut live_nick: std::collections::HashMap<String, String> = std::collections::HashMap::new();
 
     // 0) 当前登录态文件里的 allAccounts（最权威：本机所有登录过的账号，含尚未快照的）
     for (uid, nick) in auth_accounts() {
         if seen.insert(uid.clone()) {
-            out.push(AccountInfo {
-                uid: uid.clone(),
-                nickname: nick.or_else(|| nickname_from_vault(vault, &uid)),
-                current: cur.as_deref() == Some(uid.as_str()),
-                has_snapshot: snapshot_exists(vault, &uid),
-            });
+            // 空串视同缺失（新版客户端登记表昵称可能全为空），回退 vault 快照解析
+            if let Some(n) = nick.filter(|s| !s.is_empty()) {
+                live_nick.insert(uid.clone(), n);
+            }
+            order.push(uid);
         }
     }
 
     // 1) 合并所有登记表
     for (uid, nick) in find_registry() {
         if seen.insert(uid.clone()) {
-            out.push(AccountInfo {
-                uid: uid.clone(),
-                nickname: nick.or_else(|| nickname_from_vault(vault, &uid)),
-                current: cur.as_deref() == Some(uid.as_str()),
-                has_snapshot: snapshot_exists(vault, &uid),
-            });
+            if let Some(n) = nick.filter(|s| !s.is_empty()) {
+                live_nick.insert(uid.clone(), n);
+            }
+            order.push(uid);
         }
     }
 
     // 2) vault 兜底：登记表里没有的已快照账号也补进来（可切换）
     for uid in vault_account_uids(vault) {
         if seen.insert(uid.clone()) {
-            out.push(AccountInfo {
-                uid: uid.clone(),
-                nickname: nickname_from_vault(vault, &uid),
-                current: cur.as_deref() == Some(uid.as_str()),
-                has_snapshot: true,
-            });
+            order.push(uid);
         }
     }
 
     // 3) 确保当前账号始终出现
     if let Some(c) = &cur {
         if seen.insert(c.clone()) {
-            out.push(AccountInfo {
-                uid: c.clone(),
-                nickname: nickname_from_vault(vault, c),
-                current: true,
-                has_snapshot: snapshot_exists(vault, c),
-            });
+            order.push(c.clone());
         }
     }
-    out
+
+    // vault 快照昵称批量解析：所有 $wbEncrypted 信封集中起来一次解密
+    // （Windows 下合并为一次官方 exe worker 调用，避免逐账号起进程）
+    let vault_nicks = nicknames_bulk(vault, &order);
+
+    order
+        .into_iter()
+        .map(|uid| AccountInfo {
+            nickname: live_nick.get(&uid).cloned().or_else(|| vault_nicks.get(&uid).cloned()),
+            current: cur.as_deref() == Some(uid.as_str()),
+            has_snapshot: snapshot_exists(vault, &uid),
+            uid,
+        })
+        .collect()
 }
 
 fn copy_dir_all(src: &Path, dst: &Path) -> std::io::Result<()> {
