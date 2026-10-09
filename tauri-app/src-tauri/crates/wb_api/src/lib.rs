@@ -878,7 +878,18 @@ pub fn call_api(endpoint: &str, method: &str, body: &str) -> Result<Value, Strin
 /// 从指定登录态文件读取登录信息（供多账号批量操作：每个账号从自己的 vault 快照 auth.info 取 token）
 pub fn login_from_file(p: &Path) -> Option<LoginInfo> {
     let s = std::fs::read_to_string(p).ok()?;
-    let d: Value = serde_json::from_str(&s).ok()?;
+    let mut d: Value = serde_json::from_str(&s).ok()?;
+    // 加密登录态（macOS 新版客户端快照为 $wbEncrypted 信封）：先解密再取 token。
+    // 此前这里漏接解密（load_login/switch 都接了），导致快照为加密形态的账号
+    // 在额度表/能量表被误标「无登录态」，而切换却正常——口径不一致。
+    if d.get("auth")
+        .and_then(|a| a.get("accessToken"))
+        .map(|t| t.is_object() && t.get("$wbEncrypted").is_some())
+        .unwrap_or(false)
+        && !decrypt_envelope_fields(&mut d)
+    {
+        return None;
+    }
     let token = d.get("auth").and_then(|a| a.get("accessToken")).and_then(|t| t.as_str()).unwrap_or("").to_string();
     if token.is_empty() { return None; }
     let uid = d.get("account")
