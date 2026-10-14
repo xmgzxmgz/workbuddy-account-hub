@@ -62,6 +62,13 @@ pub struct BackupMeta {
     pub is_latest: bool,
 }
 
+pub mod sync;
+
+/// Hub 自身配置目录：~/.workbuddy-account-hub
+pub fn hub_home() -> PathBuf {
+    home().join(".workbuddy-account-hub")
+}
+
 /// 用户主目录。Windows 桌面 GUI 进程通常不设置 `$HOME`，故 Windows 优先用 `$USERPROFILE`
 /// （指向 C:\Users\<user>），否则会 fallback 成进程当前工作目录「.」，导致 vault / local_storage
 /// 被写到错误位置、快照与枚举全部失效。macOS 用 `$HOME`。
