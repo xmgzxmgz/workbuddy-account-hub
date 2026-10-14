@@ -707,6 +707,23 @@
       </div>
     </div>
 
+    <div class="section-title">跨机同步</div>
+    <div class="panel" style="margin-top:12px;">
+      <h2>跨机同步 <span class="tag">Phase 1 · 文件资产 · per-machine zip</span>
+        <span style="flex:1"></span>
+        <button class="mini" onclick="syncStatus()">自检</button>
+        <button class="mini" onclick="syncPush()">⬆ 上传</button>
+        <button class="mini" onclick="syncPull()">⬇ 拉取</button>
+      </h2>
+      <div style="display:flex;gap:8px;margin-bottom:10px;align-items:center;">
+        <input id="sync-dir" placeholder="共享同步目录（iCloud Drive / OneDrive / 坚果云 / U盘）"
+               style="flex:1;padding:7px 10px;border-radius:9px;border:1px solid var(--line);background:rgba(0,0,0,.2);color:var(--text);font-size:12px;">
+        <button class="mini" onclick="syncSetDir()">保存目录</button>
+      </div>
+      <div id="sync-status"><span class="empty">点击「自检」查看同步状态。机制：每台机器只写自己的 from-&lt;机器名&gt;.zip，拉取时合并；同名内容不同会先把本地版备份为 .conflict- 再落新值。</span></div>
+      <div class="memo" style="margin-top:8px;">⚠ mcp.json 含连接器密钥且在同步白名单内 —— 共享目录请勿放公共网盘。</div>
+    </div>
+
     <div class="section-title">API 管理</div>
 
     <div class="panel" style="margin-top:12px;">

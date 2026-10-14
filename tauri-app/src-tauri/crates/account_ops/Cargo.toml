@@ -7,6 +7,8 @@ description = "WorkBuddy 账户中枢 — 纯文件/进程操作逻辑（无网�
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# 跨机同步（sync.rs）：per-machine zip 包读写，只需 deflate 压缩，关掉其余特性减小体积
+zip = { version = "2", default-features = false, features = ["deflate"] }
 # 切换账号时需要解密新版客户端（5.6.0+）落盘的 $wbEncrypted 信封快照（内存解密），
 # 复用 wb_api 的 decrypt_envelope_fields（走官方 WorkBuddy.exe node 模式取钥解密）。
 wb_api = { path = "../wb_api" }
