@@ -10,10 +10,16 @@ on:
 permissions:
   contents: write
 
+# 发布构建同时占用 macOS(10x)/Windows(2x) 额度，取消同 tag 的旧运行避免重复烧
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   # ---------- mac·os ----------
   build-macos:
     runs-on: macos-latest
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
 
@@ -50,6 +56,7 @@ jobs:
   # ---------- windows ----------
   build-windows:
     runs-on: windows-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
 
