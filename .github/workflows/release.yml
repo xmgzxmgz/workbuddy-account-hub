@@ -18,7 +18,8 @@ concurrency:
 jobs:
   # ---------- mac·os ----------
   build-macos:
-    runs-on: macos-latest
+    # 本机 self-hosted runner，不消耗 Actions 额度（hosted macOS 按 10x 计费）
+    runs-on: [self-hosted, macOS, ARM64]
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
