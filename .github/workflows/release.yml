@@ -18,8 +18,9 @@ concurrency:
 jobs:
   # ---------- mac·os ----------
   build-macos:
-    # 本机 self-hosted runner，不消耗 Actions 额度（hosted macOS 按 10x 计费）
-    runs-on: [self-hosted, macOS, ARM64]
+    # public 仓库的 Actions 免费、不占额度，用官方 hosted 镜像更省心；
+    # 且 public 仓库绝不能挂 self-hosted runner（陌生 PR 会在本机执行代码）
+    runs-on: macos-latest
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
