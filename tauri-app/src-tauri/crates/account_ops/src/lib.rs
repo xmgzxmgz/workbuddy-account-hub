@@ -908,6 +908,237 @@ pub fn switch_account(vault: &Path, uid: &str) -> Result<SwitchResult, String> {
     })
 }
 
+/// RT 静默续期结果（返回给前端展示）
+#[derive(Serialize)]
+pub struct RefreshResult {
+    pub uid: String,
+    pub nickname: Option<String>,
+    pub at_days_before: f64,
+    pub at_days_after: f64,
+    pub rt_days_after: f64,
+    /// refreshToken 是否被服务端轮换（轮换后旧 RT 立即失效）
+    pub rotated: bool,
+    /// 续期前快照备份目录（出问题时可从它还原旧 RT）
+    pub backup: String,
+    pub message: String,
+}
+
+/// 用快照里的 refreshToken 做一次静默续期（issue #3 问题 C）。
+///
+/// 安全设计（每一条都对应一个真实毁灭性风险）：
+///   1. **先备份**：续期前把快照 auth.info 整份复制到 `vault/<uid>/history/<ts>/auth.info`。
+///      RT 一旦被服务端轮换，旧 RT 就彻底作废；备份是唯一回退点。
+///   2. **不碰正在使用的登录态**：若目标是"当前登录账号"且客户端正在运行，直接拒绝 ——
+///      客户端自身也会 refresh，两边用同一个 RT 抢，先到者成功、后到者 401，
+///      等于主动把客户端踢下线。
+///   3. **成功即写**：拿到响应后立刻解密 → 合并 → 重封信封 → 原子写（tmp+rename）。
+///      写失败意味着新 RT 丢失，必须明确告知用户「需重新登录」，不能静默。
+///   4. **不写明文**：原文件是 `$wbEncrypted` 加密落盘时，写回前重新封装（同 switch 链路）。
+///
+/// 返回 Ok 表示「续期成功且已落盘」，任何一步失败都返回 Err 且不修改原快照。
+pub fn refresh_account(vault: &Path, uid: &str) -> Result<RefreshResult, String> {
+    let snap_auth = vault.join(uid).join("snapshot").join("auth.info");
+    if !snap_auth.exists() {
+        return Err("该账号没有登录态快照，无法续期".into());
+    }
+    let raw = std::fs::read_to_string(&snap_auth).map_err(|e| format!("读取快照失败: {e}"))?;
+    let original: Value = serde_json::from_str(&raw).map_err(|e| format!("快照不是合法 JSON: {e}"))?;
+
+    // 原文件是否为加密落盘形态（决定写回时是否重新封装）
+    let was_sealed = original
+        .get("auth")
+        .and_then(|a| a.get("accessToken"))
+        .map(|t| t.is_object() && t.get("$wbEncrypted").is_some())
+        .unwrap_or(false);
+
+    // 解密出明文视图（只用于读 rt / 合并，绝不直接落盘）
+    let mut plain = original.clone();
+    if was_sealed && !wb_api::decrypt_envelope_fields(&mut plain) {
+        return Err("快照是加密格式，但 Hub 解不开（at-rest 密钥不匹配），已中止（未消耗 RT）".into());
+    }
+    let auth = plain.get("auth").cloned().unwrap_or(Value::Null);
+    let rt = auth.get("refreshToken").and_then(|t| t.as_str()).unwrap_or("").to_string();
+    if rt.is_empty() {
+        return Err("该账号快照里没有 refreshToken（可能是占位快照），无法续期".into());
+    }
+    let domain = auth.get("domain").and_then(|d| d.as_str()).unwrap_or("").to_string();
+    let at_before = auth
+        .get("expiresAt")
+        .and_then(|x| x.as_i64())
+        .map(|ms| (ms - now_ms_i64()) as f64 / 86_400_000.0)
+        .unwrap_or(0.0);
+
+    // 风险 #2：与客户端抢同一个 refreshToken
+    let is_current = current_uid().as_deref() == Some(uid);
+    if is_current && is_workbuddy_running() {
+        return Err(
+            "该账号是当前登录账号且 WorkBuddy 正在运行：此时续期会和客户端争抢同一个 refreshToken，\
+             可能导致客户端被强制登出。请先退出 WorkBuddy 再执行续期"
+                .into(),
+        );
+    }
+
+    // 风险 #1：先备份（RT 轮换后旧 RT 永久失效，备份是唯一回退点）
+    let ts = chrono_now();
+    let backup_dir = vault.join(uid).join("history").join(&ts);
+    std::fs::create_dir_all(&backup_dir).map_err(|e| format!("创建备份目录失败（已中止，未消耗 RT）: {e}"))?;
+    std::fs::copy(&snap_auth, backup_dir.join("auth.info"))
+        .map_err(|e| format!("备份快照失败（已中止，未消耗 RT）: {e}"))?;
+
+    // 真正触发 RT 轮换的网络调用
+    let new_auth = wb_api::refresh_tokens(&rt, &domain)?;
+
+    // 合并新字段：只覆盖服务端确实返回的字段，未返回的保留旧值
+    // （尤其 refreshToken：部分实现不轮换，若无脑覆盖会把 RT 清空 → 账号直接废掉）
+    let new_rt = new_auth.get("refreshToken").and_then(|t| t.as_str()).unwrap_or("").to_string();
+    let rotated = !new_rt.is_empty() && new_rt != rt;
+
+    let now = now_ms_i64();
+    {
+        let target = plain
+            .get_mut("auth")
+            .ok_or("快照缺少 auth 节点")?;
+        let obj = target.as_object_mut().ok_or("auth 不是对象")?;
+        for k in [
+            "accessToken", "refreshToken", "expiresIn", "refreshExpiresIn",
+            "tokenType", "sessionState", "domain", "lastRefreshTime",
+        ] {
+            if let Some(v) = new_auth.get(k) {
+                if !v.is_null() {
+                    obj.insert(k.to_string(), v.clone());
+                }
+            }
+        }
+        // 重算绝对到期时间（官方 calculateExpiresAt 同口径：now + expiresIn*1000）
+        let exp_in = obj.get("expiresIn").and_then(|x| x.as_i64());
+        if let Some(sec) = exp_in {
+            if sec > 0 {
+                obj.insert("expiresAt".into(), json!(now + sec * 1000));
+            }
+        }
+        let rexp_in = obj.get("refreshExpiresIn").and_then(|x| x.as_i64());
+        if let Some(sec) = rexp_in {
+            if sec > 0 {
+                obj.insert("refreshExpiresAt".into(), json!(now + sec * 1000));
+            }
+        }
+        if !obj.contains_key("lastRefreshTime") {
+            obj.insert("lastRefreshTime".into(), json!(now));
+        }
+    }
+
+    // 写回前按原形态重新封装（绝不落明文）
+    if was_sealed {
+        let (_n, errs) = wb_api::seal_sensitive_fields(&mut plain);
+        if !errs.is_empty() {
+            return Err(format!(
+                "续期已成功但重新加密失败（旧 RT 可能已被服务端作废，请立刻重新登录该账号）: {}",
+                errs.join("; ")
+            ));
+        }
+    }
+
+    let out = serde_json::to_string_pretty(&plain).map_err(|e| format!("序列化失败: {e}"))?;
+    if let Err(e) = write_atomic(&snap_auth, &out) {
+        return Err(format!(
+            "续期成功但写回快照失败（旧 RT 可能已被服务端作废，请立刻重新登录该账号）: {e}"
+        ));
+    }
+
+    // 若目标就是当前登录账号（客户端未运行），同步更新登录态文件，否则重启客户端仍用旧 token
+    if is_current {
+        if let Some(af) = auth_file() {
+            if let Err(e) = write_atomic(&af, &out) {
+                return Err(format!("快照已更新，但登录态文件写回失败: {e}"));
+            }
+        }
+    }
+
+    let at_after = plain
+        .get("auth")
+        .and_then(|a| a.get("expiresAt"))
+        .and_then(|x| x.as_i64())
+        .map(|ms| (ms - now) as f64 / 86_400_000.0)
+        .unwrap_or(0.0);
+    let rt_after = plain
+        .get("auth")
+        .and_then(|a| a.get("refreshExpiresAt"))
+        .and_then(|x| x.as_i64())
+        .map(|ms| (ms - now) as f64 / 86_400_000.0)
+        .unwrap_or(0.0);
+
+    Ok(RefreshResult {
+        uid: uid.to_string(),
+        nickname: None,
+        at_days_before: (at_before * 10.0).round() / 10.0,
+        at_days_after: (at_after * 10.0).round() / 10.0,
+        rt_days_after: (rt_after * 10.0).round() / 10.0,
+        rotated,
+        backup: backup_dir.to_string_lossy().into_owned(),
+        message: format!(
+            "续期成功：AT {:.1} → {:.1} 天，RT 剩 {:.1} 天{}",
+            at_before, at_after, rt_after,
+            if rotated { "（refreshToken 已轮换，旧 RT 即刻作废）" } else { "（RT 未轮换）" }
+        ),
+    })
+}
+
+/// 批量登录态健康预检（issue #3 问题 B）：只读、无副作用，可随时调用。
+///
+/// 输出每个账号一条：
+///   { uid, nickname, current, has_snapshot, state, label, at_days_left, http_status, detail }
+///
+/// state 三态（外加两个边界态）：
+///   ok        正常，可签到
+///   expiring  服务端仍接受，但 AT 不足 7 天 → 建议续期
+///   revoked   服务端已吊销（JWT 未到期却 401）→ **需重新登录**，签到必然失败
+///   expired   AT 自身已过期 → 需重新登录
+///   error     网络/风控等临时问题，可重试
+///
+/// 账号之间串行 + 250ms 间隔，避免批量探测触发服务端风控。
+pub fn preflight_accounts(vault: &Path) -> Vec<Value> {
+    let accs = list_accounts(vault);
+    let mut out = Vec::new();
+    for (i, a) in accs.iter().enumerate() {
+        let snap_auth = vault.join(&a.uid).join("snapshot").join("auth.info");
+        let base = json!({
+            "uid": a.uid,
+            "nickname": a.nickname,
+            "current": a.current,
+            "has_snapshot": a.has_snapshot,
+        });
+        let Some(login) = wb_api::login_from_file(&snap_auth) else {
+            let mut v = base;
+            v["state"] = json!("no_login");
+            v["label"] = json!("无可用登录态");
+            v["at_days_left"] = Value::Null;
+            v["http_status"] = Value::Null;
+            v["detail"] = json!(if a.has_snapshot { "快照存在但解不出 token" } else { "没有登录态快照" });
+            out.push(v);
+            continue;
+        };
+        let mut merged = base;
+        if let Value::Object(pf) = wb_api::preflight_login(&login) {
+            for (k, v) in pf {
+                merged[k] = v;
+            }
+        }
+        out.push(merged);
+        // 最后一个不用等
+        if i + 1 < accs.len() {
+            std::thread::sleep(std::time::Duration::from_millis(250));
+        }
+    }
+    out
+}
+
+fn now_ms_i64() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
 /// 用 Rust 内嵌 SQLite（rusqlite，bundled 特征）把 workbuddy.db 中属于 from_uid 的
 /// 会话/自动化归属改写到 to_uid。避免 WorkBuddy 在 Windows 上自行调用系统 `sqlite3` CLI
 /// 导致"program not found"失败（这正是 v0.5.0 用户报告的根因）。

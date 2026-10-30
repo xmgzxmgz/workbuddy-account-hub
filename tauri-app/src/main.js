@@ -999,13 +999,76 @@ async function buddyClaim() {
 
 // ===== 多账号批量：签到 + 宠物（每个账号用各自 vault 快照登录态分别请求） =====
 
+// ===== 登录态健康预检 / RT 续期（v0.6.16，issue #3 问题 B / C）=====
+// 三态语义：ok 正常 · expiring 将过期 · revoked 已被服务端吊销（JWT 未到期却 401，签到必然失败）
+const PF_STYLE = {
+  ok:       { color: 'var(--green)', text: '正常' },
+  expiring: { color: 'var(--amber)', text: '即将过期' },
+  revoked:  { color: 'var(--red)',   text: '已被吊销 · 需重登' },
+  expired:  { color: 'var(--red)',   text: 'AT 已到期' },
+  error:    { color: 'var(--muted)', text: '探测失败' },
+  no_login: { color: 'var(--muted)', text: '无登录态' },
+};
+function pfRender(rows) {
+  const tb = $('pf-tbody');
+  if (!tb) return;
+  if (!rows || !rows.length) {
+    tb.innerHTML = '<tr><td colspan="5" class="empty">没有可选账号</td></tr>';
+    return;
+  }
+  tb.innerHTML = rows.map(r => {
+    const st = PF_STYLE[r.state] || PF_STYLE.error;
+    const days = (r.at_days_left === null || r.at_days_left === undefined)
+      ? '—' : Number(r.at_days_left).toFixed(1) + ' 天';
+    const cur = r.current ? ' <span class="badge cur">当前</span>' : '';
+    // 当前登录账号不提供一键续期：客户端在跑时会和它抢同一个 refreshToken
+    const canFix = (r.state === 'revoked' || r.state === 'expiring' || r.state === 'expired') && !r.current;
+    const act = canFix ? `<button class="mini" onclick="refreshOneToken('${r.uid}')">续期</button>` : '';
+    const label = r.label && r.label !== st.text ? ` <span style="opacity:.7;">${escapeHtml(r.label)}</span>` : '';
+    return `<tr><td>${escapeHtml(r.nickname || (r.uid || '').slice(0, 8))}${cur}</td>`
+      + `<td style="color:${st.color};font-weight:700;">${st.text}${label}</td>`
+      + `<td>${days}</td>`
+      + `<td style="color:var(--muted);">${escapeHtml(r.detail || '')}</td>`
+      + `<td>${act}</td></tr>`;
+  }).join('');
+}
+async function loadPreflight() {
+  toast('正在预检全部账号登录态…');
+  const j = await invoke('preflight_accounts').catch(e => ({ ok: false, error: String(e) }));
+  if (!j || !j.ok) { toast('预检失败: ' + ((j && j.error) || '未知错误')); return; }
+  pfRender(j.accounts || []);
+  const s = j.summary || {};
+  const bad = (s.revoked || 0) + (s.expired || 0);
+  toast(`预检完成：正常 ${s.ok || 0} · 将过期 ${s.expiring || 0} · 需重登 ${bad}`);
+}
+async function refreshOneToken(uid) {
+  if (!confirm('续期会用该账号的 refreshToken 换新 token。\n\n⚠ 服务端会立刻轮换 refreshToken（旧 RT 作废），Hub 已自动备份快照，写回失败时该账号需重新登录。\n\n继续？')) return;
+  toast('续期中…');
+  const j = await invoke('refresh_account', { uid }).catch(e => ({ ok: false, error: String(e) }));
+  if (j && j.ok) { toast(j.result.message, 'ok'); loadPreflight(); }
+  else toast('续期失败: ' + ((j && j.error) || '未知错误'), 'err');
+}
+async function refreshAllTokens() {
+  if (!confirm('批量续期只处理「即将过期 / 已被吊销」且非当前登录的账号。\n\n⚠ 每个账号的 refreshToken 都会被轮换（旧 RT 作废），Hub 会先备份快照。\n\n继续？')) return;
+  toast('批量续期中，请稍候…');
+  const j = await invoke('refresh_all_accounts').catch(e => ({ ok: false, error: String(e) }));
+  if (!j || !j.ok) { toast('批量续期失败: ' + ((j && j.error) || '未知错误')); return; }
+  const rows = j.results || [];
+  const okN = rows.filter(x => x.ok).length;
+  toast(`批量续期完成：成功 ${okN} / 尝试 ${j.attempted || rows.length}`, okN ? 'ok' : 'err');
+  loadPreflight();
+}
+
 async function doCheckinAll() {
   toast('正在签到所有已登录账号…');
   const r = await invoke('checkin_all').catch(e => ({ error: String(e) }));
   if (r && r.error) { toast('批量签到失败: ' + r.error); return; }
   renderCheckinAll(r.results || []);
   const s = r.summary || {};
-  toast(`批量签到完成：成功 ${s.ok || 0} · 跳过 ${s.skipped || 0} · 失败 ${s.fail || 0}`);
+  const relogin = (r.results || []).filter(x => x.needs_relogin).length;
+  toast(`批量签到完成：成功 ${s.ok || 0} · 跳过 ${s.skipped || 0} · 失败 ${s.fail || 0}`
+    + (relogin ? ` · 需重新登录 ${relogin}` : ''));
+  if (relogin) loadPreflight();
 }
 
 function renderCheckinAll(results) {
@@ -1015,6 +1078,16 @@ function renderCheckinAll(results) {
     const nick = acctLabel(r);
     const uid = r.uid;
     const skipped = r.skipped;
+    // issue #3 问题 B：被服务端吊销 / AT 到期的账号与普通失败/频控区分开，
+    // 单独标成「需重登」，否则用户会误以为是网络问题反复重试。
+    if (r.needs_relogin) {
+      return `<tr>
+        <td><b>${escapeHtml(nick || uid)}</b><br><span style="font-size:10px;color:var(--muted)">${acctUidMask(uid)}</span></td>
+        <td><span class="soon">需重新登录</span></td>
+        <td style="color:var(--red)">${r.state === 'expired' ? '已到期' : '已吊销'}</td>
+        <td style="color:var(--muted)">${escapeHtml(r.error || '服务端不再接受该账号 token')}</td>
+      </tr>`;
+    }
     // 修复：无登录态快照等「未执行」情形后端标记 skipped=true（与宠物批量口径一致），
     // 渲染为「跳过」而非「失败」，并显示具体原因
     const state = r.error

@@ -133,6 +133,69 @@ fn get_auth_path_report() -> Value {
     api::auth_path_report()
 }
 
+/// 登录态三态预检（issue #3 问题 B）：只读、无副作用。
+/// 每账号返回 state = ok / expiring / revoked / expired / error / no_login。
+/// 账号间串行 + 250ms 间隔，避免触发风控。
+#[tauri::command]
+async fn preflight_accounts() -> Value {
+    offload(move || {
+        let rows = ops::preflight_accounts(&ops::vault_dir());
+        let mut tally = serde_json::Map::new();
+        for r in &rows {
+            let k = r.get("state").and_then(|x| x.as_str()).unwrap_or("error").to_string();
+            let c = tally.get(&k).and_then(|x| x.as_u64()).unwrap_or(0) + 1;
+            tally.insert(k, json!(c));
+        }
+        json!({ "ok": true, "accounts": rows, "summary": tally })
+    }).await
+}
+
+/// 单账号 RT 静默续期（issue #3 问题 C）。
+/// 内部已做备份 / 当前账号保护 / 原子回写；失败返回原因，成功返回前后到期对比。
+#[tauri::command]
+async fn refresh_account(uid: String) -> Value {
+    offload(move || match ops::refresh_account(&ops::vault_dir(), &uid) {
+        Ok(r) => json!({ "ok": true, "result": r }),
+        Err(e) => json!({ "ok": false, "error": e }),
+    }).await
+}
+
+/// 批量续期：只处理「即将过期 / 已吊销」的账号（避免无谓消耗 RT 轮换）。
+/// 强制跳过当前登录账号（客户端在跑时会和它抢同一个 refreshToken）。
+#[tauri::command]
+async fn refresh_all_accounts() -> Value {
+    offload(move || {
+        let vault = ops::vault_dir();
+        let rows = ops::preflight_accounts(&vault);
+        let mut results = Vec::new();
+        let targets: Vec<_> = rows
+            .iter()
+            .filter(|r| {
+                let st = r.get("state").and_then(|x| x.as_str()).unwrap_or("");
+                let cur = r.get("current").and_then(|x| x.as_bool()).unwrap_or(false);
+                (st == "expiring" || st == "revoked") && !cur
+            })
+            .collect();
+        let total = targets.len();
+        for (i, r) in targets.iter().enumerate() {
+            let uid = r.get("uid").and_then(|x| x.as_str()).unwrap_or("").to_string();
+            match ops::refresh_account(&vault, &uid) {
+                Ok(res) => results.push(json!({
+                    "uid": uid, "nickname": r.get("nickname"), "ok": true, "message": res.message,
+                })),
+                Err(e) => results.push(json!({
+                    "uid": uid, "nickname": r.get("nickname"), "ok": false, "error": e,
+                })),
+            }
+            if i + 1 < total {
+                // refresh 比签到敏感：间隔拉长到 800ms，避免批量触发风控/IP 限制
+                std::thread::sleep(std::time::Duration::from_millis(800));
+            }
+        }
+        json!({ "ok": true, "results": results, "attempted": total })
+    }).await
+}
+
 #[tauri::command]
 fn get_exe_settings() -> Value {
     api::wb_exe_diagnostics()
@@ -276,6 +339,37 @@ async fn checkin_all() -> Value {
                 results.push(json!({"uid": a.uid, "nickname": a.nickname, "ok": false, "skipped": true,
                     "needs_refresh": true, "error": "token 临近过期，请重新登录以刷新"}));
                 skipped += 1; continue;
+            }
+            // ===== 签到前预检（issue #3 问题 B）=====
+            // 服务端 2026-10 更换 token 体系后，一批「JWT 还没到期」的旧 token 被统一吊销，
+            // 这类账号签到必然 401 且 hub 侧无法自愈。预检把它们提前分流成三态标注：
+            //   revoked / expired → 直接跳过并发「需重新登录」信号，不再白发一次签到请求；
+            //   ok / expiring     → 继续签到（顺带利用预检拿到的 today_checked_in 省一次请求）；
+            //   error（网络等）    → 仍尝试签到，交给 classify_checkin_err 兜底。
+            let pf = api::preflight_login(&login);
+            let pstate = pf.get("state").and_then(|x| x.as_str()).unwrap_or("error").to_string();
+            let plabel = pf.get("label").and_then(|x| x.as_str()).unwrap_or("").to_string();
+            let pdetail = pf.get("detail").and_then(|x| x.as_str()).unwrap_or("").to_string();
+            if pstate == "revoked" || pstate == "expired" {
+                results.push(json!({
+                    "uid": a.uid, "nickname": a.nickname, "ok": false, "skipped": true,
+                    "needs_relogin": true, "kind": "session_dead", "state": pstate,
+                    "at_days_left": pf.get("at_days_left").cloned().unwrap_or(Value::Null),
+                    "label": plabel,
+                    "error": if pdetail.is_empty() { plabel.clone() } else { format!("{plabel}：{pdetail}") },
+                }));
+                skipped += 1;
+                std::thread::sleep(std::time::Duration::from_millis(250));
+                continue;
+            }
+            if pf.get("checked_in_today").and_then(|x| x.as_bool()) == Some(true) {
+                results.push(json!({
+                    "uid": a.uid, "nickname": a.nickname, "ok": true, "skipped": true,
+                    "state": pstate, "label": plabel, "message": "今日已签到",
+                }));
+                skipped += 1;
+                std::thread::sleep(std::time::Duration::from_millis(250));
+                continue;
             }
             let r = do_checkin_retry(&login);
             if let Some(err) = r.get("error") {
@@ -938,6 +1032,9 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_all,
             get_auth_path_report,
+            preflight_accounts,
+            refresh_account,
+            refresh_all_accounts,
             get_exe_settings,
             save_exe_setting,
             pick_workbuddy_exe,
