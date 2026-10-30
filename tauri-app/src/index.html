@@ -449,6 +449,12 @@
       box-shadow:var(--shadow-md);z-index:70;overflow:hidden;flex-direction:column;
     }
     .notify-dropdown.show{display:flex;}
+    /* 顶栏「⋯ 更多」下拉（v0.6.19 界面瘦身）：把低频操���从顶栏收进来，
+       顶栏从 8 个同权重按钮降到 4 个，主操作不再被淹没。 */
+    .more-dropdown{width:190px;padding:5px;}
+    .more-item{padding:8px 11px;border-radius:9px;font-size:12.5px;color:var(--fg);cursor:pointer;transition:background .12s;}
+    .more-item:hover{background:rgba(139,124,255,.12);}
+    .more-sep{height:1px;background:var(--line);margin:5px 8px;}
     .notify-head{display:flex;align-items:center;justify-content:space-between;padding:11px 13px;border-bottom:1px solid var(--line);font-size:12px;font-weight:700;color:var(--fg);}
     .notify-clear{color:var(--muted);cursor:pointer;font-weight:500;}
     .notify-clear:hover{color:var(--red);}
@@ -506,11 +512,18 @@
       </div>
       <div class="spacer"></div>
       <button onclick="refreshAll()">刷新全部</button>
-      <button class="secondary" onclick="loadQuota()">仅查积分</button>
       <button class="secondary" onclick="doCheckinAll()">一键签到</button>
-      <button class="secondary" onclick="loadBuddy()">🐾 宠物</button>
-      <button class="secondary" onclick="openReport()">导出报告</button>
-      <button class="secondary" onclick="openBackups()" title="查看每个账号的历史自动/手动备份">🕘 历史备份</button>
+      <div class="notify-wrap" id="more-wrap">
+        <button class="secondary" id="more-btn" title="更多操作" onclick="toggleMore()">⋯</button>
+        <div class="notify-dropdown more-dropdown" id="more-dropdown">
+          <div class="more-item" onclick="closeMore();loadQuota()">仅查积分</div>
+          <div class="more-item" onclick="closeMore();loadBuddy()">宠物面板</div>
+          <div class="more-item" onclick="closeMore();openReport()">导出报告</div>
+          <div class="more-item" onclick="closeMore();openBackups()">历史备份</div>
+          <div class="more-sep"></div>
+          <div class="more-item" onclick="closeMore();toggleRawPanel()">原始返回（调试）</div>
+        </div>
+      </div>
       <button class="secondary eye-global off" id="eye-global" title="显示所有隐私数据中段（Key/UID/Token 等）" onclick="toggleAllKeys()">👁 隐私</button>
       <button class="secondary" id="settings-btn" title="设置（WorkBuddy 路径等）" onclick="openSettings()">⚙</button>
       <div class="notify-wrap" id="notify-wrap">
@@ -735,23 +748,6 @@
       </div>
     </div>
 
-    <div class="section-title">跨机同步</div>
-    <div class="panel" style="margin-top:12px;">
-      <h2>跨机同步 <span class="tag">Phase 1 · 文件资产 · per-machine zip</span>
-        <span style="flex:1"></span>
-        <button class="mini" onclick="syncStatus()">自检</button>
-        <button class="mini" onclick="syncPush()">⬆ 上传</button>
-        <button class="mini" onclick="syncPull()">⬇ 拉取</button>
-      </h2>
-      <div style="display:flex;gap:8px;margin-bottom:10px;align-items:center;">
-        <input id="sync-dir" placeholder="共享同步目录（iCloud Drive / OneDrive / 坚果云 / U盘）"
-               style="flex:1;padding:7px 10px;border-radius:9px;border:1px solid var(--line);background:rgba(0,0,0,.2);color:var(--text);font-size:12px;">
-        <button class="mini" onclick="syncSetDir()">保存目录</button>
-      </div>
-      <div id="sync-status"><span class="empty">点击「自检」查看同步状态。机制：每台机器只写自己的 from-&lt;机器名&gt;.zip，拉取时合并；同名内容不同会先把本地版备份为 .conflict- 再落新值。</span></div>
-      <div class="memo" style="margin-top:8px;">⚠ mcp.json 含连接器密钥且在同步白名单内 —— 共享目录请勿放公共网盘。</div>
-    </div>
-
     <div class="section-title">API 管理</div>
 
     <div class="panel" style="margin-top:12px;">
@@ -800,8 +796,8 @@
       </div>
     </div>
 
-    <div class="panel" style="margin-top:12px;">
-      <h2>原始返回（调试）</h2>
+    <div class="panel" id="raw-panel" style="margin-top:12px;display:none;">
+      <h2>原始返回（调试）<span style="flex:1"></span><button class="mini" onclick="toggleRawPanel()">收起</button></h2>
       <pre id="raw-out">点击「刷新全部」…</pre>
     </div>
   </main>
