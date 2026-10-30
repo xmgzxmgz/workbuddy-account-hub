@@ -1136,6 +1136,222 @@ pub fn call_api_as(login: &LoginInfo, endpoint: &str, method: &str, body: &str) 
     Err(last_msg)
 }
 
+// ---------------------------------------------------------------------------
+// 登录态健康预检（issue #3 问题 B）与 token 静默续期（问题 C）
+//
+// 背景：服务端在 2026-10 前后更换 token 体系并强制重登，导致一批"JWT 还没到期"
+// 的 token 被服务端吊销（401）。此前 hub 只能等到点签到失败才知道，且把 401
+// 混在普通失败里。这里补三步：
+//   1. 预检（只读，无副作用）：本地判 exp + 服务端探一次真实接受度 → 三态
+//   2. 三态：ok / revoked（需重登）/ expiring（将过期）
+//   3. 续期：用 refreshToken 走官方 `/v2/auth/token/refresh` 静默换新
+// ---------------------------------------------------------------------------
+
+fn now_ms_i64() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+/// JWT 里 `exp` 距现在的剩余毫秒（解析失败返回 None）
+fn at_exp_left_ms(token: &str) -> Option<i64> {
+    let exp = jwt_payload(token)?.get("exp")?.as_u64()? as i64;
+    Some(exp * 1000 - now_ms_i64())
+}
+
+/// 轻量鉴权探测：用一个**只读**接口确认 token 是否仍被服务端接受，返回 (HTTP 状态码, 响应体)。
+/// 选 `checkin-activity-status` 是因为它本身就是签到前要调的查询接口（无副作用），
+/// 且是 issue #3 实测确认「链路没变」的那个端点；顺带还能拿到 `today_checked_in`，
+/// 让签到流程省掉一次重复请求。
+pub fn probe_auth_state(login: &LoginInfo) -> Result<(u16, Value), String> {
+    let client = make_client();
+    let resp = client
+        .post(format!("{}{}/checkin-activity-status", API_BASE, BILLING_METER))
+        .header("Content-Type", "application/json")
+        .header("Accept", "application/json")
+        .header("Authorization", format!("Bearer {}", login.token))
+        .header("X-User-Id", &login.uid)
+        .body("{}")
+        .send()
+        .map_err(|e| map_net_error(&e))?;
+    let status = resp.status().as_u16();
+    let text = resp.text().unwrap_or_default();
+    let body: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
+    Ok((status, body))
+}
+
+/// 单账号登录态健康预检 → 三态标注（只读，可随时调用）。
+///
+/// 返回字段：
+///   state        ok | expiring | revoked | expired | error
+///   label        给人看的中文标签
+///   at_days_left AT 剩余天数（本地按 JWT exp 算，可能与服务端吊销状态不一致——这正是要预检的原因）
+///   http_status  服务端探测得到的 HTTP 状态码（本地判定 expired 时为 null）
+///   detail       补充说明 / 错误原文
+///
+/// 优先级：本地已过期(expired) > 服务端吊销(revoked) > 将过期(expiring) > 正常(ok)。
+/// 吊销优先于将过期——被吊销的账号即使还剩 14 天也用不了。
+pub fn preflight_login(login: &LoginInfo) -> Value {
+    let at_left = at_exp_left_ms(&login.token);
+    let at_days = at_left.map(|ms| (ms as f64 / 86_400_000.0 * 10.0).round() / 10.0);
+
+    // 本地已过期：无需请求，直接判死
+    if let Some(ms) = at_left {
+        if ms <= 0 {
+            return json!({
+                "state": "expired",
+                "label": "AT 已到期",
+                "at_days_left": at_days,
+                "http_status": Value::Null,
+                "detail": "accessToken 自身已过期，只能重新登录",
+            });
+        }
+    }
+
+    match probe_auth_state(login) {
+        Ok((200, body)) => {
+            let soon = at_days.map(|d| d <= 7.0).unwrap_or(false);
+            // 顺带把「今日是否已签到」带出去，签到流程可以省掉一次重复请求
+            let checked = body
+                .get("data")
+                .and_then(|d| d.get("today_checked_in"))
+                .and_then(|x| x.as_bool());
+            if soon {
+                json!({
+                    "state": "expiring",
+                    "label": "即将过期",
+                    "at_days_left": at_days,
+                    "http_status": 200,
+                    "checked_in_today": checked,
+                    "detail": "服务端仍接受，但 AT 不足 7 天，建议续期",
+                })
+            } else {
+                json!({
+                    "state": "ok",
+                    "label": "正常",
+                    "at_days_left": at_days,
+                    "http_status": 200,
+                    "checked_in_today": checked,
+                    "detail": "",
+                })
+            }
+        }
+        Ok((401, _)) => json!({
+            "state": "revoked",
+            "label": "已被服务端吊销",
+            "at_days_left": at_days,
+            "http_status": 401,
+            "checked_in_today": Value::Null,
+            "detail": "JWT 未到期但服务端已拒绝：需重新登录（或尝试 RT 续期自救）",
+        }),
+        Ok((code, _)) => json!({
+            "state": "error",
+            "label": format!("探测异常（HTTP {code}）"),
+            "at_days_left": at_days,
+            "http_status": code,
+            "checked_in_today": Value::Null,
+            "detail": match code {
+                403 => "无权限（可能为账号权限或网关风控）",
+                429 => "请求过于频繁，稍后再试",
+                _ => "非预期状态码",
+            },
+        }),
+        Err(e) => json!({
+            "state": "error",
+            "label": "网络异常",
+            "at_days_left": at_days,
+            "http_status": Value::Null,
+            "checked_in_today": Value::Null,
+            "detail": e,
+        }),
+    }
+}
+
+/// 用 refreshToken 换新 token —— 官方 `POST /v2/plugin/auth/token/refresh`。
+///
+/// 协议取自官方客户端运行时日志（`~/.workbuddy/logs`，实测 245 次真实请求）：
+///   url     = https://{auth.domain}/v2/plugin/auth/token/refresh
+///             （auth.domain 通常是 www.workbuddy.cn；`/plugin` 就是客户端的
+///              `authentication.attributes.prefixPath`，默认不是空串 —— 少了它会 404）
+///   headers = X-Domain: <auth.domain>、X-Refresh-Token: <rt>、X-Auth-Refresh-Source: plugin
+///   resp    = { data: { data: { accessToken, refreshToken, expiresIn, refreshExpiresIn, ... } } }
+///   失败    = { code: 12153, msg: "refresh token failed: ..." }（12153 = RT 失效/格式错）
+///
+/// ⚠️⚠️ **成功即代表旧 RT 被服务端轮换作废**：新 RT 只出现在本次响应里。
+/// 调用方必须在拿到结果后**立即原子写回**；写失败等同于该账号永久掉线（只能短信重登）。
+/// 因此本函数只负责网络往返，不落盘——落盘与备份由 account_ops::refresh_account 统筹。
+pub fn refresh_tokens(rt: &str, domain: &str) -> Result<Value, String> {
+    if rt.trim().is_empty() {
+        return Err("该账号没有可用的 refreshToken（快照为占位或旧格式），无法续期".into());
+    }
+    let domain = if domain.trim().is_empty() { "www.workbuddy.cn" } else { domain.trim() };
+    let url = format!("https://{domain}/v2/plugin/auth/token/refresh");
+
+    let client = make_client();
+    let resp = client
+        .post(&url)
+        .header("Content-Type", "application/json")
+        .header("Accept", "application/json")
+        .header("X-Domain", domain)
+        .header("X-Refresh-Token", rt)
+        .header("X-Auth-Refresh-Source", "plugin")
+        .body("{}")
+        .send()
+        .map_err(|e| map_net_error(&e))?;
+
+    let status = resp.status().as_u16();
+    let text = resp.text().unwrap_or_default();
+
+    if status == 401 || status == 403 {
+        return Err(format!(
+            "refreshToken 已失效（HTTP {status}）：服务端不再接受该账号的 RT，只能重新登录。原始响应: {}",
+            &text.chars().take(200).collect::<String>()
+        ));
+    }
+    if status == 404 {
+        return Err(format!(
+            "刷新端点不存在（HTTP 404，url={url}）：客户端版本可能改了 prefixPath，需重新抓包确认"
+        ));
+    }
+    if status >= 500 {
+        return Err(format!("服务器繁忙（HTTP {status}），未消耗 refreshToken，可稍后重试"));
+    }
+    let parsed: Value = serde_json::from_str(&text)
+        .map_err(|_| format!("刷新接口返回非 JSON（HTTP {status}）: {}", &text.chars().take(160).collect::<String>()))?;
+
+    // 业务码非 0 即失败。12153 = refresh token 无效（格式错/已吊销/已轮换）。
+    if let Some(code) = parsed.get("code").and_then(|c| c.as_i64()) {
+        if code != 0 && code != 200 {
+            let msg = parsed.get("msg").or_else(|| parsed.get("message"))
+                .and_then(|m| m.as_str()).unwrap_or("未知错误");
+            if code == 12153 {
+                return Err(format!("refreshToken 已被服务端拒绝（12153）: {msg} —— 该账号只能重新登录"));
+            }
+            return Err(format!("刷新被拒绝（code={code}）: {msg}"));
+        }
+    }
+
+    let data = parsed
+        .get("data")
+        .and_then(|d| d.get("data"))
+        .cloned()
+        .or_else(|| parsed.get("data").cloned());
+    let Some(data) = data else {
+        // 保留原始响应（截断）用于协议排查：不同 code 包装形态差异很大，
+        // 只报"缺少 data"会让问题无法定位。
+        return Err(format!(
+            "刷新响应缺少 data（HTTP {status}）。原始响应: {}",
+            &text.chars().take(400).collect::<String>()
+        ));
+    };
+    if data.get("accessToken").and_then(|t| t.as_str()).map(|s| s.is_empty()).unwrap_or(true) {
+        return Err("刷新响应缺少 accessToken".into());
+    }
+    Ok(data)
+}
+
+
 /// 网络错误 → 中文映射（参考 daemon.js:2176 的错误友好化）
 fn map_net_error(e: &reqwest::Error) -> String {
     if e.is_timeout() {

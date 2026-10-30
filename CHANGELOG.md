@@ -7,6 +7,33 @@
 
 ---
 
+## v0.6.17（2026-10-30）— 🩺 签到前三态预检 + ♻️ refreshToken 静默续期（RT 可无限保活）
+
+回应 issue #3 的问题 B / C。两个功能都已用真实账号实测跑通，并纠正了一条关键协议细节。
+
+- **问题 B：签到前预检 + 三态标注**
+  - 新增 `wb_api::preflight_login`：本地按 JWT `exp` 判是否到期 + 用只读接口 `checkin-activity-status` 探一次服务端真实接受度 → `ok` / `expiring`（<7 天）/ `revoked`（JWT 未到期却 401）/ `expired` / `error`。
+  - **优先级：已到期 > 吊销 > 将过期 > 正常**——被吊销的账号即使还剩 14 天也用不了，必须先于「将过期」显示。
+  - `checkin_all` 改为**先预检再签到**：`revoked`/`expired` 直接跳过并标 `needs_relogin`，不再白发一次必失败的签到请求；顺带复用预检返回的 `today_checked_in` 省掉一次重复请求。
+  - 签到结果表把这类账号单独渲染成「需重新登录」红标，与频控/网络错误彻底区分；完成提示追加「需重新登录 N」。
+  - 新增 🩺「登录态健康」面板：预检全部 + 每账号状态/AT 剩余/说明/单账号续期按钮。
+- **问题 C：refreshToken 静默续期**
+  - **协议实测澄清（关键）**：端点不是 `POST /v2/auth/token/refresh`（404），而是
+    **`POST https://{auth.domain}/v2/plugin/auth/token/refresh`** —— `prefixPath = /plugin` 不能省。
+    headers：`X-Domain`、`X-Refresh-Token`、`X-Auth-Refresh-Source: plugin`。
+  - **实测结论（最能决定方案价值的一条）**：续期成功后 **refreshExpiresIn 会被重置为满 60 天**（实测 RT 59.9 → 60.0 天）。
+    也就是说 RT 寿命是**顺延**的，只要在 RT 到期前持续续期就能无限保活，不是「补满 AT 但不延长总寿命」。
+  - `account_ops::refresh_account` 四道保险：① 续期前把快照 `auth.info` 备份到 `history/<ts>/`；② 目标是当前登录账号且客户端在跑时**直接拒绝**（避免和客户端抢同一个 RT 把客户端踢下线）；③ 只覆盖服务端确实返回的字段（响应未带 refreshToken 时保留旧值，绝不把 RT 清空）；④ 重新封信封 + 原子写，写失败明确告知「需重新登录」。
+  - 新增 ♻️「批量续期」：只处理 `expiring`/`revoked` 且非当前登录的账号，串行 + 800ms 间隔防风控。
+- **验证（真实账号，macOS 5.8.3）**
+  - 三态预检：5 个账号 → `{ok:4, revoked:1}`，`5995e421`（星黎光）确认为「JWT 被吊销」型 401。
+  - 续期：`df4e2e38` 实测成功，AT 29.9 → 30.0 天，RT 60.0 天，`rotated=true`，快照回写后 token 仍是 `$wbEncrypted` 信封、无明文残留。
+  - 反例：`5995e421` 续期失败 `invalid_grant: Session doesn't have required client` —— 该账号的 session 已被服务端连 RT 一起清理，**只能重新登录**，这印证了「401 账号未必能靠续期自救」。
+- **新增测试**：`account_ops/tests/preflight_real.rs`（三态分布，纯只读）、`account_ops/tests/refresh_real.rs`（`REFRESH_UID` 指定目标，未设置则跳过）。
+- bump 0.6.16 → 0.6.17
+
+---
+
 ## v0.6.16（2026-10-30）— 🔑 5.8.3 切换失效根治：加密回写 + 活跃登录态择优
 
 回应 issue #3（客户端 5.8.3 后切换账号失效）。实测确认 issue 给的两个归因都不是真因，真正的两个根因是：
