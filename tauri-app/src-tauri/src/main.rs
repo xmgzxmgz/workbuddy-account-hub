@@ -398,18 +398,6 @@ async fn checkin_all() -> Value {
     }).await
 }
 
-/// 查询单个账号额度（用其 vault 快照登录态 token 发请求，覆盖全部已登记账号）
-#[tauri::command]
-async fn quota_for(uid: String) -> Value {
-    offload(move || {
-        let vault = ops::vault_dir();
-        let Some(login) = account_login(&vault, &uid) else {
-            return json!({ "uid": uid, "ok": false, "error": "登录态文件缺失或无效" });
-        };
-        api::get_quota_as(&login)
-    }).await
-}
-
 /// 查询所有「已保存登录态」账号的额度，按登记表原始顺序返回。
 /// v0.6.2 性能重写：async + spawn_blocking（不冻结 UI）+ 账号间并行请求
 /// （原串行 5 账号 × 每账号最多 15s → 现总耗时 = 最慢单账号，通常 1~3s）。
@@ -495,18 +483,6 @@ async fn checkin_for(uid: String) -> Value {
             return json!({ "uid": uid, "ok": false, "error": "登录态文件缺失或无效" });
         };
         api::do_checkin_as(&login)
-    }).await
-}
-
-/// 查询单个账号的 AI 记忆画像（用其 vault 快照登录态 token 发请求，覆盖全部已登记账号）
-#[tauri::command]
-async fn memory_for(uid: String) -> Value {
-    offload(move || {
-        let vault = ops::vault_dir();
-        let Some(login) = account_login(&vault, &uid) else {
-            return json!({ "uid": uid, "ok": false, "error": "登录态文件缺失或无效" });
-        };
-        api::get_memory_as(&login)
     }).await
 }
 
@@ -916,13 +892,6 @@ fn current_model() -> Value {
     api::models::current_model()
 }
 
-#[tauri::command]
-fn models_path() -> Value {
-    json!({
-        "path": api::models::models_path().display().to_string()
-    })
-}
-
 // ---------- 账号管理（account_ops） ----------
 
 #[tauri::command]
@@ -963,12 +932,6 @@ fn switch_account(uid: String) -> Result<Value, String> {
 #[tauri::command]
 fn restart_workbuddy() -> Result<(), String> {
     ops::launch_workbuddy()
-}
-
-/// 重启整个账户中枢（切换账号后由前端在确认 WorkBuddy 无任务运行时调用）
-#[tauri::command]
-fn restart_self(app: tauri::AppHandle) {
-    app.restart();
 }
 
 // 历史备份：list_backups() 返回全部账号的历史备份；list_backups(uid) 只返回某账号。
@@ -1060,7 +1023,6 @@ pub fn run() {
             backup_all,
             switch_account,
             restart_workbuddy,
-            restart_self,
             list_backups,
             backup_detail,
             list_custom_models,
@@ -1070,11 +1032,8 @@ pub fn run() {
             test_custom_model,
             official_models,
             current_model,
-            models_path,
-            quota_for,
             quota_all,
             checkin_for,
-            memory_for,
             memory_all,
             usage_summary,
             export_conversation_history,

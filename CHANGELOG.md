@@ -7,6 +7,21 @@
 
 ---
 
+## v0.6.19（2026-10-30）— 🧹 清理历史遗留脚本与死代码（仓库瘦身）
+
+纯清理，无功能变更，无行为风险。
+
+- **删除根目录 5 个 `ci_wait*.py`**（729 行里的主体）：本质是同一个「等 CI 完成」轮询脚本复制 5 份改版本号，CI / 构建脚本 / README 全都不引用。
+- **删除 `detect.py` / `switch.py` / `vault.py`**：早期 Python 版运维脚本，功能已全部由 Rust `account_ops` 重写接管；README 的目录说明同步更正。
+- **删除 `sync/`（28K）与 `credits/`（88K）**：跨机同步与计费接口的早期 JS 原型，主程序零引用；正式同步已是 `account_ops/src/sync.rs`。
+- **删除 4 个从未被调用的 Tauri 命令**：`quota_for`、`memory_for`、`models_path`、`restart_self`。前端 `main.js` + `index.html` 对它们 0 引用，且无动态拼接命令名的调用路径（批量版 `quota_all` / `memory_all` 已覆盖需求）。
+- **删除死函数 `buddyLogInit()`**：从无调用点，且 `buddyLogAdd` 直接把新条目 prepend 进容器、历史本就保留在 DOM 里，重建无意义。
+  - （附带修正一处早先误判：`id="buddy-log"` 容器**是存在的**，`buddyLogAdd` 有 33 处调用，宠物操作日志是有效功能，只删掉多余的重建函数。）
+- 净效果：**删除 729 行 Python + 116K 原型 JS + 41 行 Rust + 13 行 JS**，仓库文件数 103 → 88，README 与实现对齐。
+- bump 0.6.18 → 0.6.19
+
+---
+
 ## v0.6.18（2026-10-30）— 🧩 修复侧栏「当前登录」账号名被头像挤压/裁切
 
 回应 issue #3 的 Windows 反馈第 2 点。
