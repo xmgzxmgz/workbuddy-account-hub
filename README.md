@@ -245,14 +245,15 @@ workbuddy-account-hub/
 │   │   └── main.js             # 渲染 / 交互 / 轮询 / 全局隐私 / 脱敏
 │   └── src-tauri/              # Rust workspace
 │       ├── crates/wb_api/      # 官方接口封装（计费三接口/签到/能量盲盒/宠物旅行/模型/环境）
-│       ├── crates/account_ops/ # 登录态扫描 / 快照 / 切换 / 置顶迁移
+│       ├── crates/account_ops/ # 登录态扫描 / 快照 / 切换 / 置顶迁移 / 跨机同步
 │       ├── src/main.rs         # Tauri command 注册
 │       └── tauri.conf.json
-├── sync/                       # 多设备对话同步（极空间 / Tailscale）
 ├── vault/                      # 本地数据快照（敏感，不提交）
-├── vault.py / detect.py / switch.py  # 配套运维脚本
 └── docs/images/                # README 截图
 ```
+
+> 早期 Python 版运维脚本（`detect.py` / `switch.py` / `vault.py`）与 JS 原型（`sync/`、`credits/`）
+> 已于 v0.6.19 移除——它们的功能全部由 Rust 侧 `account_ops` / `wb_api` 重写并接管。
 
 - **前端**：原生 JS + Tauri WebView，无 React/Vue 依赖（够用）
 - **后端**：Rust workspace（`wb_api` 接口层 + `account_ops` 账户操作层）+ reqwest blocking + rustls-tls

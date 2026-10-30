@@ -796,19 +796,8 @@ function buddyLogAdd(msg, cls) {
   box.prepend(line);
   while (box.children.length > 60) box.lastChild?.remove();
 }
-function buddyLogInit() {
-  const box = $('buddy-log');
-  if (!box) return;
-  box.innerHTML = '';
-  (buddyLog || []).forEach(l => {
-    const line = document.createElement('div');
-    line.className = 'line';
-    const t = `${pad(l.t.getHours())}:${pad(l.t.getMinutes())}:${pad(l.t.getSeconds())}`;
-    line.innerHTML = `<span class="t">${t}</span><span class="${l.cls || 'info'}">${escapeHtml(l.msg)}</span>`;
-    box.appendChild(line);
-  });
-  if (!buddyLog.length) box.innerHTML = '<span class="empty">暂无记录。点击「🔄 刷新」读取宠物状态。</span>';
-}
+// 注：原 buddyLogInit() 已删除——它负责「清空容器再回填历史日志」，但从无调用点，
+// 且 buddyLogAdd 会直接把新条目 prepend 到容器里，历史本就保留在 DOM 中，重建无意义。
 
 // 从 status 响应中安全取 data（body 可能是 JSON 字符串或已解析对象）
 function buddyData(body, field) {
