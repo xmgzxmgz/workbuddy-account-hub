@@ -64,6 +64,23 @@ pub fn key_matches_device(key: &[u8; 32]) -> Option<bool> {
     Some(got == want)
 }
 
+/// 标准 base64（带 padding）编码 —— 与官方客户端信封字段的编码方式一致。
+fn b64_encode(b: &[u8]) -> String {
+    use base64::Engine;
+    base64::engine::general_purpose::STANDARD.encode(b)
+}
+
+/// 当前设备 keyId = `sha256(protector).hex[..16]`，等于 `~/.workbuddy/keyblob`
+/// 里 slot 的 `protectorKeyId`（官方客户端加密信封用的就是这个值）。
+pub fn device_key_id(key: &[u8; 32]) -> String {
+    Sha256::digest(key)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .take(8)
+        .collect::<Vec<_>>()
+        .join("")
+}
+
 fn b64_decode(s: &str) -> Option<Vec<u8>> {
     let mut buf = Vec::new();
     let mut acc: u32 = 0;
@@ -177,3 +194,63 @@ pub fn auth_field_string(v: &Value, key: &[u8; 32]) -> Result<Option<String>, St
         _ => Ok(None),
     }
 }
+
+/// 明文字符串 → `{"$wbEncrypted":1,"envelope":".."}` 字段信封（解密的逆运算）。
+///
+/// 逐字节对齐官方客户端落盘格式（实测自 5.8.3 真实文件）：
+///   envelope        = base64( JSON{suite:1, keyId, nonce, authTag, ciphertext} )
+///   keyId           = sha256(key).hex[..16]（= keyblob slot 的 protectorKeyId）
+///   nonce           = 12 字节随机
+///   ciphertext      = AES-256-GCM(key, nonce, AAD) **不含** 16B tag、**不带** WBE 帧前缀
+///   authTag         = 上述 GCM 输出的末 16 字节
+///   AAD             = build_aad(keyId, "field")（帧码 0x02）
+///
+/// ⚠️ 为什么必须能加密：客户端 5.8.3 的落盘加密由主进程 credential-protection
+/// 存储层统一执行（app.asar 的 JS 层 grep 不到 `$wbEncrypted`，说明信封在原生层
+/// 读写）。Hub 若把解密后的**明文** token 写回该文件，客户端按 at-rest 策略读取时
+/// 会判定字段损坏 → 登录态读不出来 → 表现为「切换报成功但账号没变」。
+/// 因此写回前必须原样封回信封，绝不允许明文落盘。
+pub fn encrypt_field(plain: &str, key: &[u8; 32]) -> Result<Value, String> {
+    use aes_gcm::aead::{Aead, Payload};
+    use aes_gcm::{Aes256Gcm, KeyInit};
+
+    let key_id = device_key_id(key);
+    let mut nonce = [0u8; 12];
+    getrandom::getrandom(&mut nonce).map_err(|e| format!("生成 nonce 失败: {e}"))?;
+
+    let aad = build_aad(&key_id, "field");
+    let cipher = Aes256Gcm::new(key.into());
+    let sealed = cipher
+        .encrypt(nonce.as_slice().into(), Payload { msg: plain.as_bytes(), aad: &aad })
+        .map_err(|e| format!("AES-GCM 加密失败: {e}"))?;
+
+    // RustCrypto 的 encrypt 输出 = ciphertext || tag(16B)，需拆开分别落盘
+    if sealed.len() < 16 {
+        return Err("AES-GCM 输出异常（短于 tag 长度）".into());
+    }
+    let (ct, tag) = sealed.split_at(sealed.len() - 16);
+
+    let env = serde_json::json!({
+        "suite": 1,
+        "keyId": key_id,
+        "nonce": b64_encode(&nonce),
+        "authTag": b64_encode(tag),
+        "ciphertext": b64_encode(ct),
+    });
+    let env_b64 = b64_encode(env.to_string().as_bytes());
+    Ok(serde_json::json!({ "$wbEncrypted": 1, "envelope": env_b64 }))
+}
+
+/// 自检：加密 → 解密往返，确认本机密钥与官方信封格式可用。
+/// 供 Hub 启动诊断与测试调用（不落盘、不触网）。
+pub fn selftest_roundtrip() -> Result<(), String> {
+    let key = load_at_rest_key()?;
+    let plain = "wb-at-rest-roundtrip-自检-42";
+    let env = encrypt_field(plain, &key)?;
+    let back = auth_field_string(&env, &key)?.ok_or("往返解密返回 None")?;
+    if back != plain {
+        return Err(format!("往返不一致: {back:?} != {plain:?}"));
+    }
+    Ok(())
+}
+

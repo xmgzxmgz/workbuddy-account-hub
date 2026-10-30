@@ -92,36 +92,16 @@ pub fn local_storage_dir() -> PathBuf {
     workbuddy_home().join("local_storage")
 }
 
-/// 登录态文件（v5.3.8+ 明文 JSON，含 accessToken）。切换账号必须连它一起换。
+/// 登录态文件（v5.3.8+ 明文 JSON，新版为 `$wbEncrypted` 加密字段，含 accessToken）。
+/// 切换账号必须连它一起换。
 ///
-/// 路径按平台对齐官方客户端落盘位置：
-///   - macOS:   ~/Library/Application Support/CodeBuddyExtension/Data/Public/auth/workbuddy-desktop.info
-///   - Windows: %LOCALAPPDATA%/CodeBuddyExtension/Data/Public/auth/workbuddy-desktop.info
-/// 旧版/个别环境会直放 LOCALAPPDATA 根目录，故 Windows 额外兜底该位置。
+/// ⚠️ v0.6.16 修复（issue #3 问题 A）：不再用「硬编码优先级取第一个存在的路径」。
+/// 原因：客户端 5.8.3 起同机可能并存精确名 + 一批轮转备份，且落盘目录随版本变动；
+/// 旧逻辑会稳定选中**客户端已不再读写**的陈旧文件，写进去后 Hub 报切换成功、
+/// 客户端登录账号却毫无变化。现统一委托 `wb_api::active_auth_file()`：
+/// 候选集 = 硬编码已知路径 + 目录扫描兜底，再按「精确名优先 → mtime 最新」择优。
 pub fn auth_file() -> Option<PathBuf> {
-    let candidates: Vec<PathBuf> = if cfg!(target_os = "windows") {
-        let local = PathBuf::from(
-            std::env::var("LOCALAPPDATA").unwrap_or_else(|_| {
-                std::env::var("USERPROFILE")
-                    .map(|u| PathBuf::from(u).join("AppData").join("Local").to_string_lossy().into_owned())
-                    .unwrap_or_else(|_| ".".into())
-            }),
-        );
-        vec![
-            local.join("CodeBuddyExtension").join("Data").join("Public").join("auth").join("workbuddy-desktop.info"),
-            local.join("workbuddy-desktop.info"),
-        ]
-    } else {
-        vec![home()
-            .join("Library")
-            .join("Application Support")
-            .join("CodeBuddyExtension")
-            .join("Data")
-            .join("Public")
-            .join("auth")
-            .join("workbuddy-desktop.info")]
-    };
-    candidates.into_iter().find(|p| p.exists())
+    wb_api::active_auth_file()
 }
 
 /// 保险库根目录（按 uid 分桶）
@@ -1305,12 +1285,74 @@ fn switch_auth_to(src_auth: &Path, uid: &str) -> Result<(), String> {
     out["accounts"] = Value::Array(vec![target_entry.clone()]);
 
     // 写回当前登录态文件（uid 保持真实，token 为目标真实 token）
-    if let Some(af) = auth_file() {
-        let s = serde_json::to_string_pretty(&out).map_err(|e| format!("序列化失败: {e}"))?;
-        std::fs::write(&af, s).map_err(|e| format!("写入登录态失败: {e}"))?;
-        Ok(())
-    } else {
-        Err("未找到当前登录态文件".into())
+    //
+    // ⚠️ v0.6.16 关键修复（issue #3 问题 D，issue 里没提到的真凶）：
+    // 客户端 5.8.3 把 accessToken/refreshToken/nickname/phoneNumber 以
+    // `{"$wbEncrypted":1,"envelope":".."}` AES-256-GCM 字段信封加密落盘；加密发生在
+    // 主进程 credential-protection 存储层（app.asar 的 JS 层 grep 不到 $wbEncrypted），
+    // 也就是说**客户端按信封格式读取**。而上面 decrypt_envelope_fields 是就地解密，
+    // 若直接序列化写回，文件里躺的是裸明文 token → 客户端判字段损坏 → 读不出登录态 →
+    // 表现为「切换报成功，登录账号毫无变化」。
+    // 因此写回前必须把敏感字段原样封回信封；做不到就中止，绝不写明文。
+    let Some(af) = auth_file() else {
+        return Err("未找到当前登录态文件".into());
+    };
+
+    // 以登录态文件自身的既有形态为准决定是否加密（Windows 旧版是明文落盘，无需封装）
+    let was_sealed = std::fs::read_to_string(&af)
+        .ok()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+        .and_then(|v| v.get("auth").and_then(|a| a.get("accessToken")).cloned())
+        .map(|t| t.is_object() && t.get("$wbEncrypted").is_some())
+        .unwrap_or(false);
+
+    if was_sealed {
+        if !wb_api::at_rest_seal_ready() {
+            return Err(
+                "当前登录态是加密落盘格式（$wbEncrypted），但 Hub 取不到可用的本机 at-rest 密钥。\
+                 写回明文会导致客户端读不出登录态，已中止切换（未改动任何登录数据）。\
+                 请先运行 scripts/extract-mac-at-rest-key.mjs 重新提取密钥后重试"
+                    .into(),
+            );
+        }
+        let (_sealed_count, errs) = wb_api::seal_sensitive_fields(&mut out);
+        if !errs.is_empty() {
+            return Err(format!(
+                "写回前重新加密敏感字段失败，已中止切换（不写明文、未改动登录态）: {}",
+                errs.join("; ")
+            ));
+        }
+    }
+
+    let s = serde_json::to_string_pretty(&out).map_err(|e| format!("序列化失败: {e}"))?;
+    write_atomic(&af, &s).map_err(|e| format!("写入登录态失败: {e}"))?;
+    Ok(())
+}
+
+/// 原子写：同目录临时文件 + rename，避免客户端在写入中途读到半个 JSON
+/// （切换过程中客户端可能正好在启动/续签，半截文件会让它判定登录态损坏）。
+fn write_atomic(path: &std::path::Path, content: &str) -> std::io::Result<()> {
+    let dir = path.parent().unwrap_or_else(|| std::path::Path::new("."));
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let tmp = dir.join(format!(
+        "{}.hub-tmp.{}.{}",
+        path.file_name().and_then(|n| n.to_str()).unwrap_or("auth"),
+        std::process::id(),
+        ts
+    ));
+    std::fs::write(&tmp, content)?;
+    // Windows 上 rename 到已存在目标会失败，需先移除（失败可忽略，下一步 rename 会暴露真因）
+    #[cfg(target_os = "windows")]
+    let _ = std::fs::remove_file(path);
+    match std::fs::rename(&tmp, path) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            let _ = std::fs::remove_file(&tmp);
+            Err(e)
+        }
     }
 }
 

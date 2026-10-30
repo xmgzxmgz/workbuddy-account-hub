@@ -84,7 +84,7 @@ fn scan_auth_candidates(root: impl AsRef<Path>) -> Vec<std::path::PathBuf> {
 /// macOS 下 WorkBuddy 的数据目录名可能是 `CodeBuddyExtension` 或 `WorkBuddy`
 /// （取决于打包时的 productName），也可能落在 `~/Library/Application Support` 或 `~/.workbuddy`，
 /// 故在硬编码候选之外追加一层目录扫描兜底，避免平台差异导致读不到登录态、积分等全部失效。
-fn auth_candidates() -> Vec<std::path::PathBuf> {
+pub fn auth_candidates() -> Vec<std::path::PathBuf> {
     let mut cands = Vec::new();
     let home = std::env::var("HOME").unwrap_or_default();
     let local = std::env::var("LOCALAPPDATA").unwrap_or_else(|_| {
@@ -125,8 +125,93 @@ fn auth_candidates() -> Vec<std::path::PathBuf> {
         // 主目录 .workbuddy（若主客户端数据落在 home 下）
         cands.extend(scan_auth_candidates(std::path::Path::new(&home).join(".workbuddy")));
     }
-    cands.retain(|p| p.exists());
+    // 硬编码候选与目录扫描会重叠（同一文件被两种方式各命中一次），保序去重后再返回：
+    // 重复项会让诊断面板出现幽灵条目，也会让 active_auth_file 的排序结果不可解释。
+    let mut seen = std::collections::HashSet::new();
+    cands.retain(|p| p.exists() && seen.insert(p.clone()));
     cands
+}
+
+/// 登录态文件里是否带有可用的 accessToken（明文非空，或 `$wbEncrypted` 信封）。
+fn has_token_value(d: &Value) -> bool {
+    match d.get("auth").and_then(|a| a.get("accessToken")) {
+        Some(Value::String(s)) => !s.is_empty(),
+        Some(Value::Object(o)) => o.contains_key("$wbEncrypted"),
+        _ => false,
+    }
+}
+
+fn mtime_of(p: &std::path::Path) -> std::time::SystemTime {
+    std::fs::metadata(p)
+        .and_then(|m| m.modified())
+        .unwrap_or(std::time::UNIX_EPOCH)
+}
+
+/// 活跃登录态文件：客户端**当前真正在读写的**那一个。
+///
+/// 为什么需要这一层（issue #3「问题 A」的真实形态）：
+/// 客户端 5.8.3 在同一台机器上可能同时躺着多份 `workbuddy-desktop*.info`
+/// （精确名 + 一批 `<name>.<ts>.<pid>.<uuid>.info` 轮转备份），不同版本落盘位置
+/// 也可能变化（LOCALAPPDATA / Application Support / ~/.workbuddy）。
+/// 若写回时按「硬编码顺序取第一个存在的」来选，就可能把登录态写进一个客户端
+/// 根本不读的陈旧文件 —— 症状正是「Hub 报切换成功，登录账号毫无变化」。
+///
+/// 选取规则（可解释、可诊断）：
+///   1. 只考虑能解析成 JSON 且 `auth.accessToken` 非空（明文或信封）的文件；
+///   2. 精确文件名 `workbuddy-desktop.info` 优先于任何轮转备份 / 其他产品登录态；
+///   3. 同级之间取 mtime 最新（客户端每次登录/续签都会重写，mtime 最可靠）。
+pub fn active_auth_file() -> Option<std::path::PathBuf> {
+    let mut usable: Vec<(bool, std::time::SystemTime, std::path::PathBuf)> = Vec::new();
+    for p in auth_candidates() {
+        let Ok(s) = std::fs::read_to_string(&p) else { continue; };
+        let Ok(v) = serde_json::from_str::<Value>(&s) else { continue; };
+        if !has_token_value(&v) {
+            continue;
+        }
+        let exact = p
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(|n| n == "workbuddy-desktop.info")
+            .unwrap_or(false);
+        usable.push((exact, mtime_of(&p), p));
+    }
+    // 精确名优先 → mtime 最新
+    usable.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| b.1.cmp(&a.1)));
+    usable.into_iter().next().map(|(_, _, p)| p)
+}
+
+/// 登录态路径诊断：列出全部候选、是否可用、mtime、以及最终选中的文件。
+/// 供「切换无效」类问题一键取证（前端设置面板 / 日志调用）。
+pub fn auth_path_report() -> Value {
+    let mut rows = Vec::new();
+    for p in auth_candidates() {
+        let meta = std::fs::metadata(&p).ok();
+        let mtime_ms = meta
+            .as_ref()
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        let parsed = std::fs::read_to_string(&p)
+            .ok()
+            .and_then(|s| serde_json::from_str::<Value>(&s).ok());
+        rows.push(json!({
+            "path": p.to_string_lossy(),
+            "exists": p.exists(),
+            "size": meta.map(|m| m.len()).unwrap_or(0),
+            "mtime_ms": mtime_ms,
+            "has_token": parsed.as_ref().map(has_token_value).unwrap_or(false),
+            "exact_name": p.file_name().and_then(|n| n.to_str())
+                .map(|n| n == "workbuddy-desktop.info").unwrap_or(false),
+        }));
+    }
+    let active = active_auth_file();
+    json!({
+        "platform": if cfg!(target_os = "windows") { "windows" } else { "macos" },
+        "active": active.as_ref().map(|p| p.to_string_lossy().into_owned()),
+        "candidates": rows,
+        "seal_ready": at_rest_seal_ready(),
+    })
 }
 
 /// 检测登录态文件中的 accessToken 是否为「新版客户端加密格式」：
@@ -199,8 +284,15 @@ process.stdin.on('end', () => {
   try {
     const n = process._linkedBinding('electron_browser_workbuddy_storage');
     const payload = JSON.parse(n.loggerGet());
+    const req = JSON.parse(input || '{}');
+    // 模式一：只要密钥（Windows 侧加密回写用 —— Hub 没有 macOS 那样的 at-rest-key 文件，
+    // 必须靠官方 binding 取原始 secret 再由 Rust 派生 AES key）
+    if (req.wantKey) {
+      process.stdout.write(JSON.stringify({ ok: true, atRestSecretKey: payload.atRestSecretKey }));
+      return;
+    }
     const key = node_crypto.createHash('sha256').update(payload.atRestSecretKey, 'utf8').digest();
-    const fields = JSON.parse(input).fields || {};
+    const fields = req.fields || {};
     const out = {};
     for (const [name, v] of Object.entries(fields)) {
       if (isWrapper(v)) {
@@ -597,6 +689,134 @@ pub fn decrypt_envelope_fields(d: &mut Value) -> bool {
     any
 }
 
+/// 本机 at-rest 派生密钥（`sha256(atRestSecretKey)`），用于字段信封的加/解密。
+///
+/// 取钥优先级：
+///   1. `~/.workbuddy-account-hub/at-rest-key`（macOS：由 extract-mac-at-rest-key.mjs
+///      一次性提取，落盘复用，零开销）；
+///   2. Windows：Hub 没有等价密钥文件，改由官方 `WorkBuddy.exe`（node 模式）通过
+///      native binding 现取 `atRestSecretKey`，再在 Rust 侧派生 —— 密钥不落盘，
+///      与客户端同源，保证加密出的信封客户端一定能解开。
+///
+/// 返回 Err 时调用方**不得**以明文回写加密登录态（会写坏登录态）。
+pub fn at_rest_key() -> Result<[u8; 32], String> {
+    if let Ok(k) = wb_enc::load_at_rest_key() {
+        return Ok(k);
+    }
+    at_rest_key_from_worker()
+}
+
+/// 无密钥文件时的取钥兜底（按平台分实现，避免 `#[cfg]` 块造成函数尾部类型不一致）。
+#[cfg(target_os = "windows")]
+fn at_rest_key_from_worker() -> Result<[u8; 32], String> {
+    use sha2::{Digest, Sha256};
+    let Some(line) = run_wb_decrypt_worker(r#"{"wantKey":true}"#) else {
+        return Err("无法通过官方 WorkBuddy.exe 取得 at-rest 密钥（客户端未安装/路径未配置）".into());
+    };
+    let parsed: Value =
+        serde_json::from_str(&line).map_err(|e| format!("取钥输出不是合法 JSON: {e}"))?;
+    if parsed.get("ok").and_then(|x| x.as_bool()) != Some(true) {
+        let detail = parsed.get("err").and_then(|x| x.as_str()).unwrap_or("未知错误");
+        return Err(format!("官方客户端拒绝提供 at-rest 密钥: {detail}"));
+    }
+    let secret = parsed
+        .get("atRestSecretKey")
+        .and_then(|x| x.as_str())
+        .filter(|s| !s.is_empty())
+        .ok_or("取钥返回的 atRestSecretKey 为空")?;
+    dbg_log("at_rest_key: 已由 WorkBuddy.exe worker 取到 secret（Windows）");
+    let digest = Sha256::digest(secret.as_bytes());
+    let mut k = [0u8; 32];
+    k.copy_from_slice(&digest);
+    Ok(k)
+}
+
+#[cfg(not(target_os = "windows"))]
+fn at_rest_key_from_worker() -> Result<[u8; 32], String> {
+    Err("未找到 at-rest 密钥文件，请先运行 scripts/extract-mac-at-rest-key.mjs".into())
+}
+
+/// 是否具备「把明文字段重新封成 $wbEncrypted 信封」的能力。
+///
+/// 判定依据：能取到 at-rest 密钥，且（若存在 keyblob）派生出的 keyId 与
+/// `protectorKeyId` 一致 —— 不一致说明密钥已轮换，用它加密出来的信封客户端解不开。
+/// 不具备时调用方必须**拒绝以明文回写**，而不是悄悄降级。
+pub fn at_rest_seal_ready() -> bool {
+    let Ok(key) = at_rest_key() else { return false; };
+    // keyblob 缺失时按「可加密」处理（部分环境不落 keyblob），但若存在则必须匹配
+    match wb_enc::key_matches_device(&key) {
+        Some(ok) => ok,
+        None => true,
+    }
+}
+
+/// 把登录态文档里的敏感明文字段重新封装成 `$wbEncrypted` 信封（`decrypt_envelope_fields` 的逆运算）。
+///
+/// 采集/回填规则与解密侧严格对称，并额外覆盖 `accounts` 数组（切换写回时会构造它）：
+///   `auth.accessToken`、`auth.refreshToken`、`account.{nickname,phoneNumber}`、
+///   `accounts[].{nickname,phoneNumber}`、`allAccounts[].{nickname,phoneNumber}`。
+///
+/// 已是信封的字段原样跳过（不会二次加密），空值跳过。
+/// 返回 (封装成功的字段数, 失败详情)。失败详情非空时调用方**不得落盘**——明文 token
+/// 写进加密登录态文件会让客户端读不出登录态（切换"报成功但没生效"）。
+pub fn seal_sensitive_fields(d: &mut Value) -> (usize, Vec<String>) {
+    const ACCOUNT_KEYS: &[&str] = &["nickname", "phoneNumber"];
+
+    let Ok(key) = at_rest_key() else {
+        return (0, vec!["at-rest 密钥不可用（无法取钥 → 为避免写明文，本次不落盘）".into()]);
+    };
+
+    let mut sealed = 0usize;
+    let mut errs: Vec<String> = Vec::new();
+
+    // auth.*：token 两个字段
+    if let Some(auth) = d.get_mut("auth") {
+        for k in ["accessToken", "refreshToken"] {
+            seal_one(auth, k, &format!("auth.{k}"), &key, &mut sealed, &mut errs);
+        }
+    }
+    // account：单对象
+    if let Some(acc) = d.get_mut("account") {
+        for k in ACCOUNT_KEYS {
+            seal_one(acc, k, &format!("account.{k}"), &key, &mut sealed, &mut errs);
+        }
+    }
+    // accounts / allAccounts：数组
+    for container in ["accounts", "allAccounts"] {
+        if let Some(arr) = d.get_mut(container).and_then(|x| x.as_array_mut()) {
+            for (i, item) in arr.iter_mut().enumerate() {
+                for k in ACCOUNT_KEYS {
+                    seal_one(item, k, &format!("{container}.{i}.{k}"), &key, &mut sealed, &mut errs);
+                }
+            }
+        }
+    }
+    (sealed, errs)
+}
+
+/// 封装 obj[key]：仅当它是非空明文字符串时处理；已是信封或空值则原样跳过。
+fn seal_one(
+    obj: &mut Value,
+    key: &str,
+    path: &str,
+    key_bytes: &[u8; 32],
+    sealed: &mut usize,
+    errs: &mut Vec<String>,
+) {
+    let Some(slot) = obj.get(key) else { return; };
+    let Some(plain) = slot.as_str() else { return }; // 已是信封（Object）或 null → 跳过
+    if plain.is_empty() {
+        return;
+    }
+    match wb_enc::encrypt_field(plain, key_bytes) {
+        Ok(env) => {
+            obj[key] = env;
+            *sealed += 1;
+        }
+        Err(e) => errs.push(format!("{path}: {e}")),
+    }
+}
+
 /// 批量解密独立的 $wbEncrypted 信封字段（不依赖登录态文档形状，供 vault 快照昵称等场景）。
 /// 入参为 name → 信封值 的 map；返回同 key 的 map，解密失败的值为 None。
 /// macOS：进程内原生密钥解密（无额外开销）；
@@ -740,9 +960,22 @@ fn base64_decode(s: &str) -> Option<Vec<u8>> {
     Some(buf)
 }
 
+/// 候选登录态路径，并把「客户端当前真正在读写的那个」提到最前。
+///
+/// 只做排序、不裁剪：活跃文件解密失败时仍要能回落到其余候选（宁可读到旧登录态，
+/// 也好过整个 UI 判成未登录）。
+fn auth_candidates_active_first() -> Vec<std::path::PathBuf> {
+    let mut cands = auth_candidates();
+    if let Some(act) = active_auth_file() {
+        cands.retain(|p| p != &act);
+        cands.insert(0, act);
+    }
+    cands
+}
+
 /// 读取本机登录态；返回 null 表示未登录
 pub fn load_login() -> Option<LoginInfo> {
-    for p in auth_candidates() {
+    for p in auth_candidates_active_first() {
         if let Ok(s) = std::fs::read_to_string(&p) {
             if let Ok(mut d) = serde_json::from_str::<Value>(&s) {
                 // 新版客户端（5.6.0+）字段级加密感知：accessToken 为 $wbEncrypted 信封时，
@@ -782,7 +1015,7 @@ pub fn load_login() -> Option<LoginInfo> {
 
 /// 读取整个登录态文件（含 allAccounts 已登记账号列表）
 pub fn load_auth_file() -> Option<Value> {
-    for p in auth_candidates() {
+    for p in auth_candidates_active_first() {
         if let Ok(s) = std::fs::read_to_string(&p) {
             if let Ok(d) = serde_json::from_str::<Value>(&s) {
                 if d.get("auth").and_then(|a| a.get("accessToken")).is_some() {
