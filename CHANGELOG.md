@@ -7,6 +7,19 @@
 
 ---
 
+## v0.6.18（2026-10-30）— 🧩 修复侧栏「当前登录」账号名被头像挤压/裁切
+
+回应 issue #3 的 Windows 反馈第 2 点。
+
+- **两个叠加的根因**：
+  1. 头像 `.av` 用的是 `float:left`，而 `.nm` / `.id` 仍是普通块级元素——float 只让**文字**环绕，块级元素自身宽度还是整行宽，于是名称从容器左边缘起排、被头像压住，右侧越界被裁；
+  2. 更隐蔽的一层：`.sidebar` 是 `display:flex; flex-direction:column`，子项默认 `flex-shrink:1`。当侧栏内容总高超出视口（窗口变矮 / 账号变多）时，**`.me` 卡片自身被压缩**，叠加 `overflow:hidden`，把名称第二行、UID、类型 badge 直接裁掉——这才是「窄窗口下更明显」的真正原因，不只是横向挤压。
+- **修法**：① 头像 `flex:0 0 36px` 固定不压缩，文字区改为 `.me-info` 容器 + `flex:1 1 0; min-width:0`（只有这样才会真正让位并按需换行），名称 `overflow-wrap:anywhere`、UID `word-break:break-all`；② 给 `.sidebar > *` 加 `flex-shrink:0`，让侧栏整体滚动而不是压缩子项；③ badge 移入文字列，`align-self:flex-start` 保持紧凑不拉伸。
+- **验证**：用真实 `index.html` 去掉 Tauri 依赖后 headless 渲染两个极端场景（`Change979` / `Change979-超长账号名称测试` + 41 字符 UID），短名称与超长名称均完整显示、超长自动折行、badge 位置正常，无任何裁切。
+- bump 0.6.17 → 0.6.18
+
+---
+
 ## v0.6.17（2026-10-30）— 🩺 签到前三态预检 + ♻️ refreshToken 静默续期（RT 可无限保活）
 
 回应 issue #3 的问题 B / C。两个功能都已用真实账号实测跑通，并纠正了一条关键协议细节。
