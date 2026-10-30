@@ -961,30 +961,6 @@ fn export_conversation_history(uid: String, include_deleted: Option<bool>, with_
     ops::export_conversation_history(&uid, include_deleted.unwrap_or(false), with_usage.unwrap_or(true))
 }
 
-/// 跨机同步自检（共享目录/本机包/对端包/资产规模）
-#[tauri::command]
-fn sync_status() -> Value {
-    ops::sync::sync_status()
-}
-
-/// 跨机同步：上传本机白名单资产（per-machine zip，原子落盘）
-#[tauri::command]
-fn sync_push() -> Result<Value, String> {
-    ops::sync::sync_push()
-}
-
-/// 跨机同步：拉取其它机器的包并合并（冲突留 .conflict- 备份）
-#[tauri::command]
-fn sync_pull() -> Result<Value, String> {
-    ops::sync::sync_pull()
-}
-
-/// 设置共享同步目录（空串清除）
-#[tauri::command]
-fn sync_set_dir(dir: String) -> Result<Value, String> {
-    ops::sync::set_share_dir(&dir)
-}
-
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     if !ensure_single_instance() {
@@ -1037,10 +1013,6 @@ pub fn run() {
             memory_all,
             usage_summary,
             export_conversation_history,
-            sync_status,
-            sync_push,
-            sync_pull,
-            sync_set_dir
         ])
         .run(tauri::generate_context!())
         .expect("error while running WorkBuddy Account Hub");

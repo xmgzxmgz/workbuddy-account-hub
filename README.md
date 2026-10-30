@@ -245,7 +245,7 @@ workbuddy-account-hub/
 │   │   └── main.js             # 渲染 / 交互 / 轮询 / 全局隐私 / 脱敏
 │   └── src-tauri/              # Rust workspace
 │       ├── crates/wb_api/      # 官方接口封装（计费三接口/签到/能量盲盒/宠物旅行/模型/环境）
-│       ├── crates/account_ops/ # 登录态扫描 / 快照 / 切换 / 置顶迁移 / 跨机同步
+│       ├── crates/account_ops/ # 登录态扫描 / 快照 / 切换 / 置顶迁移 / 预检续期
 │       ├── src/main.rs         # Tauri command 注册
 │       └── tauri.conf.json
 ├── vault/                      # 本地数据快照（敏感，不提交）

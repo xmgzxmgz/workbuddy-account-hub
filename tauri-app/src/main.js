@@ -80,6 +80,26 @@ function toggleNotify() {
   const show = d.classList.toggle('show');
   if (show) NotifyCenter.render();
 }
+// ===== 顶栏「⋯ 更多」下拉（v0.6.19 界面瘦身）=====
+function toggleMore() {
+  const d = $('more-dropdown'); if (!d) return;
+  d.classList.toggle('show');
+}
+function closeMore() {
+  const d = $('more-dropdown'); if (d) d.classList.remove('show');
+}
+// 原始返回（调试）面板默认隐藏，只在需要排查时从「⋯」展开
+function toggleRawPanel() {
+  const p = $('raw-panel'); if (!p) return;
+  const willShow = p.style.display === 'none' || !p.style.display;
+  p.style.display = willShow ? 'block' : 'none';
+  if (willShow) p.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+// 点空白处关闭「⋯」菜单（与通知下拉同一行为）
+document.addEventListener('click', (e) => {
+  const wrap = $('more-wrap');
+  if (wrap && !wrap.contains(e.target)) closeMore();
+});
 function clearNotify() { NotifyCenter.clear(); }
 function showNotifyDetail(i) {
   const arr = NotifyCenter.list(); const it = arr[i]; if (!it) return;
@@ -2204,62 +2224,4 @@ bootLog('脚本末尾：准备调用 bootBootstrap');
 bootBootstrap();
 bootLog('脚本末尾：bootBootstrap 已调用');
 
-// ===== 跨机同步（v0.6.15 · Phase 1：文件资产） =====
 function esc(s){ const d=document.createElement('div'); d.textContent=String(s==null?'':s); return d.innerHTML; }
-function humanSize(b){
-  const u=['B','KB','MB','GB','TB']; let v=Number(b)||0, i=0;
-  while(v>=1024 && i<u.length-1){ v/=1024; i++; }
-  return i===0 ? v+' B' : v.toFixed(1)+' '+u[i];
-}
-async function syncStatus(silent) {
-  try {
-    const st = await invoke('sync_status');
-    $('sync-dir').value = st.share_dir || '';
-    if (st.share_dir && !st.share_dir_set) $('sync-dir').placeholder = st.default_share_dir || '';
-    const rows = [];
-    rows.push(`<div class="item"><span class="k">本机标识</span><span class="v">${esc(st.machine)}</span></div>`);
-    rows.push(`<div class="item"><span class="k">共享目录</span><span class="v">${st.share_dir_set ? esc(st.share_dir) : '<span class="empty">未设置</span>'}</span></div>`);
-    rows.push(`<div class="item"><span class="k">待同步资产</span><span class="v">${st.assets.files} 个文件 · ${humanSize(st.assets.size_bytes)}（敏感跳过 ${st.assets.skipped_sensitive}）</span></div>`);
-    rows.push(`<div class="item"><span class="k">上次上传</span><span class="v">${esc(st.last_push_human)}${st.own ? ' · ' + humanSize(st.own.size_bytes) : ''}</span></div>`);
-    rows.push(`<div class="item"><span class="k">上次拉取</span><span class="v">${esc(st.last_pull_human)}</span></div>`);
-    const peers = st.peers || [];
-    if (peers.length) {
-      const ps = peers.map(p =>
-        `<div class="item"><span class="k">对端包 ${esc(p.machine)}${p.is_new ? ' 🆕' : ''}</span><span class="v">${humanSize(p.size_bytes)} · ${esc(p.mtime_human)}</span></div>`).join('');
-      rows.push(ps);
-    } else {
-      rows.push('<div class="item"><span class="k">对端包</span><span class="v empty">暂无（等其它机器上传）</span></div>');
-    }
-    $('sync-status').innerHTML = rows.join('');
-    if (!silent) bootLog('同步自检完成');
-    return st;
-  } catch (e) { if (!silent) bootLog('同步自检失败 ' + e.message, 'err'); }
-}
-async function syncSetDir() {
-  try {
-    const dir = ($('sync-dir').value || '').trim();
-    await invoke('sync_set_dir', { dir });
-    bootLog(dir ? '同步目录已保存' : '同步目录已清除');
-    syncStatus(true);
-  } catch (e) { bootLog('保存同步目录失败 ' + e.message, 'err'); }
-}
-async function syncPush() {
-  if (!confirm('把本机白名单资产（技能/记忆/对话正文/任务等）打包上传到共享目录？')) return;
-  try {
-    const r = await invoke('sync_push');
-    bootLog(`上传完成：${r.files} 个文件 · ${humanSize(r.size_bytes)}${(r.failed||[]).length ? ' · 失败 ' + r.failed.length : ''}`);
-    syncStatus(true);
-  } catch (e) { bootLog('上传失败 ' + e.message, 'err'); }
-}
-async function syncPull() {
-  if (!confirm('从共享目录拉取其它机器的包并合并？同名内容不同的文件会先把本地版备份为 .conflict- 再落新值。')) return;
-  try {
-    const r = await invoke('sync_pull');
-    const ms = r.machines || [];
-    const sum = ms.reduce((a,m)=>({a:a.a+(m.added||0),u:a.u+(m.updated||0),c:a.c+(m.conflicts||0)}),{a:0,u:0,c:0});
-    bootLog(`拉取完成：${ms.length} 个对端包 · 新增 ${sum.a} · 更新 ${sum.u} · 冲突备份 ${sum.c}`);
-    syncStatus(true);
-  } catch (e) { bootLog('拉取失败 ' + e.message, 'err'); }
-}
-// 启动时静默填一次状态（失败不打扰）
-setTimeout(() => syncStatus(true), 1200);

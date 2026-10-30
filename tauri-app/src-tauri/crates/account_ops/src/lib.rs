@@ -62,8 +62,6 @@ pub struct BackupMeta {
     pub is_latest: bool,
 }
 
-pub mod sync;
-
 /// Hub 自身配置目录：~/.workbuddy-account-hub
 pub fn hub_home() -> PathBuf {
     home().join(".workbuddy-account-hub")
