@@ -7,6 +7,24 @@
 
 ---
 
+## v0.6.16（2026-10-30）— 🔑 5.8.3 切换失效根治：加密回写 + 活跃登录态择优
+
+回应 issue #3（客户端 5.8.3 后切换账号失效）。实测确认 issue 给的两个归因都不是真因，真正的两个根因是：
+
+- **根因一（新发现，最致命）：写回明文 token 到加密登录态文件。** 客户端 5.8.3 把 `accessToken`/`refreshToken`/`nickname`/`phoneNumber` 以 `{"$wbEncrypted":1,"envelope":".."}`（AES-256-GCM 字段信封）加密落盘，加密由主进程 credential-protection 存储层在原生层统一执行（app.asar 的 JS 层 grep 不到 `$wbEncrypted`），即**客户端按信封格式读取**。而 Hub 只有解密没有加密，`switch_auth_to` 解密后就地序列化写回 → 文件里躺裸明文 → 客户端判字段损坏 → 读不出登录态 → 表现为「切换报成功，账号毫无变化」。
+  - 新增 `wb_enc::encrypt_field` / `selftest_roundtrip`：AES-256-GCM + 官方 AAD 帧构造，keyId = `sha256(key).hex[..16]`（= keyblob `protectorKeyId`），nonce 12B 密码学随机（`getrandom`），密文不带 WBE 帧前缀、tag 单独落盘 —— 逐字节对齐客户端真实文件格式。
+  - 新增 `wb_api::seal_sensitive_fields`：写回前把敏感明文字段封回信封（已是信封的跳过，不二次加密），覆盖 `auth.*`、`account.*`、`accounts[]`、`allAccounts[]`。
+  - `switch_auth_to` 改为：**以登录态文件自身既有形态为准**决定是否封装；`at_rest_seal_ready()` 不通过或封装失败时**中止切换、绝不写明文**；落盘改原子写（临时文件 + rename），避免客户端读到半个 JSON。
+- **根因二：写回目标不是客户端真正在读的文件。** 5.8.3 同机可能并存精确名 + 一批 `<name>.<ts>.<pid>.<uuid>.info` 轮转备份，落盘目录也随版本变动；旧逻辑「硬编码顺序取第一个存在的」会稳定选中已废弃的陈旧文件。
+  - 新增 `wb_api::active_auth_file()`：候选集（硬编码 + 目录扫描兜底，去重）→ 只留有 `auth.accessToken` 的 → **精确名 `workbuddy-desktop.info` 优先 → mtime 最新**。
+  - `account_ops::auth_file()` 与 `wb_api::load_login/load_auth_file` 统一走这套裁决，读和写不再各用一套逻辑。
+  - 新增 ⚙ 设置面板「登录态路径诊断」：列出全部候选（精确名/含token/mtime/大小）、高亮命中的活跃文件、显示回写能力（可加密/无密钥），一键定位「切换无效」。
+- **附带澄清 issue 的一个错误建议**：issue 提议 fallback 到 `~/.workbuddy/local_storage/wb_entry_*.info`。实测该文件是 `[{userId,data,ts}]` 配置快照（models/featureToggles 等，300KB+），**不含任何 token**，不是登录态；写进去只会破坏配置。勿采纳。
+- **验证**：新增 `tests/atrest_seal_roundtrip.rs`（3 个真实数据测试）——① 纯算法往返 ② 真实 token 解密→重封→解回一致且 keyId == keyblob ③ 整文档 6 个敏感字段全部信封化、明文不残留、逐字段无损。macOS 5.8.3 实机全绿。
+- bump 0.6.15 → 0.6.16
+
+---
+
 ## v0.6.13（2026-10-08）— ⚙ 设置面板：WorkBuddy.exe 自动检测优先 + 手选兜底
 
 回应 issue 反馈（用户不希望用环境变量指定自定义安装路径）：

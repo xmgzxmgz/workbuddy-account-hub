@@ -12,3 +12,5 @@ chrono = "0.4"
 aes-gcm = "0.10"
 sha2 = "0.10"
 base64 = "0.22"
+# 字段信封加密需要密码学随机 nonce（GCM 下 nonce 复用会直接泄露明文）
+getrandom = "0.2"

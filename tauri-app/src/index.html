@@ -800,6 +800,10 @@
           <summary style="cursor:pointer;">候选路径明细</summary>
           <div id="set-candidates" style="margin-top:6px;line-height:1.7;word-break:break-all;"></div>
         </details>
+        <details id="set-auth-wrap" style="font-size:11px;color:var(--muted);">
+          <summary style="cursor:pointer;" onclick="if(!this.dataset.loaded){this.dataset.loaded='1';loadAuthPathReport();}">登录态路径诊断（切换无效时看这里）</summary>
+          <div id="set-auth" style="margin-top:6px;line-height:1.7;word-break:break-all;">点击展开以检测…</div>
+        </details>
       </div>
       <div class="modal-foot">
         <button class="secondary" onclick="clearExeSetting()">恢复自动检测</button>

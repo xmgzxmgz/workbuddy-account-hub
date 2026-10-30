@@ -125,6 +125,14 @@ async fn get_quota() -> Value {
 
 // ===== v0.6.13 设置面板：WorkBuddy.exe 自动检测诊断 / 手选兜底 / 原生浏览框 =====
 
+/// 登录态路径 + at-rest 加密能力诊断（issue #3「切换报成功但账号没变」一键取证）。
+/// 返回：候选文件清单（路径/大小/mtime/是否含 token/是否精确名）、最终选中的活跃文件、
+/// 以及 Hub 是否具备把敏感字段重新封装成 $wbEncrypted 信封的能力。
+#[tauri::command]
+fn get_auth_path_report() -> Value {
+    api::auth_path_report()
+}
+
 #[tauri::command]
 fn get_exe_settings() -> Value {
     api::wb_exe_diagnostics()
@@ -929,6 +937,7 @@ pub fn run() {
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
             get_all,
+            get_auth_path_report,
             get_exe_settings,
             save_exe_setting,
             pick_workbuddy_exe,

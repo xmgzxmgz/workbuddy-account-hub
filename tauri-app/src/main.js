@@ -1972,6 +1972,43 @@ async function clearExeSetting() {
   } catch (e) { showSetErr(String(e)); }
 }
 
+// ===== 登录态路径诊断（v0.6.16，issue #3）=====
+// 「切换报成功但账号没变」的两个根因都体现在这里：
+//   1) 写回的目标文件不是客户端真正在读的那个（多份 workbuddy-desktop*.info）
+//   2) 登录态是 $wbEncrypted 加密落盘，而 Hub 无法取得 at-rest 密钥
+async function loadAuthPathReport() {
+  const el = $('set-auth');
+  el.textContent = '检测中…';
+  try {
+    const r = await invoke('get_auth_path_report');
+    const fmtTs = ms => {
+      if (!ms) return '—';
+      const d = new Date(Number(ms)), p = n => String(n).padStart(2, '0');
+      return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+    };
+    const rows = (r.candidates || []).map(c => {
+      const pick = r.active === c.path;
+      const mark = pick ? '<b style="color:#7bc47f;">▶ 命中</b>' : '&nbsp;&nbsp;&nbsp;';
+      const badges = [
+        c.exact_name ? '精确名' : '备份/其他',
+        c.has_token ? '含token' : '<span style="color:var(--red);">无token</span>',
+        fmtTs(c.mtime_ms),
+        (c.size / 1024).toFixed(1) + 'KB',
+      ].join(' · ');
+      return `${mark} <code>${escapeHtml(c.path)}</code><br>&nbsp;&nbsp;&nbsp;&nbsp;<span style="opacity:.75;">${badges}</span>`;
+    }).join('<br>');
+    const sealLine = r.seal_ready
+      ? '<span style="color:#7bc47f;">✓ 可加密回写</span>（敏感字段会封成 $wbEncrypted 再落盘）'
+      : '<span style="color:var(--red);">✗ 无 at-rest 密钥</span>（加密登录态下无法安全回写，切换会被阻止）';
+    el.innerHTML = `<div style="margin-bottom:6px;">当前活跃登录态：<code>${escapeHtml(r.active || '未找到')}</code></div>`
+      + `<div style="margin-bottom:6px;">回写能力：${sealLine}</div>`
+      + `<div style="opacity:.8;">平台 ${escapeHtml(r.platform || '')} · 候选 ${(r.candidates || []).length} 个</div><hr style="border:0;border-top:1px solid var(--line);margin:7px 0;">`
+      + rows;
+  } catch (e) {
+    el.textContent = '检测失败：' + e;
+  }
+}
+
 function refreshAll() { loadAll(); loadBuddy(); }
 
 // ===== 用量与对话历史面板 =====
