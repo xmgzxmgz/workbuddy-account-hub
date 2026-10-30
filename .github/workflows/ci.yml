@@ -39,3 +39,12 @@ jobs:
           CC: clang
           CXX: clang++
         run: cd tauri-app/src-tauri && cargo check
+
+      # v0.6.19：此前 CI 只做 cargo check，仓库里的纯逻辑测试（models_roundtrip /
+      # models_smoke 等）从不被执行，等于白写。这里补上。
+      # 需要真实登录态/网络的测试都已标 #[ignore]，不会在 CI 里跑、也不会因缺环境失败。
+      - name: Rust unit & integration tests
+        env:
+          CC: clang
+          CXX: clang++
+        run: cd tauri-app/src-tauri && cargo test --workspace --no-fail-fast
