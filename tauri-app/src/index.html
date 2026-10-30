@@ -62,20 +62,34 @@
     }
     .sidebar h3{font-size:10px;letter-spacing:.14em;color:var(--muted);margin:16px 7px 6px;text-transform:uppercase;font-weight:700;}
     .sidebar h3:first-child{margin-top:2px;}
+    /* 侧栏是 flex column，子项默认 flex-shrink:1。当内容总高超出视口（窗口变矮 / 账号变多）时，
+       每个子项都会被压缩，配合 .me 的 overflow:hidden 就会把名称第二行、id、badge 直接裁掉。
+       用户反馈的「窄窗口下账号名被裁」根因就在这里，不只是头像挤压。
+       侧栏本身有 overflow-y:auto，让子项不收缩、整体滚动才是正确行为。 */
+    .sidebar > *{flex-shrink:0;}
     .me{
       background:linear-gradient(150deg,rgba(139,124,255,.14),rgba(77,157,255,.07) 55%,rgba(255,255,255,.03));
       border:1px solid rgba(139,124,255,.28);border-radius:14px;padding:12px;margin-bottom:6px;
       box-shadow:var(--shadow-sm);position:relative;overflow:hidden;
+      /* 修复（issue #3）：原来头像用 float:left，.nm/.id 宽度仍是整行宽，文字从容器左边缘起排
+         被头像压住、右侧越界被裁（长账号名尤其明显，id/badge 还会被挤掉）。
+         改为 flex：头像固定 36px 不参与压缩，文字区 flex:1 + min-width:0 才会真正让位并按需换行，
+         badge 用 flex-basis:100% 独占一行，结构上不可能再被挤。 */
+      display:flex;flex-wrap:wrap;align-items:flex-start;column-gap:10px;row-gap:0;
     }
     .me::after{content:"";position:absolute;top:-46px;right:-46px;width:110px;height:110px;border-radius:50%;background:radial-gradient(circle,rgba(139,124,255,.22),transparent 70%);pointer-events:none;}
     .me .av{
-      width:36px;height:36px;border-radius:11px;background:var(--accent-grad);
-      display:flex;align-items:center;justify-content:center;font-size:17px;color:#fff;float:left;margin-right:10px;
+      flex:0 0 36px;width:36px;height:36px;border-radius:11px;background:var(--accent-grad);
+      display:flex;align-items:center;justify-content:center;font-size:17px;color:#fff;
       box-shadow:0 4px 14px rgba(109,92,255,.4);
     }
-    .me .nm{font-weight:700;font-size:13px;letter-spacing:.01em;}
-    .me .id{color:var(--muted);font-size:10px;margin-top:2px;word-break:break-all;}
-    .me .badge{display:inline-block;margin-top:7px;font-size:9px;padding:2px 8px;border-radius:20px;background:rgba(61,220,151,.14);color:var(--green);border:1px solid rgba(61,220,151,.3);}
+    .me .me-info{flex:1 1 0;min-width:0;display:flex;flex-direction:column;gap:2px;padding-top:1px;}
+    .me .nm{
+      min-width:0;font-weight:700;font-size:13px;letter-spacing:.01em;line-height:1.35;
+      overflow-wrap:anywhere;word-break:break-word;white-space:normal;
+    }
+    .me .id{min-width:0;color:var(--muted);font-size:10px;word-break:break-all;overflow-wrap:anywhere;}
+    .me .badge{align-self:flex-start;margin-top:8px;display:inline-block;font-size:9px;padding:2px 8px;border-radius:20px;background:rgba(61,220,151,.14);color:var(--green);border:1px solid rgba(61,220,151,.3);max-width:100%;box-sizing:border-box;}
     .acc{
       display:flex;align-items:center;gap:9px;padding:7px 10px;border-radius:11px;cursor:pointer;
       border:1px solid transparent;transition:background .15s,border-color .15s,transform .15s;position:relative;
@@ -462,9 +476,11 @@
     <h3>当前登录</h3>
     <div class="me" id="me-card">
       <div class="av" id="me-av">👤</div>
-      <div class="nm" id="me-nm">加载中…</div>
-      <div class="id" id="me-id"></div>
-      <span class="badge" id="me-type"></span>
+      <div class="me-info">
+        <div class="nm" id="me-nm">加载中…</div>
+        <div class="id" id="me-id"></div>
+        <span class="badge" id="me-type"></span>
+      </div>
     </div>
 
     <h3>已登记账号</h3>
