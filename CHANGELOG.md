@@ -7,6 +7,30 @@
 
 ---
 
+## v0.6.20（2026-11-03）— 🌏 支持海外版（WorkBuddy AI）：按账号域名选网关
+
+回应 issue #4「可以支持下海外版吗」。
+
+- **根因**：`API_BASE` 是写死常量 `https://copilot.tencent.com`，全部 17 处请求都往国内网关打。海外版账号的凭据属于国际区，打国内网关必然 401/403 —— 所以此前不是"没适配"，而是"用错了网关"。
+- **改为按账号自己的 `auth.domain` 推导网关**：
+  - `www.workbuddy.cn` / `copilot.tencent.com` / 空 → `https://copilot.tencent.com`（国内）
+  - `workbuddy.ai` / `codebuddy.ai`（含大小写、空白）→ `https://www.workbuddy.ai`（国际）
+  - 国际版两个品牌域（桌面端 workbuddy.ai、CodeBuddy CLI codebuddy.ai）共用同一国际网关，凭据互不通用
+- **`LoginInfo` 新增 `domain` 字段**，`load_login` / `login_from_file` 都从 `auth.domain` 读取；`api_base(login)` / `api_base_for_domain()` / `region_of_domain()` 统一收口，17 处调用点全部替换。
+- **`get_memory()` / `get_checkin()` 改为委托 `*_as` 版本**，避免无 login 上下文时退回国内网关。
+- **补海外版的数据目录与可执行文件候选**（其目录名、进程名均不同）：
+  - 登录态：`WorkBuddyAI` / `WorkBuddy AI` 数据目录、`~/.workbuddy-ai`、`%LOCALAPPDATA%\WorkBuddyAI`
+  - exe：`WorkBuddyAI.exe`（进程检测、注册表卸载项、`%LOCALAPPDATA%\Programs\WorkBuddyAI`），手选校验同步放宽
+- **UI**：🩺 登录态健康面板给海外账号打「国际版」标签，预检结果附带 `region` / `domain`。
+- **测试**：
+  - 新增 `tests/region_mapping.rs`（4 个纯逻辑用例，CI 执行）：国内/国际域名映射、大小写与空白容错、未知域名回退国内（保证存量用户不被误切）。
+  - 新增 `tests/region_real.rs`（ignore，需真实登录态）：读本机 `auth.domain` → 推导网关，并断言国内账号**没有**被误判成国际版。
+  - 回归：国内 5 个账号预检仍全部正常（`ok:4 / revoked:1`，其中 revoked 是已知废号），无行为变化。
+- **未验证项（需海外账号配合）**：国际网关下 billing / 签到 / 宠物各接口的路径与返回结构是否与国内一致。若海外账号某接口报 404/字段缺失，属路径差异，请把返回体贴回来即可按域调整。
+- bump 0.6.19 → 0.6.20
+
+---
+
 ## v0.6.19（2026-10-30）— 🧹 清理历史遗留脚本与死代码（仓库瘦身）
 
 纯清理，无功能变更，无行为风险。
