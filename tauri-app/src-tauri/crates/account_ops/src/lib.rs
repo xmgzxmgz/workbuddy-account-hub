@@ -1111,11 +1111,16 @@ pub fn preflight_accounts(vault: &Path) -> Vec<Value> {
             v["label"] = json!("无可用登录态");
             v["at_days_left"] = Value::Null;
             v["http_status"] = Value::Null;
+            v["region"] = Value::Null;
             v["detail"] = json!(if a.has_snapshot { "快照存在但解不出 token" } else { "没有登录态快照" });
             out.push(v);
             continue;
         };
         let mut merged = base;
+        // 区域：cn=国内版，global=海外版（WorkBuddy AI）。两者的网关与凭据互不通用，
+        // UI 上标出来，用户才知道某个账号为什么在另一套额度体系里（issue #4）。
+        merged["region"] = json!(wb_api::region_of_domain(&login.domain));
+        merged["domain"] = json!(login.domain);
         if let Value::Object(pf) = wb_api::preflight_login(&login) {
             for (k, v) in pf {
                 merged[k] = v;

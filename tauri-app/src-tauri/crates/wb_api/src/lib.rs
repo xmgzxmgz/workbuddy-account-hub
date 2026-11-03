@@ -15,7 +15,11 @@ use std::path::Path;
 pub mod models;
 pub mod wb_enc;
 
+/// @deprecated 不再直接拼 URL —— 一律走 `api_base(login)` 按账号域名推导，
+/// 否则海外版账号会被打到国内网关（issue #4）。保留常量仅作默认值说明。
 const API_BASE: &str = "https://copilot.tencent.com";
+#[allow(dead_code)]
+fn _api_base_default() -> &'static str { API_BASE }
 const BILLING_METER: &str = "/billing/meter";
 const V2_METER: &str = "/v2/billing/meter";
 
@@ -53,6 +57,47 @@ pub struct LoginInfo {
     pub token: String,
     pub file: String,
     pub account: Value,
+    /// 登录态里的 `auth.domain`（如 www.workbuddy.cn / www.workbuddy.ai）。
+    /// 决定这次请求该打到国内网关还是国际网关，见 `api_base`。
+    pub domain: String,
+}
+
+// ---------------------------------------------------------------------------
+// 区域识别与 API 网关推导（Issue #4：支持海外版）
+//
+// 国内版与国际版是**两套独立网关 + 两套互不通用的凭据**：
+//   国内版：登录域 www.workbuddy.cn   → API https://copilot.tencent.com
+//   国际版：登录域 www.workbuddy.ai   → API https://www.workbuddy.ai
+//           （CodeBuddy CLI 登录在 codebuddy.ai，同属国际版）
+// 此前 API_BASE 是写死的常量，所有账号都往 copilot.tencent.com 打，
+// 海外账号必然 401/403。现改为按各账号自己的 auth.domain 推导。
+// ---------------------------------------------------------------------------
+
+/// 登录域 → 区域标识（`cn` / `global`）。用于界面分组与诊断展示。
+pub fn region_of_domain(domain: &str) -> &'static str {
+    let d = domain.trim().to_ascii_lowercase();
+    if d.contains("workbuddy.ai") || d.contains("codebuddy.ai") {
+        "global"
+    } else {
+        "cn"
+    }
+}
+
+/// 登录域 → 该区域官方 API 网关基址。
+///
+/// 国际版两个品牌域（workbuddy.ai / codebuddy.ai）共用同一个国际网关，
+/// 因此都映射到 `https://www.workbuddy.ai`；其余一律按国内网关处理
+/// （含 domain 缺失的旧快照，保持向后兼容）。
+pub fn api_base_for_domain(domain: &str) -> &'static str {
+    match region_of_domain(domain) {
+        "global" => "https://www.workbuddy.ai",
+        _ => "https://copilot.tencent.com",
+    }
+}
+
+/// 该账号应使用的 API 网关基址。
+pub fn api_base(login: &LoginInfo) -> &'static str {
+    api_base_for_domain(&login.domain)
 }
 
 /// 在指定根目录下遍历一层子目录，收集可能存在的登录态文件路径。
@@ -104,12 +149,25 @@ pub fn auth_candidates() -> Vec<std::path::PathBuf> {
                 .join("workbuddy-desktop.info"),
         );
         cands.extend(scan_auth_candidates(std::path::Path::new(&local)));
+        // 海外版（WorkBuddy AI）数据目录：%LOCALAPPDATA%\WorkBuddyAI、~\.workbuddy-ai
+        cands.extend(scan_auth_candidates(std::path::Path::new(&local).join("WorkBuddyAI")));
+        cands.push(
+            std::path::Path::new(&local)
+                .join("WorkBuddyAI")
+                .join("Data")
+                .join("Public")
+                .join("auth")
+                .join("workbuddy-desktop.info"),
+        );
+        cands.extend(scan_auth_candidates(std::path::Path::new(&home).join(".workbuddy-ai")));
     } else {
         let asp = std::path::Path::new(&home)
             .join("Library")
             .join("Application Support");
         // 硬编码候选（覆盖已知 productName 变体）
-        for app in &["CodeBuddyExtension", "WorkBuddy"] {
+        // WorkBuddyAI 是**海外版**（WorkBuddy AI，国际网关）的数据目录名，与国内版
+        // CodeBuddyExtension 并存；两者登录态互不通用，靠 auth.domain 区分区域。
+        for app in &["CodeBuddyExtension", "WorkBuddy", "WorkBuddyAI", "WorkBuddy AI"] {
             for n in &["workbuddy-desktop.info", "Tencent-Cloud.coding-copilot.info"] {
                 cands.push(
                     asp.join(app)
@@ -122,8 +180,9 @@ pub fn auth_candidates() -> Vec<std::path::PathBuf> {
         }
         // 一层目录扫描兜底（无论数据目录具体叫什么）
         cands.extend(scan_auth_candidates(&asp));
-        // 主目录 .workbuddy（若主客户端数据落在 home 下）
+        // 主目录 .workbuddy（国内版）与 .workbuddy-ai（海外版）数据落在 home 下的情形
         cands.extend(scan_auth_candidates(std::path::Path::new(&home).join(".workbuddy")));
+        cands.extend(scan_auth_candidates(std::path::Path::new(&home).join(".workbuddy-ai")));
     }
     // 硬编码候选与目录扫描会重叠（同一文件被两种方式各命中一次），保序去重后再返回：
     // 重复项会让诊断面板出现幽灵条目，也会让 active_auth_file 的排序结果不可解释。
@@ -369,12 +428,17 @@ fn detect_running_exe() -> Option<std::path::PathBuf> {
             let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
             if s.ends_with(".exe") { Some(std::path::PathBuf::from(s)) } else { None }
         } else if cfg!(target_os = "macos") {
-            let out = std::process::Command::new("pgrep")
-                .args(["-x", "WorkBuddy"]).output().ok()?;
-            let pid = String::from_utf8_lossy(&out.stdout).lines().next()?.trim().to_string();
-            let out2 = std::process::Command::new("ps").args(["-p", &pid, "-o", "command="]).output().ok()?;
-            let s = String::from_utf8_lossy(&out2.stdout).trim().to_string();
-            Some(std::path::PathBuf::from(s))
+            // 国内版进程名 WorkBuddy，海外版（WorkBuddy AI）为 WorkBuddyAI —— 两个都要认
+            for proc_name in ["WorkBuddy", "WorkBuddyAI"] {
+                let Ok(out) = std::process::Command::new("pgrep")
+                    .args(["-x", proc_name]).output() else { continue };
+                let Some(pid) = String::from_utf8_lossy(&out.stdout).lines().next().map(|x| x.trim().to_string()) else { continue };
+                if pid.is_empty() { continue; }
+                let out2 = std::process::Command::new("ps").args(["-p", &pid, "-o", "command="]).output().ok()?;
+                let s = String::from_utf8_lossy(&out2.stdout).trim().to_string();
+                if !s.is_empty() { return Some(std::path::PathBuf::from(s)); }
+            }
+            None
         } else {
             None
         }
@@ -389,6 +453,8 @@ fn detect_registry_exe() -> Option<std::path::PathBuf> {
             r"HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\WorkBuddy",
             r"HKLM\Software\Microsoft\Windows\CurrentVersion\Uninstall\WorkBuddy",
             r"HKLM\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\WorkBuddy",
+            r"HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\WorkBuddyAI",
+            r"HKLM\Software\Microsoft\Windows\CurrentVersion\Uninstall\WorkBuddyAI",
         ] {
             if let Ok(out) = hidden_cmd("reg").args(["query", key, "/v", "InstallLocation"]).output() {
                 let s = String::from_utf8_lossy(&out.stdout);
@@ -396,8 +462,10 @@ fn detect_registry_exe() -> Option<std::path::PathBuf> {
                     if let Some(idx) = line.find("REG_SZ") {
                         let dir = line[idx + 6..].trim().trim_matches('"');
                         if !dir.is_empty() {
-                            let p = std::path::Path::new(dir).join("WorkBuddy.exe");
-                            if p.is_file() { return Some(p); }
+                            for exe in ["WorkBuddy.exe", "WorkBuddyAI.exe"] {
+                                let p = std::path::Path::new(dir).join(exe);
+                                if p.is_file() { return Some(p); }
+                            }
                         }
                     }
                 }
@@ -435,8 +503,9 @@ pub fn save_manual_exe(path: &str) -> Result<(), String> {
     let name_ok = p.file_name().map(|n| {
         let n = n.to_string_lossy().to_lowercase();
         n == "workbuddy.exe" || n == "workbuddy"
+            || n == "workbuddyai.exe" || n == "workbuddyai"
     }).unwrap_or(false);
-    if !name_ok { return Err("请选择名为 WorkBuddy.exe 的文件".into()); }
+    if !name_ok { return Err("请选择名为 WorkBuddy.exe / WorkBuddyAI.exe 的文件".into()); }
     serde_json::to_writer_pretty(std::fs::File::create(&f).map_err(|e| e.to_string())?,
         &json!({ "workbuddy_exe": path.trim(), "saved_at": chrono::Local::now().to_rfc3339() }))
         .map_err(|e| e.to_string())
@@ -461,6 +530,8 @@ fn wb_exe_candidates() -> Vec<std::path::PathBuf> {
         });
         if let Some(local) = local {
             push(Some(std::path::Path::new(&local).join("Programs").join("WorkBuddy").join("WorkBuddy.exe")), &mut v);
+            // 海外版：WorkBuddy AI 安装为 %LOCALAPPDATA%\Programs\WorkBuddyAI\WorkBuddyAI.exe
+            push(Some(std::path::Path::new(&local).join("Programs").join("WorkBuddyAI").join("WorkBuddyAI.exe")), &mut v);
         }
         if let Ok(pf) = std::env::var("ProgramFiles") {
             push(Some(std::path::Path::new(&pf).join("WorkBuddy").join("WorkBuddy.exe")), &mut v);
@@ -1001,11 +1072,14 @@ pub fn load_login() -> Option<LoginInfo> {
                     continue;
                 }
                 dbg_log(&format!("load_login: OK uid={} token_len={}", &uid[..uid.len().min(8)], token.len()));
+                let domain = d.get("auth").and_then(|a| a.get("domain"))
+                    .and_then(|x| x.as_str()).unwrap_or("").to_string();
                 return Some(LoginInfo {
                     uid,
                     token,
                     file: p.to_string_lossy().into_owned(),
                     account: d.get("account").cloned().unwrap_or(Value::Null),
+                    domain,
                 });
             }
         }
@@ -1073,7 +1147,7 @@ pub fn call_api_as(login: &LoginInfo, endpoint: &str, method: &str, body: &str) 
     let target = if endpoint.starts_with("http://") || endpoint.starts_with("https://") {
         endpoint.to_string()
     } else {
-        format!("{}{}", API_BASE, endpoint)
+        format!("{}{}", api_base(login), endpoint)
     };
     let client = make_client();
     let mut last_msg = "未知网络错误".to_string();
@@ -1167,7 +1241,7 @@ fn at_exp_left_ms(token: &str) -> Option<i64> {
 pub fn probe_auth_state(login: &LoginInfo) -> Result<(u16, Value), String> {
     let client = make_client();
     let resp = client
-        .post(format!("{}{}/checkin-activity-status", API_BASE, BILLING_METER))
+        .post(format!("{}{}/checkin-activity-status", api_base(login), BILLING_METER))
         .header("Content-Type", "application/json")
         .header("Accept", "application/json")
         .header("Authorization", format!("Bearer {}", login.token))
@@ -1393,7 +1467,9 @@ pub fn login_from_file(p: &Path) -> Option<LoginInfo> {
         .or_else(|| jwt_payload(&token).and_then(|pl| pl.get("sub").and_then(|x| x.as_str()).map(|s| s.to_string())))
         .unwrap_or_default();
     if uid.is_empty() { return None; }
-    Some(LoginInfo { uid, token, file: p.to_string_lossy().into_owned(), account: d.get("account").cloned().unwrap_or(Value::Null) })
+    let domain = d.get("auth").and_then(|a| a.get("domain"))
+        .and_then(|x| x.as_str()).unwrap_or("").to_string();
+    Some(LoginInfo { uid, token, file: p.to_string_lossy().into_owned(), account: d.get("account").cloned().unwrap_or(Value::Null), domain })
 }
 
 /// 解析 JWT 有效期 + 关键声明
@@ -1499,19 +1575,21 @@ pub fn get_all() -> Value {
 
 /// 仅查询 AI 记忆画像（网络部分，独立加载，失败不影响本地信息）
 pub fn get_memory() -> Value {
-    call_api(&format!("{}/api/memory/profile", API_BASE), "GET", "")
-        .unwrap_or_else(|e| json!({ "error": e }))
+    match load_login() {
+        Some(l) => get_memory_as(&l),
+        None => json!({ "error": "未找到本机 WorkBuddy 登录态，请先登录 WorkBuddy 客户端" }),
+    }
 }
 
 /// 查询 AI 记忆画像（指定登录态）—— 供多账号批量查询（覆盖 dashboard 单账号局限）
 pub fn get_memory_as(login: &LoginInfo) -> Value {
-    call_api_as(login, &format!("{}/api/memory/profile", API_BASE), "GET", "")
+    call_api_as(login, &format!("{}/api/memory/profile", api_base(login)), "GET", "")
         .unwrap_or_else(|e| json!({ "error": e }))
 }
 
 /// 执行今日签到（幂等：已签则跳过）—— 指定登录态
 pub fn do_checkin_as(login: &LoginInfo) -> Value {
-    let st = call_api_as(login, &format!("{}{}/checkin-activity-status", API_BASE, BILLING_METER), "POST", "{}")
+    let st = call_api_as(login, &format!("{}{}/checkin-activity-status", api_base(login), BILLING_METER), "POST", "{}")
         .unwrap_or_else(|e| json!({ "error": e }));
     if st.get("error").is_some() { return st; }
     let status = st.get("status").and_then(|x| x.as_u64()).unwrap_or(0);
@@ -1520,7 +1598,7 @@ pub fn do_checkin_as(login: &LoginInfo) -> Value {
     if already {
         return json!({ "skipped": true, "message": "今日已签到，无需重复", "data": st.get("body").and_then(|b| b.get("data")).cloned().unwrap_or(Value::Null) });
     }
-    let r = call_api_as(login, &format!("{}{}/daily-checkin", API_BASE, V2_METER), "POST", "{}")
+    let r = call_api_as(login, &format!("{}{}/daily-checkin", api_base(login), V2_METER), "POST", "{}")
         .unwrap_or_else(|e| json!({ "error": e }));
     r
 }
@@ -1727,7 +1805,7 @@ pub fn get_quota_as(login: &LoginInfo) -> Value {
     let mut last_err = String::new();
 
     // 1) summary（聚合，无业务参数）
-    if let Err(e) = fetch_accounts(login, &format!("{}{}/get-user-resource-summary", API_BASE, BILLING_METER), "{}", &mut accounts) {
+    if let Err(e) = fetch_accounts(login, &format!("{}{}/get-user-resource-summary", api_base(login), BILLING_METER), "{}", &mut accounts) {
         if is_permission_err(&e) { permission_denied = true; } else if is_token_expired(&e) { token_expired = true; } last_err = e;
     }
     // 2) paid-packages
@@ -1738,7 +1816,7 @@ pub fn get_quota_as(login: &LoginInfo) -> Value {
         "NeedRenewInfo": true,
         "IsDisplayTotalInfo": true
     }).to_string();
-    if let Err(e) = fetch_accounts(login, &format!("{}{}/get-user-resource-paid-packages", API_BASE, BILLING_METER), &paid_body, &mut accounts) {
+    if let Err(e) = fetch_accounts(login, &format!("{}{}/get-user-resource-paid-packages", api_base(login), BILLING_METER), &paid_body, &mut accounts) {
         if is_permission_err(&e) { permission_denied = true; } else if is_token_expired(&e) { token_expired = true; } last_err = e;
     }
     // 3) free-packages
@@ -1750,7 +1828,7 @@ pub fn get_quota_as(login: &LoginInfo) -> Value {
         "SlicePeriodEndTime": end,
         "IsDisplayTotalInfo": true
     }).to_string();
-    if let Err(e) = fetch_accounts(login, &format!("{}{}/get-user-resource-free-packages", API_BASE, BILLING_METER), &free_body, &mut accounts) {
+    if let Err(e) = fetch_accounts(login, &format!("{}{}/get-user-resource-free-packages", api_base(login), BILLING_METER), &free_body, &mut accounts) {
         if is_permission_err(&e) { permission_denied = true; } else if is_token_expired(&e) { token_expired = true; } last_err = e;
     }
 
@@ -1813,8 +1891,11 @@ fn is_token_expired(e: &str) -> bool {
 
 /// 仅查询签到状态
 pub fn get_checkin() -> Value {
-    call_api(&format!("{}{}/checkin-activity-status", API_BASE, BILLING_METER), "POST", "{}")
-        .unwrap_or_else(|e| json!({ "error": e }))
+    match load_login() {
+        Some(l) => call_api_as(&l, &format!("{}{}/checkin-activity-status", api_base(&l), BILLING_METER), "POST", "{}")
+            .unwrap_or_else(|e| json!({ "error": e })),
+        None => json!({ "error": "未找到本机 WorkBuddy 登录态，请先登录 WorkBuddy 客户端" }),
+    }
 }
 
 // ===== 宠物旅行（buddy travel） =====
@@ -1824,7 +1905,7 @@ const BUDDY_TRAVEL: &str = "/activity/growth/buddy/travel";
 
 /// 查询宠物当前状态（idle / traveling / arrived）—— 指定登录态
 pub fn buddy_status_as(login: &LoginInfo) -> Value {
-    call_api_as(login, &format!("{}{}/status", API_BASE, BUDDY_TRAVEL), "GET", "")
+    call_api_as(login, &format!("{}{}/status", api_base(login), BUDDY_TRAVEL), "GET", "")
         .unwrap_or_else(|e| json!({ "error": e }))
 }
 /// 查询宠物当前状态（当前本机登录态）
@@ -1837,7 +1918,7 @@ pub fn buddy_status() -> Value {
 
 /// 查询可派出地点列表 —— 指定登录态
 pub fn buddy_config_as(login: &LoginInfo) -> Value {
-    call_api_as(login, &format!("{}{}/config", API_BASE, BUDDY_TRAVEL), "GET", "")
+    call_api_as(login, &format!("{}{}/config", api_base(login), BUDDY_TRAVEL), "GET", "")
         .unwrap_or_else(|e| json!({ "error": e }))
 }
 /// 查询可派出地点列表（当前本机登录态）
@@ -1858,7 +1939,7 @@ pub fn buddy_depart_as(login: &LoginInfo, location_id: &str) -> Value {
         .map(serde_json::Value::from)
         .unwrap_or_else(|_| serde_json::Value::from(location_id));
     let body = json!({ "location_id": lid }).to_string();
-    call_api_as(login, &format!("{}{}/depart", API_BASE, BUDDY_TRAVEL), "POST", &body)
+    call_api_as(login, &format!("{}{}/depart", api_base(login), BUDDY_TRAVEL), "POST", &body)
         .unwrap_or_else(|e| json!({ "error": e }))
 }
 /// 派出宠物（当前本机登录态）
@@ -1871,7 +1952,7 @@ pub fn buddy_depart(location_id: &str) -> Value {
 
 /// 领取已归来宠物的奖励 —— 指定登录态
 pub fn buddy_claim_as(login: &LoginInfo) -> Value {
-    call_api_as(login, &format!("{}{}/claim", API_BASE, BUDDY_TRAVEL), "POST", "{}")
+    call_api_as(login, &format!("{}{}/claim", api_base(login), BUDDY_TRAVEL), "POST", "{}")
         .unwrap_or_else(|e| json!({ "error": e }))
 }
 /// 领取已归来宠物的奖励（当前本机登录态）
@@ -1908,8 +1989,8 @@ fn growth_unwrap(body: &Value) -> (i64, String, Value) {
 /// 返回 { ok, energy_balance, energy_earned, energy_consumed, cost_per_open,
 ///        affordable, max_open_count, is_full, error? }
 pub fn pet_energy_as(login: &LoginInfo) -> Value {
-    let e = call_api_as(login, &format!("{}{}", API_BASE, PET_ENERGY), "GET", "");
-    let q = call_api_as(login, &format!("{}{}", API_BASE, PET_QUOTA), "GET", "");
+    let e = call_api_as(login, &format!("{}{}", api_base(login), PET_ENERGY), "GET", "");
+    let q = call_api_as(login, &format!("{}{}", api_base(login), PET_QUOTA), "GET", "");
     let ev = match e { Ok(v) => v, Err(err) => return json!({ "ok": false, "error": err }) };
     let qv = match q { Ok(v) => v, Err(err) => return json!({ "ok": false, "error": err }) };
     let e_status = ev.get("status").and_then(|x| x.as_u64()).unwrap_or(0);
@@ -1956,7 +2037,7 @@ pub fn pet_energy() -> Value {
 pub fn pet_draw_as(login: &LoginInfo, count: u64) -> Value {
     let cnt = if count < 1 { 1 } else { count };
     let body = json!({ "count": cnt }).to_string();
-    let r = call_api_as(login, &format!("{}{}", API_BASE, PET_OPEN), "POST", &body);
+    let r = call_api_as(login, &format!("{}{}", api_base(login), PET_OPEN), "POST", &body);
     match r {
         Ok(v) => {
             let status = v.get("status").and_then(|x| x.as_u64()).unwrap_or(0);

@@ -1034,7 +1034,11 @@ function pfRender(rows) {
     const canFix = (r.state === 'revoked' || r.state === 'expiring' || r.state === 'expired') && !r.current;
     const act = canFix ? `<button class="mini" onclick="refreshOneToken('${r.uid}')">续期</button>` : '';
     const label = r.label && r.label !== st.text ? ` <span style="opacity:.7;">${escapeHtml(r.label)}</span>` : '';
-    return `<tr><td>${escapeHtml(r.nickname || (r.uid || '').slice(0, 8))}${cur}</td>`
+    // 区域标识（issue #4）：海外版账号走国际网关、额度体系独立，标出来避免误判
+    const region = r.region === 'global'
+      ? ' <span class="badge" style="background:rgba(90,162,255,.13);color:#9cc4ff;border-color:rgba(90,162,255,.35);">国际版</span>'
+      : '';
+    return `<tr><td>${escapeHtml(r.nickname || (r.uid || '').slice(0, 8))}${cur}${region}</td>`
       + `<td style="color:${st.color};font-weight:700;">${st.text}${label}</td>`
       + `<td>${days}</td>`
       + `<td style="color:var(--muted);">${escapeHtml(r.detail || '')}</td>`
