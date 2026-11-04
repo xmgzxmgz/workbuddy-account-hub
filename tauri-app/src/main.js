@@ -206,12 +206,15 @@ function maskPhone(p) {
 // ===== 侧边栏：账号管理（快照 / 切换） =====
 let accountsCache = [];
 function renderSidebar(j) {
-  const cur = j.current_uid || (j.login && j.login.uid);
+  // 当前账号用「账号键」比较：企业版 key 是 <uid>@<eid>，与 uid 不同
+  const cur = j.current_key || (j.login && j.login.uid);
+  window.__currentKey = cur;
   if (j.login) {
     $('me-av').textContent = '👤';
     $('me-nm').innerHTML = escapeHtml(acctLabel({ nickname: j.login.nickname, uid: j.login.uid }));
     $('me-id').innerHTML = escapeHtml(acctUidMask(j.login.uid));
-    $('me-type').textContent = j.login.type === 'personal' ? '个人账号' : (j.login.type || '—');
+    const typeMap = { personal: '个人版', ultimate: '企业版', premium: '会员版', free: '免费版' };
+    $('me-type').textContent = typeMap[j.login.type] || j.login.type || '—';
   }
   const al = $('acc-list'); al.innerHTML = '';
   const regs = j.registered_accounts || [];
@@ -235,8 +238,8 @@ function renderSidebar(j) {
 let selectedDir = null;
 function selectAccount(a, all) {
   document.querySelectorAll('#acc-list .acc').forEach(el => {
-    const id = el.querySelector('.s')?.textContent;
-    el.classList.toggle('active', id === a.uid);
+    // 用 dataset.uid（存的是账号键）比较，不能再用 .s 文本——它现在含企业 ID
+    el.classList.toggle('active', el.dataset.uid === (a.key || a.uid));
   });
   showAccountDetail(a, all);
 }
@@ -661,22 +664,25 @@ async function refreshAccounts() {
   if (freshAccs.length) {
     // 用新清单重算账号列表（保留旧 UI 数据，仅补齐 has_snapshot）
     const merged = [];
-    const byUid = new Map();
-    accountsCache.forEach(a => byUid.set(a.uid, a));
+    const byKey = new Map();
+    accountsCache.forEach(a => byKey.set(a.key || a.uid, a));
     freshAccs.forEach(f => {
-      const old = byUid.get(f.uid);
-      merged.push(old ? { ...old, has_snapshot: f.has_snapshot } : {
-        uid: f.uid, nickname: f.nickname, has_snapshot: f.has_snapshot,
+      const k = f.key || f.uid;
+      const old = byKey.get(k);
+      // 同一 uid 的个人版/企业版是两条记录，必须按 key 合并，否则会互相吞掉
+      merged.push(old ? { ...old, ...f } : {
+        key: k, uid: f.uid, form: f.form, enterprise_id: f.enterprise_id,
+        nickname: f.nickname, has_snapshot: f.has_snapshot,
       });
     });
     // 当前账号保持 active（若在清单里）
     const j = window.__login || {};
-    const cur = j.uid;
+    const cur = data.current_key || j.uid;
     const changed = merged.length !== accountsCache.length
-      || merged.some(m => !accountsCache.find(x => x.uid === m.uid));
+      || merged.some(m => !accountsCache.find(x => (x.key || x.uid) === (m.key || m.uid)));
     if (changed) { accountsCache = merged; showAccountList(merged, cur); }
     else { accountsCache.forEach(a => {
-      const hit = freshAccs.find(x => x.uid === a.uid);
+      const hit = freshAccs.find(x => (x.key || x.uid) === (a.key || a.uid));
       if (hit) a.has_snapshot = hit.has_snapshot;
     }); }
   }
@@ -688,28 +694,36 @@ function showAccountList(accs, cur) {
   al.innerHTML = '';
   if (!accs.length) { al.innerHTML = '<div class="empty">无已登记账号</div>'; return; }
   accs.forEach(a => {
+    const k = a.key || a.uid;          // 账号键：个人版=<uid>，企业版=<uid>@<eid>
     const div = document.createElement('div');
-    div.className = 'acc' + (a.uid === cur ? ' active' : '');
+    div.className = 'acc' + (k === cur ? ' active' : '');
     const initial = (a.nickname || a.uid || '?').slice(0, 2);
-    const isCur = a.uid === cur;
+    const isCur = k === cur;
     const snapped = a.has_snapshot;
-    const isSwitching = switchingUid === a.uid;
+    const isSwitching = switchingUid === k;
     const badge = isCur
       ? '<span class="cur">当前</span>'
       : (snapped
-        ? `<button class="mini" ${isSwitching ? 'disabled style="opacity:.5;cursor:default;"' : ''} onclick="event.stopPropagation();switchTo('${a.uid}')">${isSwitching ? '切换中…' : '切换'}</button>`
+        ? `<button class="mini" ${isSwitching ? 'disabled style="opacity:.5;cursor:default;"' : ''} onclick="event.stopPropagation();switchTo('${k}')">${isSwitching ? '切换中…' : '切换'}</button>`
         : '<span class="mini" style="background:var(--line);color:var(--muted);padding:3px 9px;border-radius:6px;font-size:10.5px;" title="该账号尚未在 WorkBuddy 中登录保存过登录态，无法直接切换">未登录</span>');
     const meta = getMeta(a.uid);
     // 行内只留一个「⋯」，把星标/标签/删除收进浮动菜单：
     // 4 个按钮并排在 262px 侧栏里会把昵称和 UID 全挤成省略号（见 v0.6.23 修复）。
-    const moreBtn = `<button class="mini" title="更多操作" onclick="event.stopPropagation();openAccMenu(event,'${a.uid}')">⋯</button>`;
+    const moreBtn = `<button class="mini" title="更多操作" onclick="event.stopPropagation();openAccMenu(event,'${k}')">⋯</button>`;
     // 星标状态不能在行内用按钮表达了，改成名字前的小星号，信息不丢
     const starMark = meta.star ? '<span style="color:var(--amber);margin-right:3px;">★</span>' : '';
     const tagTip = meta.tags.length ? ` title="标签：${meta.tags.join(', ')}"` : '';
-    div.dataset.uid = a.uid;
+    // 企业版徽标：同一账号的两个形态在列表里必须一眼可分（个人版不标，避免噪声）
+    const formBadge = a.form === 'enterprise'
+      ? '<span class="badge ent" title="企业版 · ' + escapeHtml(a.enterprise_id || '') + '">企业</span>' : '';
+    const subTxt = a.form === 'enterprise' && a.enterprise_id
+      ? acctUidMask(a.uid) + ' · ' + escapeHtml(a.enterprise_id)
+      : acctUidMask(a.uid);
+    div.dataset.uid = k;
+    div.title = k;
     div.innerHTML = `
       <div class="dot">${initial}</div>
-      <div class="info"><div class="n"${tagTip}>${starMark}${escapeHtml(a.nickname ? acctLabel(a) : '(无昵称)')}</div><div class="s">${escapeHtml(acctUidMask(a.uid))}</div></div>
+      <div class="info"><div class="n"${tagTip}>${starMark}${escapeHtml(a.nickname ? acctLabel(a) : '(无昵称)')}${formBadge}</div><div class="s">${subTxt}</div></div>
       ${badge}
       <div class="acc-actions">${moreBtn}</div>`;
     div.onclick = () => selectAccount(a, accs);
@@ -1081,14 +1095,15 @@ let accMenuEl = null;
 function closeAccMenu() {
   if (accMenuEl) { accMenuEl.remove(); accMenuEl = null; }
 }
-function openAccMenu(ev, uid) {
+function openAccMenu(ev, key) {
   ev.stopPropagation();
   closeAccMenu();
-  const a = (accountsCache || []).find(x => x.uid === uid) || { uid };
+  const a = (accountsCache || []).find(x => (x.key || x.uid) === key) || { uid: key, key };
+  const uid = a.uid || key;                    // 星标/标签挂在 uid 上，个人版与企业版共享
   const meta = getMeta(uid);
-  const isCur = a.uid === ((window.__login || {}).uid);
+  const isCur = key === ((window.__login || {}).uid) || key === window.__currentKey;
   const del = isCur ? '' :
-    `<div class="mi danger" onclick="event.stopPropagation();closeAccMenu();deleteAccount('${uid}')">🗑 删除账号</div>`;
+    `<div class="mi danger" onclick="event.stopPropagation();closeAccMenu();deleteAccount('${key}')">🗑 删除${a.form === 'enterprise' ? '企业版' : ''}账号</div>`;
   const m = document.createElement('div');
   m.className = 'acc-menu';
   m.innerHTML =

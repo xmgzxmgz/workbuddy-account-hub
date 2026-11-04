@@ -7,6 +7,36 @@
 
 ---
 
+## v0.6.24（2026-11-04）— 🏢 支持同一账号的个人版 / 企业版并存（账号键改造）
+
+用户场景：同一个 OneID 账号（13950215101 / `4c6af085`）在网页登录时可选择个人版或企业版，
+两者**uid 完全相同**，此前 vault 以 uid 作目录名，两种形态共用一个槽位，切一次覆盖一份。
+
+- **实测数据**（企业版三要素）：`account.type` = `personal` → **`ultimate`**；
+  `enterpriseId` 从无到 **`g2qqhhq47u2o`**；`idp` = `phone`。uid 不变。
+- **vault 目录改为账号键（accountKey）**：
+  - 个人版 `vault/<uid>`
+  - 企业版 `vault/<uid>@<enterpriseId>`
+  - 旧目录（纯 uid）天然继续表示个人版，向后兼容
+- **新增 `account_key` / `parse_key` / `key_of_account` / `current_account_key`**，
+  `list_accounts` / `switch_account` / `snapshot_current` / `ensure_snapshot` / `backup_all` /
+  `refresh_account` / `delete_account` / `preflight_accounts` 全部从 uid 改为按 key 运作。
+- **关键修复**：`snapshot_current` 保存当前登录态时用 `current_account_key()` 决定落盘目录 ——
+  这是「切一次覆盖一份」的根因所在。
+- **自动数据迁移** `migrate_legacy_snapshots`：扫描历史遗留的「裸 uid 目录但快照内容是 ultimate」，
+  改名到 `<uid>@<eid>`；目标已存在时保守跳过，永不覆盖。
+- **个人版槽位自动找回**：迁移后若 `<uid>` 目录缺失，从 `<uid>@<eid>/history/` 里挑最近一份
+  personal 备份重建个人版槽位 —— 用户不必为了切回个人版再去客户端重新登录。
+  （本地实测：个人版 AT 29.8 天、企业版 AT 30.0 天，两条各自独立有效。）
+- **UI**：企业版账号带蓝色「企业」徽标，副标题显示 `uid · enterpriseId`；
+  个人/企业两行并存；顶栏账号类型显示「企业版」；星标与标签挂在 uid 上（两形态共享），
+  删除则针对具体形态。
+- **测试** `tests/account_key.rs`（5 个，CI 执行）：键拼装/解析、空串与空白 enterpriseId 归一化为个人版、
+  account JSON 取值、遗留目录迁移、迁移幂等且不覆盖既有数据。
+- bump 0.6.23 → 0.6.24
+
+---
+
 ## v0.6.23（2026-11-04）— 📐 修复侧栏账号行被操作按钮挤爆
 
 - **现象**：账号行里昵称只剩「139****...」、`星黎光` 被压成「星黎」+ 换行、UID 只剩「4c6a...8a」。
