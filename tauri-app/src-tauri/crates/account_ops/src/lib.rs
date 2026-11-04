@@ -196,6 +196,8 @@ fn vault_account_uids(vault: &Path) -> Vec<String> {
         if !p.is_dir() { continue; }
         // 仅保留像 uid 的目录（含 '-'）+ 内部有 snapshot 或 history 的有效账号
         if let Some(name) = p.file_name().and_then(|s| s.to_str()) {
+            // 排除 .trash / .tmp 这类隐藏目录，避免删除过的账号被当成有效账号扫回来
+            if name.starts_with('.') { continue; }
             if name.contains('-') && (p.join("snapshot").exists() || p.join("history").exists()) {
                 uids.push(name.to_string());
             }
@@ -326,6 +328,10 @@ pub fn list_accounts(vault: &Path) -> Vec<AccountInfo> {
     // vault 快照昵称批量解析：所有 $wbEncrypted 信封集中起来一次解密
     // （Windows 下合并为一次官方 exe worker 调用，避免逐账号起进程）
     let vault_nicks = nicknames_bulk(vault, &order);
+
+    // 用户主动删除/隐藏的账号不再出现（删除只移走快照，另外两处来源仍会吐出 uid）
+    let ignored = ignored_uids();
+    order.retain(|uid| !ignored.contains(uid));
 
     order
         .into_iter()
@@ -1132,6 +1138,166 @@ pub fn preflight_accounts(vault: &Path) -> Vec<Value> {
             std::thread::sleep(std::time::Duration::from_millis(250));
         }
     }
+    out
+}
+
+/// 删除账号结果
+#[derive(Serialize, Debug)]
+pub struct DeleteResult {
+    pub uid: String,
+    pub nickname: Option<String>,
+    /// 快照被移到哪里（空串 = 本来就没有快照，只做了隐藏）
+    pub moved_to: String,
+    /// 是否顺带移走了历史备份
+    pub history_moved: bool,
+}
+
+fn ignored_file() -> PathBuf {
+    hub_home().join("ignored_accounts.json")
+}
+
+/// 被用户主动隐藏/删除的 uid 集合。
+///
+/// 为什么需要它：账号列表的来源是三处合并（auth.allAccounts、local_storage 登记表、
+/// vault 快照）。只删 vault 目录，另外两处仍会把它吐出来，表现为「删了还在，只是变成未登录」。
+/// 所以删除 = 移走快照 + 把 uid 记进这个忽略表。
+pub fn ignored_uids() -> std::collections::HashSet<String> {
+    let mut set = std::collections::HashSet::new();
+    let Ok(s) = std::fs::read_to_string(ignored_file()) else { return set; };
+    let Ok(v) = serde_json::from_str::<Value>(&s) else { return set; };
+    if let Some(arr) = v.get("uids").and_then(|x| x.as_array()) {
+        for u in arr {
+            if let Some(u) = u.as_str() {
+                if !u.is_empty() { set.insert(u.to_string()); }
+            }
+        }
+    }
+    set
+}
+
+fn save_ignored(set: &std::collections::HashSet<String>) -> Result<(), String> {
+    let f = ignored_file();
+    if let Some(d) = f.parent() {
+        std::fs::create_dir_all(d).map_err(|e| format!("创建目录失败: {e}"))?;
+    }
+    let mut uids: Vec<&String> = set.iter().collect();
+    uids.sort();
+    let body = json!({ "uids": uids, "updated_at": now_ms_i64() });
+    let s = serde_json::to_string_pretty(&body).map_err(|e| e.to_string())?;
+    std::fs::write(&f, s).map_err(|e| format!("写入忽略表失败: {e}"))
+}
+
+/// 删除一个已保存的账号（失效账号清理）。
+///
+/// 设计原则是「可后悔」，因为快照里含登录态，误删无法重建：
+///   1. **当前登录账号直接拒绝** —— 那是正在用的账号，删掉只会让列表和真实状态脱节
+///   2. 快照用 **rename 移到 `vault/.trash/<uid>.<ts>/`**，同盘瞬时、不占额外空间，
+///      而不是 `rm -rf`；需要时用 `restore_account` 或手动移回即可
+///   3. uid 记入 `ignored_accounts.json`，`list_accounts` 过滤掉它
+///      （若不记，auth.allAccounts 与 local_storage 登记表仍会把它吐出来）
+pub fn delete_account(vault: &Path, uid: &str) -> Result<DeleteResult, String> {
+    if uid.trim().is_empty() {
+        return Err("uid 为空".into());
+    }
+    if current_uid().as_deref() == Some(uid) {
+        return Err(
+            "这是当前登录账号，不能删除。请先在 WorkBuddy 里切换到其他账号，或先切换 Hub 到别的账号再删".into(),
+        );
+    }
+
+    // 昵称仅用于回执展示
+    let nickname = list_accounts(vault)
+        .into_iter()
+        .find(|a| a.uid == uid)
+        .and_then(|a| a.nickname);
+
+    // 1) 移走快照（含 history）到回收站，可还原
+    let src = vault.join(uid);
+    let mut moved_to = String::new();
+    let mut history_moved = false;
+    if src.exists() {
+        let trash = vault.join(".trash");
+        std::fs::create_dir_all(&trash).map_err(|e| format!("创建回收站目录失败: {e}"))?;
+        let dst = trash.join(format!("{}.{}", uid, chrono_now()));
+        // 同盘 rename 是原子操作；跨设备时回退到复制后删除
+        if let Err(_e) = std::fs::rename(&src, &dst) {
+            copy_dir_all(&src, &dst).map_err(|e| format!("移动快照失败: {e}"))?;
+            std::fs::remove_dir_all(&src).map_err(|e| format!("清理旧快照失败: {e}"))?;
+        }
+        history_moved = dst.join("history").exists();
+        moved_to = dst.to_string_lossy().into_owned();
+    }
+
+    // 2) 记入忽略表
+    let mut set = ignored_uids();
+    set.insert(uid.to_string());
+    save_ignored(&set)?;
+
+    Ok(DeleteResult {
+        uid: uid.to_string(),
+        nickname,
+        moved_to,
+        history_moved,
+    })
+}
+
+/// 恢复被删除的账号：解除忽略 + 把回收站里最近一份快照移回原位。
+pub fn restore_account(vault: &Path, uid: &str) -> Result<Value, String> {
+    let mut set = ignored_uids();
+    set.remove(uid);
+    save_ignored(&set)?;
+
+    let src = vault.join(uid);
+    let mut restored = false;
+    if !src.exists() {
+        let trash = vault.join(".trash");
+        if let Ok(rd) = std::fs::read_dir(&trash) {
+            // 目录名形如 <uid>.<ts>，取 ts 最大的一份
+            let mut cands: Vec<(String, PathBuf)> = rd
+                .flatten()
+                .filter_map(|e| {
+                    let p = e.path();
+                    let n = p.file_name()?.to_str()?.to_string();
+                    let (u, ts) = n.rsplit_once('.')?;
+                    if u == uid { Some((ts.to_string(), p)) } else { None }
+                })
+                .collect();
+            cands.sort_by(|a, b| b.0.cmp(&a.0));
+            if let Some((_, p)) = cands.into_iter().next() {
+                std::fs::rename(&p, &src).map_err(|e| format!("还原快照失败: {e}"))?;
+                restored = true;
+            }
+        }
+    } else {
+        restored = true;
+    }
+    Ok(json!({ "uid": uid, "restored": restored }))
+}
+
+/// 当前被隐藏/删除的账号清单（供 UI 展示与恢复）
+pub fn list_ignored(vault: &Path) -> Vec<Value> {
+    let set = ignored_uids();
+    let mut out = Vec::new();
+    for uid in set {
+        // 回收站里是否还有可还原的快照
+        let mut trash_items = 0usize;
+        if let Ok(rd) = std::fs::read_dir(vault.join(".trash")) {
+            for e in rd.flatten() {
+                if let Some(n) = e.file_name().to_str() {
+                    if n.rsplit_once('.').map(|(u, _)| u == uid).unwrap_or(false) {
+                        trash_items += 1;
+                    }
+                }
+            }
+        }
+        out.push(json!({
+            "uid": uid,
+            "nickname": Value::Null,
+            "restorable": trash_items > 0,
+            "trash_items": trash_items,
+        }));
+    }
+    out.sort_by(|a, b| a["uid"].as_str().unwrap_or("").cmp(b["uid"].as_str().unwrap_or("")));
     out
 }
 

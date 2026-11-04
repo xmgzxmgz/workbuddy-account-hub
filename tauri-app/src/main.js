@@ -702,12 +702,15 @@ function showAccountList(accs, cur) {
     const meta = getMeta(a.uid);
     const starBtn = `<button class="mini star ${meta.star ? 'on' : ''}" title="星标" onclick="event.stopPropagation();toggleStar('${a.uid}')">${meta.star ? '★' : '☆'}</button>`;
     const tagBtn = `<button class="mini" title="标签：${meta.tags.join(', ') || '（点击设置）'}" onclick="event.stopPropagation();openTagInput('${a.uid}')">🏷</button>`;
+    // 删除入口只给非当前账号：当前账号删了会让列表和真实登录状态脱节
+    const delBtn = isCur ? ''
+      : `<button class="mini" title="删除该账号（快照移到回收站，可还原）" onclick="event.stopPropagation();deleteAccount('${a.uid}')">🗑</button>`;
     div.dataset.uid = a.uid;
     div.innerHTML = `
       <div class="dot">${initial}</div>
       <div class="info"><div class="n">${escapeHtml(a.nickname ? acctLabel(a) : '(无昵称)')}</div><div class="s">${escapeHtml(acctUidMask(a.uid))}</div></div>
       ${badge}
-      <div class="acc-actions">${starBtn}${tagBtn}</div>`;
+      <div class="acc-actions">${starBtn}${tagBtn}${delBtn}</div>`;
     div.onclick = () => selectAccount(a, accs);
     al.appendChild(div);
   });
@@ -1070,6 +1073,50 @@ async function refreshAllTokens() {
   const okN = rows.filter(x => x.ok).length;
   toast(`批量续期完成：成功 ${okN} / 尝试 ${j.attempted || rows.length}`, okN ? 'ok' : 'err');
   loadPreflight();
+}
+
+// ===== 删除 / 恢复账号（失效账号清理）=====
+async function deleteAccount(uid) {
+  const a = (accountsCache || []).find(x => x.uid === uid) || { uid };
+  const name = a.nickname || uid.slice(0, 8);
+  const ok = confirm(
+    `删除账号「${name}」？\n\n` +
+    `· 登录态快照与历史备份会被移到回收站（vault/.trash），不是永久删除\n` +
+    `· 删除后它不再出现在 Hub 列表里，但不会退出 WorkBuddy、不影响客户端本身\n` +
+    `· 需要时可以还原：⚙ 设置 →「已删除账号」\n` +
+    `· 当前登录的账号不能删（需先切换）`
+  );
+  if (!ok) return;
+  const r = await invoke('delete_account', { uid }).catch(e => ({ error: String(e) }));
+  if (r && r.error) { toast('删除失败: ' + r.error, 'err'); return; }
+  toast(`已删除「${name}」${r && r.history_moved ? '（含历史备份）' : ''}，可在设置里还原`, 'ok');
+  // 本地缓存移除，立即重绘，再向后台核对一次
+  accountsCache = (accountsCache || []).filter(x => x.uid !== uid);
+  showAccountList(accountsCache, (window.__login || {}).uid);
+  refreshAccounts();
+}
+async function loadIgnoredAccounts() {
+  const box = $('ignored-list');
+  if (!box) return;
+  box.textContent = '读取中…';
+  try {
+    const rows = await invoke('list_ignored_accounts');
+    if (!rows || !rows.length) { box.innerHTML = '<span class="empty">没有已删除的账号</span>'; return; }
+    box.innerHTML = rows.map(r => {
+      const name = escapeHtml(r.nickname || String(r.uid).slice(0, 8));
+      const can = r.restorable
+        ? `<button class="mini" onclick="restoreAccount('${r.uid}')">还原</button>`
+        : '<span class="empty" style="font-size:11px;">回收站已清空</span>';
+      return `<div class="item"><span class="k">${name}</span><span class="v">${can}</span></div>`;
+    }).join('');
+  } catch (e) { box.textContent = '读取失败：' + e; }
+}
+async function restoreAccount(uid) {
+  const r = await invoke('restore_account', { uid }).catch(e => ({ error: String(e) }));
+  if (r && r.error) { toast('还原失败: ' + r.error, 'err'); return; }
+  toast(r && r.restored ? '已还原账号' : '已解除隐藏（回收站里没有快照）', 'ok');
+  loadIgnoredAccounts();
+  refreshAccounts();
 }
 
 async function doCheckinAll() {
