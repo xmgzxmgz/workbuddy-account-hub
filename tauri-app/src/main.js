@@ -607,7 +607,16 @@ async function backupAll() {
 
 // 启动时自动保存当前账号登录态（默认自动保存，无需手动操作）
 async function ensureSnapshot() {
-  try { await invoke('ensure_snapshot'); } catch (e) { /* 无登录态时忽略 */ }
+  try {
+    const r = await invoke('ensure_snapshot');
+    // existed=false 说明刚刚为「新出现的登录形态」建了快照（例如用户刚在客户端
+    // 登录了企业版）。此时要刷新账号列表，让这个形态立刻出现在侧栏。
+    if (r && r.existed === false) {
+      bootLog('已自动保存新的登录态：' + (r.uid || ''), 'ok');
+      refreshAccounts();
+    }
+    return r;
+  } catch (e) { /* 无登录态时忽略 */ return null; }
 }
 
 // 手动保存「当前官方登录账号」的登录态（accessToken 等）到中枢保险库，
@@ -2318,5 +2327,11 @@ function bootBootstrap() {
 bootLog('脚本末尾：准备调用 bootBootstrap');
 bootBootstrap();
 bootLog('脚本末尾：bootBootstrap 已调用');
+
+// 登录态形态定时兜底（v0.6.25）
+// ensure_snapshot 只在启动时调用一次；如果用户在客户端里登录了另一个身份
+// （典型：个人版 → 企业版），之后又切换走，那份登录态就从没被保存过，等于白登录一场。
+// 这里每 30 秒轻量检查一次：只有「当前账号键还没有快照」时才会真正写盘，幂等且开销极小。
+setInterval(() => { ensureSnapshot(); }, 30000);
 
 function esc(s){ const d=document.createElement('div'); d.textContent=String(s==null?'':s); return d.innerHTML; }
