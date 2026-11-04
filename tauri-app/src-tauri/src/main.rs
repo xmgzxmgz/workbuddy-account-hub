@@ -133,6 +133,26 @@ fn get_auth_path_report() -> Value {
     api::auth_path_report()
 }
 
+/// 删除一个已保存的账号（失效账号清理）。
+/// 快照会被移到 vault/.trash/ 而非直接删除，可用 restore_account 还原。
+#[tauri::command]
+fn delete_account(uid: String) -> Result<Value, String> {
+    let r = ops::delete_account(&ops::vault_dir(), &uid)?;
+    Ok(serde_json::to_value(r).unwrap_or(Value::Null))
+}
+
+/// 恢复被删除的账号：解除隐藏 + 从回收站移回最近一份快照。
+#[tauri::command]
+fn restore_account(uid: String) -> Result<Value, String> {
+    ops::restore_account(&ops::vault_dir(), &uid)
+}
+
+/// 当前被隐藏/删除的账号清单（含是否还可还原）。
+#[tauri::command]
+fn list_ignored_accounts() -> Value {
+    serde_json::to_value(ops::list_ignored(&ops::vault_dir())).unwrap_or(Value::Null)
+}
+
 /// 登录态三态预检（issue #3 问题 B）：只读、无副作用。
 /// 每账号返回 state = ok / expiring / revoked / expired / error / no_login。
 /// 账号间串行 + 250ms 间隔，避免触发风控。
@@ -971,6 +991,9 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_all,
             get_auth_path_report,
+            delete_account,
+            restore_account,
+            list_ignored_accounts,
             preflight_accounts,
             refresh_account,
             refresh_all_accounts,
