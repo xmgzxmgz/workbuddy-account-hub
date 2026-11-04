@@ -113,6 +113,10 @@ fn get_all() -> Value {
         *arr = serde_json::to_value(accs).unwrap_or(Value::Array(vec![]))
             .as_array().cloned().unwrap_or_default();
     }
+    // 当前账号键：企业版是 `<uid>@<eid>`，与 current_uid 不同，前端据此高亮当前行
+    if let Some(o) = v.as_object_mut() {
+        o.insert("current_key".into(), serde_json::to_value(ops::current_account_key()).unwrap_or(Value::Null));
+    }
     v
 }
 
@@ -299,8 +303,9 @@ async fn buddy_claim() -> Value {
 // ---------- 多账号批量操作（每个账号用各自 vault 快照里的登录态 token 发起请求） ----------
 
 /// 从某账号的 vault 快照读取登录态（auth.info 含该账号 accessToken）
-fn account_login(vault: &std::path::Path, uid: &str) -> Option<wb_api::LoginInfo> {
-    let p = vault.join(uid).join("snapshot").join("auth.info");
+/// `key` 是账号键（`<uid>` 或 `<uid>@<enterpriseId>`），不是裸 uid。
+fn account_login(vault: &std::path::Path, key: &str) -> Option<wb_api::LoginInfo> {
+    let p = vault.join(key).join("snapshot").join("auth.info");
     if !p.exists() { return None; }
     wb_api::login_from_file(&p)
 }
@@ -921,6 +926,7 @@ fn list_accounts() -> Value {
         let mut m = serde_json::Map::new();
         m.insert("accounts".into(), serde_json::to_value(accs).unwrap_or(Value::Null));
         m.insert("current_uid".into(), serde_json::to_value(ops::current_uid()).unwrap_or(Value::Null));
+        m.insert("current_key".into(), serde_json::to_value(ops::current_account_key()).unwrap_or(Value::Null));
         m
     })
 }

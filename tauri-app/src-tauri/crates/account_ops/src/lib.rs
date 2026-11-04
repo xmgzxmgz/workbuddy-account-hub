@@ -34,10 +34,17 @@ use db_key::Key;
 
 #[derive(Serialize)]
 pub struct AccountInfo {
+    /// 账号键（vault 目录名 / 所有命令的标识）：`<uid>` 或 `<uid>@<enterpriseId>`
+    pub key: String,
+    /// 真实 uid（同一账号的个人版与企业版共用同一个 uid）
     pub uid: String,
     pub nickname: Option<String>,
     pub current: bool,
     pub has_snapshot: bool,
+    /// 企业版才有
+    pub enterprise_id: Option<String>,
+    /// "personal" | "enterprise"
+    pub form: String,
 }
 
 #[derive(Serialize)]
@@ -127,6 +134,65 @@ pub fn current_uid() -> Option<String> {
         .map(|s| s.to_string())
 }
 
+// ---------------------------------------------------------------------------
+// 账号键（account key）：区分「同一账号的个人版 / 企业版」
+//
+// 背景（v0.6.24）：同一个 OneID 账号可以同时拥有个人版与企业版身份，
+// 两者 **uid 完全相同**，只差 `account.type`（personal / ultimate）与
+// `account.enterpriseId`。此前 vault 以 uid 作目录名，两种形态共用同一个槽位，
+// 结果是「切一次覆盖一份」——实测 a1b2c3d4 的 history 里能看到 ultimate 与
+// personal 反复互相顶掉。
+//
+// 现在目录名改用 accountKey：
+//   个人版  vault/<uid>
+//   企业版  vault/<uid>@<enterpriseId>
+// 旧目录（纯 uid）天然继续表示个人版，向后兼容。
+// ---------------------------------------------------------------------------
+
+/// 拼账号键。enterpriseId 为空/缺失时就是纯 uid（个人版）。
+pub fn account_key(uid: &str, enterprise_id: Option<&str>) -> String {
+    match enterprise_id {
+        Some(e) if !e.trim().is_empty() => format!("{}@{}", uid.trim(), e.trim()),
+        _ => uid.trim().to_string(),
+    }
+}
+
+/// 拆账号键 → (uid, enterpriseId)
+pub fn parse_key(key: &str) -> (&str, Option<&str>) {
+    match key.split_once('@') {
+        Some((u, e)) if !e.is_empty() => (u, Some(e)),
+        _ => (key, None),
+    }
+}
+
+/// 从一个 account JSON 对象算出账号键（读 type/enterpriseId）
+pub fn key_of_account(acc: &Value) -> Option<String> {
+    let uid = acc.get("uid")?.as_str()?;
+    if uid.is_empty() { return None; }
+    let eid = acc.get("enterpriseId").and_then(|x| x.as_str());
+    Some(account_key(uid, eid))
+}
+
+/// 当前登录态所属的账号键（决定 snapshot 该写进哪个槽位）
+pub fn current_account_key() -> Option<String> {
+    let f = auth_file()?;
+    let s = std::fs::read_to_string(&f).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&s).ok()?;
+    key_of_account(v.get("account")?)
+}
+
+/// 旧接口保留：只要 uid（用于展示与 JWT 比对，不用于路径）
+pub fn current_enterprise_id() -> Option<String> {
+    let f = auth_file()?;
+    let s = std::fs::read_to_string(&f).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&s).ok()?;
+    v.get("account")
+        .and_then(|a| a.get("enterpriseId"))
+        .and_then(|x| x.as_str())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+}
+
 /// 在 local_storage 中收集账号登记表中的全部账号（JSON 数组 [{userId, data}, ...]）。
 ///
 /// 关键修复：不再「返回第一个能解析的登记表」，而是遍历所有 `.info` 登记表，
@@ -164,46 +230,51 @@ fn find_registry() -> Vec<(String, Option<String>)> {
 /// 这是最权威的来源：只要某账号在此机登录过，就会出现在 allAccounts。
 /// 之前的枚举只依赖 local_storage 登记表 + vault 快照，当官方把登记表压缩成「仅当前账号」、
 /// 且该账号尚未快照时就会丢账号（表现为侧边栏「不显示所有账号」）。补上 allAccounts 来源可根治。
-fn auth_accounts() -> Vec<(String, Option<String>)> {
+/// 返回 (accountKey, uid, nickname)。
+///
+/// key 由 `uid` + `enterpriseId` 组成：同一账号的个人版与企业版会在
+/// allAccounts 里各占一项（enterpriseId 为空 vs 非空），因此会产出两个 key。
+fn auth_accounts() -> Vec<(String, String, Option<String>)> {
     let Some(f) = auth_file() else { return Vec::new(); };
     let Ok(s) = std::fs::read_to_string(&f) else { return Vec::new(); };
     let Ok(v) = serde_json::from_str::<Value>(&s) else { return Vec::new(); };
+    // 用普通 fn 而非闭包：闭包会把 &mut out 借到作用域结束，后面 out.is_empty() 会冲突
+    fn collect(out: &mut Vec<(String, String, Option<String>)>, acc: &Value) {
+        let Some(uid) = acc.get("uid").and_then(|u| u.as_str()) else { return; };
+        if uid.is_empty() { return; }
+        let key = account_key(uid, acc.get("enterpriseId").and_then(|x| x.as_str()));
+        let nick = acc.get("nickname").and_then(|x| x.as_str()).map(|s| s.to_string());
+        out.push((key, uid.to_string(), nick));
+    }
     let mut out = Vec::new();
     if let Some(arr) = v.get("allAccounts").and_then(|x| x.as_array()) {
-        for item in arr {
-            let Some(uid) = item.get("uid").and_then(|u| u.as_str()) else { continue; };
-            let nick = item.get("nickname").and_then(|x| x.as_str()).map(|s| s.to_string());
-            out.push((uid.to_string(), nick));
-        }
+        for item in arr { collect(&mut out, item); }
     }
     // allAccounts 为空时兜底：至少保留当前 account
     if out.is_empty() {
-        if let Some(uid) = v.get("account").and_then(|a| a.get("uid")).and_then(|u| u.as_str()) {
-            let nick = v.get("account").and_then(|a| a.get("nickname")).and_then(|x| x.as_str()).map(|s| s.to_string());
-            out.push((uid.to_string(), nick));
-        }
+        if let Some(acc) = v.get("account") { collect(&mut out, acc); }
     }
     out
 }
 
 /// 从保险库(vault)目录枚举所有已保存账号的 uid（只要有 snapshot/history 目录就算）。
 /// 兜底来源：即使官方登记表被压缩丢失账号，只要之前快照过，这里就能找回并可切换。
-fn vault_account_uids(vault: &Path) -> Vec<String> {
-    let mut uids = Vec::new();
-    let Ok(rd) = std::fs::read_dir(vault) else { return uids; };
+/// 从 vault 目录枚举所有账号键（目录名即 key，企业版形如 `<uid>@<eid>`）。
+fn vault_account_keys(vault: &Path) -> Vec<String> {
+    let mut keys = Vec::new();
+    let Ok(rd) = std::fs::read_dir(vault) else { return keys; };
     for e in rd.flatten() {
         let p = e.path();
         if !p.is_dir() { continue; }
-        // 仅保留像 uid 的目录（含 '-'）+ 内部有 snapshot 或 history 的有效账号
         if let Some(name) = p.file_name().and_then(|s| s.to_str()) {
             // 排除 .trash / .tmp 这类隐藏目录，避免删除过的账号被当成有效账号扫回来
             if name.starts_with('.') { continue; }
             if name.contains('-') && (p.join("snapshot").exists() || p.join("history").exists()) {
-                uids.push(name.to_string());
+                keys.push(name.to_string());
             }
         }
     }
-    uids
+    keys
 }
 
 /// 从 vault 快照批量解析昵称，返回 uid → 昵称（仅含解析成功的条目）。
@@ -284,43 +355,133 @@ fn snapshot_exists(vault: &Path, uid: &str) -> bool {
 ///   2. vault 目录下所有已有 snapshot/history 的账号（兜底，防登记表被官方压缩丢账号）
 ///   3. 当前登录账号（永远展示）
 /// 昵称优先级：在线文件/登记表明文 > vault 快照兜底（批量内存解密加密快照）。
+/// 把「目录名是裸 uid、但快照内容其实带 enterpriseId」的历史数据迁移到 `<uid>@<eid>`。
+///
+/// v0.6.23 及以前的 vault 只用 uid 作目录名，企业版快照会以裸 uid 目录存放，
+/// 与个人版共用槽位。升级后必须先把这些目录改名，否则：
+///   ① 列表里它会被当成个人版（key 无 @）；
+///   ② 再保存一次个人版就会把企业版快照顶掉——正是这次要修的问题。
+///
+/// 幂等、可重复调用；目标目录已存在时保守跳过（保留现状，不覆盖任何数据）。
+pub fn migrate_legacy_snapshots(vault: &Path) {
+    let Ok(rd) = std::fs::read_dir(vault) else { return; };
+    for e in rd.flatten() {
+        let p = e.path();
+        if !p.is_dir() { continue; }
+        let Some(name) = p.file_name().and_then(|s| s.to_str()) else { continue; };
+        if name.starts_with('.') || name.contains('@') { continue; }
+        let auth = p.join("snapshot").join("auth.info");
+        let Ok(txt) = std::fs::read_to_string(&auth) else { continue; };
+        let Ok(v) = serde_json::from_str::<Value>(&txt) else { continue; };
+        let Some(acc) = v.get("account") else { continue; };
+        let Some(eid) = acc.get("enterpriseId").and_then(|x| x.as_str()).filter(|s| !s.is_empty()) else { continue; };
+        let Some(uid) = acc.get("uid").and_then(|x| x.as_str()) else { continue; };
+        let target_name = account_key(uid, Some(eid));
+        let target = vault.join(&target_name);
+        if target.exists() {
+            // 两份都在：不动，交给用户决定（可能是手动复制出来的）
+            continue;
+        }
+        let _ = std::fs::rename(&p, &target);
+    }
+
+    // 第二遍：无论目录是不是本次刚改名的，只要存在 `<uid>@<eid>` 而 `<uid>` 槽位缺失，
+    // 就尝试用 history 里最近一份个人版备份把个人版槽位补回来
+    // （这样用户不用为了切回个人版再去客户端重新登录）。
+    if let Ok(rd) = std::fs::read_dir(vault) {
+        for e in rd.flatten() {
+            let p = e.path();
+            if !p.is_dir() { continue; }
+            let Some(name) = p.file_name().and_then(|s| s.to_str()) else { continue; };
+            let (uid, eid) = parse_key(name);
+            if eid.is_none() { continue; }
+            restore_personal_slot(vault, uid, &p);
+        }
+    }
+}
+
+/// 从 `<uid>@<eid>` 目录的 history 里找回最近一份**个人版**快照，
+/// 重建 `vault/<uid>/snapshot/`（个人版槽位）。已存在则不动。
+fn restore_personal_slot(vault: &Path, uid: &str, ent_dir: &Path) {
+    let target = vault.join(uid);
+    if target.join("snapshot").exists() { return; }   // 已有个人版快照，不覆盖
+    let hist = ent_dir.join("history");
+    let Ok(rd) = std::fs::read_dir(&hist) else { return; };
+
+    let mut cands: Vec<(u64, PathBuf)> = Vec::new();
+    for e in rd.flatten() {
+        let dir = e.path();
+        let auth = dir.join("auth.info");
+        let Ok(txt) = std::fs::read_to_string(&auth) else { continue; };
+        let Ok(v) = serde_json::from_str::<Value>(&txt) else { continue; };
+        let Some(acc) = v.get("account") else { continue; };
+        // 只认真正的个人版：无 enterpriseId
+        let is_personal = acc.get("enterpriseId").and_then(|x| x.as_str()).unwrap_or("").is_empty();
+        if !is_personal { continue; }
+        let ts = dir.file_name().and_then(|s| s.to_str()).unwrap_or("0").parse::<u64>().unwrap_or(0);
+        cands.push((ts, dir));
+    }
+    if cands.is_empty() { return; }
+    cands.sort_by(|a, b| b.0.cmp(&a.0));
+    let src = &cands[0].1;
+    let snap = target.join("snapshot");
+    if copy_dir_all(src, &snap).is_ok() {
+        // 历史目录里的 auth.info 就是快照本体，其余文件（local_storage 等）同样搬过来
+        let _ = std::fs::remove_file(snap.join("workbuddy.db.bak"));
+    }
+}
+
 pub fn list_accounts(vault: &Path) -> Vec<AccountInfo> {
-    let cur = current_uid();
-    let mut order: Vec<String> = Vec::new();
+    // 先把历史遗留的「裸 uid 目录装着企业版快照」改名，否则会被误判为个人版并互相覆盖
+    migrate_legacy_snapshots(vault);
+    let cur_key = current_account_key();
+    let mut order: Vec<String> = Vec::new();                 // 账号键
     let mut seen = std::collections::HashSet::new();
+    let mut uid_of: std::collections::HashMap<String, String> = std::collections::HashMap::new();
     let mut live_nick: std::collections::HashMap<String, String> = std::collections::HashMap::new();
 
     // 0) 当前登录态文件里的 allAccounts（最权威：本机所有登录过的账号，含尚未快照的）
-    for (uid, nick) in auth_accounts() {
-        if seen.insert(uid.clone()) {
+    //   同一 uid 的个人版与企业版会各出一项，key 不同 → 都保留。
+    for (key, uid, nick) in auth_accounts() {
+        if seen.insert(key.clone()) {
             // 空串视同缺失（新版客户端登记表昵称可能全为空），回退 vault 快照解析
             if let Some(n) = nick.filter(|s| !s.is_empty()) {
-                live_nick.insert(uid.clone(), n);
+                live_nick.insert(key.clone(), n);
             }
-            order.push(uid);
+            uid_of.insert(key.clone(), uid);
+            order.push(key);
         }
     }
 
-    // 1) 合并所有登记表
+    // 1) 合并所有登记表（登记表只有 uid、没有 enterpriseId → 只能代表个人版）
+    //    仅当这个 uid 还没有任何 key 时才占位，否则会多出一个「幽灵个人版」条目。
     for (uid, nick) in find_registry() {
-        if seen.insert(uid.clone()) {
+        let already = order.iter().any(|k| parse_key(k).0 == uid);
+        if already { continue; }
+        let key = uid.clone();
+        if seen.insert(key.clone()) {
             if let Some(n) = nick.filter(|s| !s.is_empty()) {
-                live_nick.insert(uid.clone(), n);
+                live_nick.insert(key.clone(), n);
             }
-            order.push(uid);
+            uid_of.insert(key.clone(), uid);
+            order.push(key);
         }
     }
 
     // 2) vault 兜底：登记表里没有的已快照账号也补进来（可切换）
-    for uid in vault_account_uids(vault) {
-        if seen.insert(uid.clone()) {
-            order.push(uid);
+    for key in vault_account_keys(vault) {
+        if seen.insert(key.clone()) {
+            let (uid, _eid) = parse_key(&key);
+            uid_of.insert(key.clone(), uid.to_string());
+            order.push(key);
         }
     }
 
     // 3) 确保当前账号始终出现
-    if let Some(c) = &cur {
+    if let Some(c) = &cur_key {
         if seen.insert(c.clone()) {
+            let (uid, _eid) = parse_key(c);
+            uid_of.insert(c.clone(), uid.to_string());
             order.push(c.clone());
         }
     }
@@ -331,15 +492,21 @@ pub fn list_accounts(vault: &Path) -> Vec<AccountInfo> {
 
     // 用户主动删除/隐藏的账号不再出现（删除只移走快照，另外两处来源仍会吐出 uid）
     let ignored = ignored_uids();
-    order.retain(|uid| !ignored.contains(uid));
+    order.retain(|k| !ignored.contains(k) && !ignored.contains(parse_key(k).0));
 
     order
         .into_iter()
-        .map(|uid| AccountInfo {
-            nickname: live_nick.get(&uid).cloned().or_else(|| vault_nicks.get(&uid).cloned()),
-            current: cur.as_deref() == Some(uid.as_str()),
-            has_snapshot: snapshot_exists(vault, &uid),
-            uid,
+        .map(|key| {
+            let (uid, eid) = parse_key(&key);
+            AccountInfo {
+                nickname: live_nick.get(&key).cloned().or_else(|| vault_nicks.get(&key).cloned()),
+                current: cur_key.as_deref() == Some(key.as_str()),
+                has_snapshot: snapshot_exists(vault, &key),
+                enterprise_id: eid.map(|s| s.to_string()),
+                form: if eid.is_some() { "enterprise".to_string() } else { "personal".to_string() },
+                uid: uid.to_string(),
+                key,
+            }
         })
         .collect()
 }
@@ -458,7 +625,8 @@ fn cleanup_history(vault: &Path, uid: &str) {
 
 /// 快照当前账号为一份可追溯的历史备份（多版本）。同时更新 canonical snapshot/ 供切换源。
 pub fn snapshot_current(vault: &Path) -> Result<BackupMeta, String> {
-    let uid = current_uid().ok_or("未找到当前登录态，请先登录 WorkBuddy")?;
+    // 用账号键而不是 uid：企业版必须落到 `<uid>@<eid>`，否则会顶掉同账号的个人版快照
+    let uid = current_account_key().ok_or("未找到当前登录态，请先登录 WorkBuddy")?;
     // 1) 历史多版本备份
     let ts = chrono_now();
     let hist_dest = vault.join(&uid).join("history").join(&ts);
@@ -499,7 +667,7 @@ pub struct EnsureSnapshotResult {
 }
 
 pub fn ensure_snapshot(vault: &Path) -> Result<EnsureSnapshotResult, String> {
-    let uid = current_uid().ok_or("未找到当前登录态，请先登录 WorkBuddy")?;
+    let uid = current_account_key().ok_or("未找到当前登录态，请先登录 WorkBuddy")?;
     if snapshot_exists(vault, &uid) {
         let snap = vault.join(&uid).join("snapshot");
         let fc = count_files(&snap.join("local_storage"));
@@ -526,11 +694,11 @@ pub struct BackupAllResult {
 }
 
 pub fn backup_all(vault: &Path) -> Result<Vec<BackupAllResult>, String> {
-    let cur = current_uid();
+    let cur = current_account_key();
     let accs = list_accounts(vault);
     let mut out = Vec::new();
     for a in accs {
-        let uid = a.uid.clone();
+        let uid = a.key.clone();
         let is_cur = cur.as_deref() == Some(uid.as_str());
         let r = if is_cur {
             match snapshot_current(vault) {
@@ -797,7 +965,7 @@ pub fn switch_account(vault: &Path, uid: &str) -> Result<SwitchResult, String> {
     // 作为"切回源"。用户明确要求切换前完整备份，故此处用 take_snapshot_to 而非轻量版。
     // canonical snapshot/ 必须在每次切换时同步刷新，否则切到别处后原账号没有
     // 登录态源（vault/<uid>/snapshot），永远切不回来。这正是"一键切回"的关键。
-    let cur_uid = current_uid();
+    let cur_uid = current_account_key();
     if let Some(cid) = &cur_uid {
         if cid != uid {
             let ts = chrono_now();
@@ -973,7 +1141,7 @@ pub fn refresh_account(vault: &Path, uid: &str) -> Result<RefreshResult, String>
         .unwrap_or(0.0);
 
     // 风险 #2：与客户端抢同一个 refreshToken
-    let is_current = current_uid().as_deref() == Some(uid);
+    let is_current = current_account_key().as_deref() == Some(uid);
     if is_current && is_workbuddy_running() {
         return Err(
             "该账号是当前登录账号且 WorkBuddy 正在运行：此时续期会和客户端争抢同一个 refreshToken，\
@@ -1104,9 +1272,12 @@ pub fn preflight_accounts(vault: &Path) -> Vec<Value> {
     let accs = list_accounts(vault);
     let mut out = Vec::new();
     for (i, a) in accs.iter().enumerate() {
-        let snap_auth = vault.join(&a.uid).join("snapshot").join("auth.info");
+        let snap_auth = vault.join(&a.key).join("snapshot").join("auth.info");
         let base = json!({
             "uid": a.uid,
+            "key": a.key,
+            "form": a.form,
+            "enterprise_id": a.enterprise_id,
             "nickname": a.nickname,
             "current": a.current,
             "has_snapshot": a.has_snapshot,
@@ -1199,7 +1370,7 @@ pub fn delete_account(vault: &Path, uid: &str) -> Result<DeleteResult, String> {
     if uid.trim().is_empty() {
         return Err("uid 为空".into());
     }
-    if current_uid().as_deref() == Some(uid) {
+    if current_account_key().as_deref() == Some(uid) {
         return Err(
             "这是当前登录账号，不能删除。请先在 WorkBuddy 里切换到其他账号，或先切换 Hub 到别的账号再删".into(),
         );
