@@ -700,17 +700,18 @@ function showAccountList(accs, cur) {
         ? `<button class="mini" ${isSwitching ? 'disabled style="opacity:.5;cursor:default;"' : ''} onclick="event.stopPropagation();switchTo('${a.uid}')">${isSwitching ? '切换中…' : '切换'}</button>`
         : '<span class="mini" style="background:var(--line);color:var(--muted);padding:3px 9px;border-radius:6px;font-size:10.5px;" title="该账号尚未在 WorkBuddy 中登录保存过登录态，无法直接切换">未登录</span>');
     const meta = getMeta(a.uid);
-    const starBtn = `<button class="mini star ${meta.star ? 'on' : ''}" title="星标" onclick="event.stopPropagation();toggleStar('${a.uid}')">${meta.star ? '★' : '☆'}</button>`;
-    const tagBtn = `<button class="mini" title="标签：${meta.tags.join(', ') || '（点击设置）'}" onclick="event.stopPropagation();openTagInput('${a.uid}')">🏷</button>`;
-    // 删除入口只给非当前账号：当前账号删了会让列表和真实登录状态脱节
-    const delBtn = isCur ? ''
-      : `<button class="mini" title="删除该账号（快照移到回收站，可还原）" onclick="event.stopPropagation();deleteAccount('${a.uid}')">🗑</button>`;
+    // 行内只留一个「⋯」，把星标/标签/删除收进浮动菜单：
+    // 4 个按钮并排在 262px 侧栏里会把昵称和 UID 全挤成省略号（见 v0.6.23 修复）。
+    const moreBtn = `<button class="mini" title="更多操作" onclick="event.stopPropagation();openAccMenu(event,'${a.uid}')">⋯</button>`;
+    // 星标状态不能在行内用按钮表达了，改成名字前的小星号，信息不丢
+    const starMark = meta.star ? '<span style="color:var(--amber);margin-right:3px;">★</span>' : '';
+    const tagTip = meta.tags.length ? ` title="标签：${meta.tags.join(', ')}"` : '';
     div.dataset.uid = a.uid;
     div.innerHTML = `
       <div class="dot">${initial}</div>
-      <div class="info"><div class="n">${escapeHtml(a.nickname ? acctLabel(a) : '(无昵称)')}</div><div class="s">${escapeHtml(acctUidMask(a.uid))}</div></div>
+      <div class="info"><div class="n"${tagTip}>${starMark}${escapeHtml(a.nickname ? acctLabel(a) : '(无昵称)')}</div><div class="s">${escapeHtml(acctUidMask(a.uid))}</div></div>
       ${badge}
-      <div class="acc-actions">${starBtn}${tagBtn}${delBtn}</div>`;
+      <div class="acc-actions">${moreBtn}</div>`;
     div.onclick = () => selectAccount(a, accs);
     al.appendChild(div);
   });
@@ -1074,6 +1075,34 @@ async function refreshAllTokens() {
   toast(`批量续期完成：成功 ${okN} / 尝试 ${j.attempted || rows.length}`, okN ? 'ok' : 'err');
   loadPreflight();
 }
+
+// ===== 账号行「⋯」菜单 =====
+let accMenuEl = null;
+function closeAccMenu() {
+  if (accMenuEl) { accMenuEl.remove(); accMenuEl = null; }
+}
+function openAccMenu(ev, uid) {
+  ev.stopPropagation();
+  closeAccMenu();
+  const a = (accountsCache || []).find(x => x.uid === uid) || { uid };
+  const meta = getMeta(uid);
+  const isCur = a.uid === ((window.__login || {}).uid);
+  const del = isCur ? '' :
+    `<div class="mi danger" onclick="event.stopPropagation();closeAccMenu();deleteAccount('${uid}')">🗑 删除账号</div>`;
+  const m = document.createElement('div');
+  m.className = 'acc-menu';
+  m.innerHTML =
+    `<div class="mi" onclick="event.stopPropagation();closeAccMenu();toggleStar('${uid}')">${meta.star ? '★ 取消星标' : '☆ 星标'}</div>`
+    + `<div class="mi" onclick="event.stopPropagation();closeAccMenu();openTagInput('${uid}')">🏷 设置标签</div>`
+    + del;
+  document.body.appendChild(m);
+  const r = ev.currentTarget.getBoundingClientRect();
+  // 贴右侧展开，但不能溢出窗口
+  m.style.left = Math.max(8, Math.min(r.right - 140, window.innerWidth - 148)) + 'px';
+  m.style.top = Math.min(r.bottom + 4, window.innerHeight - 130) + 'px';
+  accMenuEl = m;
+}
+document.addEventListener('click', () => closeAccMenu());
 
 // ===== 删除 / 恢复账号（失效账号清理）=====
 async function deleteAccount(uid) {
