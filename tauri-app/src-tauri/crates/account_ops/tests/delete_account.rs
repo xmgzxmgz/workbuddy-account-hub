@@ -117,8 +117,9 @@ fn delete_nonexistent_uid_only_hides() {
 }
 
 #[test]
+#[ignore = "依赖本机真实 vault，CI runner 上没有账号，会误报失败"]
 fn real_vault_still_lists_accounts() {
-    // 冒烟：过滤逻辑不能把真实账号误伤
+    // 冒烟：过滤逻辑不能把真实账号误伤（本地手动跑：-- --ignored）
     let accs = account_ops::list_accounts(&vault_dir());
     println!("真实账号数: {}", accs.len());
     assert!(!accs.is_empty(), "真实 vault 应至少有一个账号（过滤不应全部删掉）");
