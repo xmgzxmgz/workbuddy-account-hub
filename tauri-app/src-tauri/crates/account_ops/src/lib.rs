@@ -943,7 +943,13 @@ fn latest_hist_auth(vault: &Path, uid: &str) -> Option<PathBuf> {
 ///
 /// ⚠️ 与旧设计相反：旧版"按 uid 隔离、绝不碰会话库"会导致切账号后看不到原对话；
 /// 现按用户需求主动搬迁会话归属，使"切账号会话跟着过去"成为现实。
-pub fn switch_account(vault: &Path, uid: &str) -> Result<SwitchResult, String> {
+pub fn switch_account(vault: &Path, key: &str) -> Result<SwitchResult, String> {
+    // ⚠️ 账号键 ≠ uid：key 用于 vault 路径（企业版是 `<uid>@<eid>`），
+    // 而 workbuddy.db / local_storage 里存的始终是纯 uid。
+    // v0.6.24 曾把 key 直接写进 sessions.user_id，会让客户端按 uid 查不到、对话整体消失。
+    let (target_uid, _eid) = parse_key(key);
+    let target_uid = target_uid.to_string();
+
     // 切换前若 WorkBuddy 在运行，先优雅退出（避免退出时回写覆盖 local_storage/登录态）
     let was_running = is_workbuddy_running();
     if was_running {
@@ -952,10 +958,10 @@ pub fn switch_account(vault: &Path, uid: &str) -> Result<SwitchResult, String> {
 
     // 目标账号快照缺失：先即时生成占位快照（materialize），若 history 里有该账号
     // 真实登录态备份，则用它覆盖占位快照的 auth.info（含真实 token，切换才有效）。
-    let src = vault.join(uid).join("snapshot");
+    let src = vault.join(key).join("snapshot");
     if !src.exists() {
-        materialize_snapshot_for(vault, uid)?;
-        if let Some(hist_auth) = latest_hist_auth(vault, uid) {
+        materialize_snapshot_for(vault, key)?;
+        if let Some(hist_auth) = latest_hist_auth(vault, key) {
             let _ = std::fs::copy(&hist_auth, src.join("auth.info"));
         }
     }
@@ -965,11 +971,12 @@ pub fn switch_account(vault: &Path, uid: &str) -> Result<SwitchResult, String> {
     // 作为"切回源"。用户明确要求切换前完整备份，故此处用 take_snapshot_to 而非轻量版。
     // canonical snapshot/ 必须在每次切换时同步刷新，否则切到别处后原账号没有
     // 登录态源（vault/<uid>/snapshot），永远切不回来。这正是"一键切回"的关键。
-    let cur_uid = current_account_key();
+    let cur_key = current_account_key();
+    let cur_uid = cur_key.as_deref().map(|k| parse_key(k).0.to_string());
     if let Some(cid) = &cur_uid {
-        if cid != uid {
+        if *cid != target_uid {
             let ts = chrono_now();
-            let hist_dest = vault.join(cid).join("history").join(&ts);
+            let hist_dest = vault.join(cur_key.as_deref().unwrap_or("")).join("history").join(&ts);
             std::fs::create_dir_all(&hist_dest).map_err(|e| e.to_string())?;
             let _ = take_snapshot_to(cid, &hist_dest);
             // 额外备份会话库 workbuddy.db（搬迁前兜底，便于一键回滚会话归属）。
@@ -979,7 +986,7 @@ pub fn switch_account(vault: &Path, uid: &str) -> Result<SwitchResult, String> {
                     .map_err(|e| format!("备份会话库失败（已中止切换，未改动任何数据）: {e}"))?;
             }
             // 同步刷新 canonical snapshot/（含完整 local_storage + workbuddy.db + auth.info）
-            let snap_dest = vault.join(cid).join("snapshot");
+            let snap_dest = vault.join(cur_key.as_deref().unwrap_or("")).join("snapshot");
             let _ = std::fs::remove_dir_all(&snap_dest);
             if std::fs::create_dir_all(&snap_dest).is_ok() {
                 let ls_src = hist_dest.join("local_storage");
@@ -1004,13 +1011,13 @@ pub fn switch_account(vault: &Path, uid: &str) -> Result<SwitchResult, String> {
     if !src_auth.exists() {
         return Err("目标账号没有可用的登录态快照（auth.info 缺失），已中止切换。请先在官方客户端登录该账号，再点「保存当前登录态」".into());
     }
-    switch_auth_to(&src_auth, uid)?;
+    switch_auth_to(&src_auth, key)?;
 
     // 合并目标账号的登记表(entry_*.info)进当前 local_storage：让"当前账号身份"真正换成目标账号
     // （用它的积分/额度），同时保留其他账号的登记表条目（合并而非覆盖）。
     if let Some(cid) = &cur_uid {
-        if cid != uid {
-            merge_local_storage_entries(&src.join("local_storage"), uid);
+        if *cid != target_uid {
+            merge_local_storage_entries(&src.join("local_storage"), &target_uid);
         }
     }
 
@@ -1031,8 +1038,8 @@ pub fn switch_account(vault: &Path, uid: &str) -> Result<SwitchResult, String> {
     // pin_warn 提前声明：既承载会话置顶迁移告警，也承载会话归属迁移失败告警（见下）
     let mut pin_warn: Option<String> = None;
     if let Some(cid) = &cur_uid {
-        if cid != uid {
-            match migrate_sessions_user_id(cid, uid) {
+        if *cid != target_uid {
+            match migrate_sessions_user_id(cid, &target_uid) {
                 Ok((s, a)) => { migrated_sessions = s; migrated_autos = a; }
                 Err(e) => {
                     // ⚠️ 改为告警而非中止：会话迁移失败不应让整次切换卡死
@@ -1047,8 +1054,8 @@ pub fn switch_account(vault: &Path, uid: &str) -> Result<SwitchResult, String> {
     // 会话置顶（Pinned）状态迁移：把渲染层 localStorage 里 `u:<旧uid>` 键复制为 `u:<新uid>`。
     // best-effort：失败时仅记录警告，不阻断账号切换（置顶丢失只是体验问题，可手动重新置顶）。
     if let Some(cid) = &cur_uid {
-        if cid != uid {
-            if let Err(e) = migrate_renderer_pin_state(cid, uid) {
+        if *cid != target_uid {
+            if let Err(e) = migrate_renderer_pin_state(cid, &target_uid) {
                 pin_warn = Some(e);
             }
         }
@@ -1069,14 +1076,14 @@ pub fn switch_account(vault: &Path, uid: &str) -> Result<SwitchResult, String> {
         message: {
             let mut m = format!(
                 "已切换到目标账号（{}）：搬迁会话 {} 条、自动化 {} 条（归属为【搬移】而非复制，切回原账号时这些会话将不再显示），准备重启 WorkBuddy 生效",
-                uid, migrated_sessions, migrated_autos
+                key, migrated_sessions, migrated_autos
             );
             if let Some(w) = &pin_warn {
                 m.push_str(&format!("（⚠️ 会话置顶状态迁移未完成: {w}）"));
             }
             m
         },
-        uid: uid.to_string(),
+        uid: key.to_string(),
     })
 }
 
