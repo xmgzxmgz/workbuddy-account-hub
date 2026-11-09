@@ -1504,6 +1504,34 @@ pub fn restore_account(vault: &Path, uid: &str) -> Result<Value, String> {
     Ok(json!({ "uid": uid, "restored": restored }))
 }
 
+/// 会话复制（跨账号，源不受影响）——v0.6.29，自 changexbc/workbuddy-switch 的
+/// "会话复制"启发：与切换时的**搬移**不同，这里为每个会话生成新 id 的副本，
+/// user_id 指向目标账号，源账号照常可见。
+/// 只处理本地 workbuddy.db；云端会话由客户端启动后自行同步。
+pub fn copy_sessions(from_key: &str, to_key: &str) -> Result<Value, String> {
+    let (from_uid, _) = parse_key(from_key);
+    let (to_uid, _) = parse_key(to_key);
+    if from_uid == to_uid {
+        return Err("源账号与目标账号 uid 相同（同账号的个人/企业版共用会话），无需复制".into());
+    }
+    let db = workbuddy_db_path().ok_or("未找到 workbuddy.db")?;
+    let bak = db.with_extension(format!("copy-backup.{}", chrono_now()));
+    std::fs::copy(&db, &bak).map_err(|e| format!("备份 workbuddy.db 失败（已中止，未做任何修改）: {e}"))?;
+
+    let conn = Connection::open(&db).map_err(|e| format!("打开数据库失败: {e}"))?;
+    let _ = conn.execute("PRAGMA busy_timeout=8000", []);
+    let sql = "INSERT INTO sessions (id, cwd, user_id, title, custom_title, status, created_at, updated_at, deleted_at)
+               SELECT id || '-copy-' || abs(random() % 100000), cwd, ?1,
+                      COALESCE(title, ''),
+                      COALESCE(custom_title, '') || '（副本）',
+                      status, created_at, updated_at, deleted_at
+               FROM sessions WHERE user_id = ?2";
+    let n = conn
+        .execute(sql, rusqlite::params![to_uid, from_uid])
+        .map_err(|e| format!("复制失败: {e}"))?;
+    Ok(json!({ "ok": true, "copied": n, "backup": bak.to_string_lossy() }))
+}
+
 /// 当前被隐藏/删除的账号清单（供 UI 展示与恢复）
 pub fn list_ignored(vault: &Path) -> Vec<Value> {
     let set = ignored_uids();

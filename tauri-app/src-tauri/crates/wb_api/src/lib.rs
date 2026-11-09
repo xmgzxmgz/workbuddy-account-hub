@@ -1957,6 +1957,84 @@ pub fn buddy_claim() -> Value {
     }
 }
 
+// ===== 成长任务（v0.6.29，实测 5.9.3：GET /activity/growth/tasks 200，claim 路由存在）=====
+
+/// 成长任务列表。实测字段：{task_id, code, title, description, status, level_name, url}。
+/// status="available" 表示可做未完成；已完成任务可调 claim 领取奖励（服务端返回
+/// 400 "task not completed" 说明未完成，属正常业务态而非错误）。
+pub fn growth_tasks_as(login: &LoginInfo) -> Value {
+    let r = growth_post(call_api_as(login, &format!("{}/activity/growth/tasks", api_base(login)), "GET", "")
+        .unwrap_or_else(|e| json!({ "error": e })));
+    if let Some(err) = r.get("error") {
+        if r.get("personal_only").is_some() {
+            return json!({ "ok": false, "personal_only": true, "error": err });
+        }
+        return json!({ "ok": false, "error": err });
+    }
+    let status = r.get("status").and_then(|x| x.as_u64()).unwrap_or(0);
+    let body = r.get("body").cloned().unwrap_or(Value::Null);
+    let (code, msg, data) = growth_unwrap(&body);
+    if status != 200 || code != 0 {
+        return json!({ "ok": false, "status": status, "error": if msg.is_empty() { format!("HTTP {status}") } else { msg } });
+    }
+    let tasks = data.get("tasks").cloned().unwrap_or(json!([]));
+    let total = tasks.as_array().map(|a| a.len()).unwrap_or(0);
+    // 已完成（非 available）的任务数，供 UI 显示进度
+    let done = tasks.as_array().map(|a| a.iter().filter(|t| {
+        t.get("status").and_then(|x| x.as_str()).map(|s| s != "available").unwrap_or(false)
+    }).count()).unwrap_or(0);
+    json!({ "ok": true, "tasks": tasks, "total": total, "done": done })
+}
+
+/// 领取某个已完成任务的奖励（POST /activity/growth/tasks/{id}/claim）。
+pub fn growth_task_claim_as(login: &LoginInfo, task_id: i64) -> Value {
+    let r = growth_post(call_api_as(login, &format!("{}/activity/growth/tasks/{}/claim", api_base(login), task_id), "POST", "{}")
+        .unwrap_or_else(|e| json!({ "error": e })));
+    if let Some(err) = r.get("error") {
+        return json!({ "ok": false, "error": err });
+    }
+    let status = r.get("status").and_then(|x| x.as_u64()).unwrap_or(0);
+    let body = r.get("body").cloned().unwrap_or(Value::Null);
+    let (code, msg, data) = growth_unwrap(&body);
+    if status != 200 || code != 0 {
+        return json!({ "ok": false, "status": status, "error": if msg.is_empty() { format!("HTTP {status}") } else { msg }, "data": data });
+    }
+    json!({ "ok": true, "message": msg, "data": data })
+}
+
+// ===== Webhook 通知（v0.6.29，自 token-monitor 的多渠道通知启发）=====
+
+/// 推一条文本到 Bark（GET /{title}/{body}）或企业微信群机器人（POST JSON）。
+/// 纯 HTTP，不重试不排队：失败由调用方提示，绝不能影响主流程。
+pub fn send_webhook(kind: &str, url: &str, title: &str, body: &str) -> Value {
+    if url.trim().is_empty() {
+        return json!({ "ok": false, "error": "webhook 地址为空" });
+    }
+    let client = match reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => return json!({ "ok": false, "error": format!("构造客户端失败: {e}") }),
+    };
+    let r = if kind == "wecom" {
+        client
+            .post(url.trim())
+            .json(&json!({ "msgtype": "text", "text": { "content": format!("{title}\n{body}") } }))
+            .send()
+    } else {
+        // Bark：标题与正文是 path 段，需编码
+        let enc = |t: &str| t.replace('%', "%25").replace('/', "%2F").replace(' ', "%20").replace('\n', "%0A");
+        client
+            .get(format!("{}/{}/{}", url.trim().trim_end_matches('/'), enc(title), enc(body)))
+            .send()
+    };
+    match r {
+        Ok(resp) => json!({ "ok": resp.status().is_success(), "status": resp.status().as_u16() }),
+        Err(e) => json!({ "ok": false, "error": format!("推送失败: {e}") }),
+    }
+}
+
 // ===== 邀请码 / 企业用量（v0.6.28，调研同类项目引入的新功能） =====
 
 /// 邀请码与邀请人数（GET my-code + invite-records，两接口 5.9.3 实测 200）。

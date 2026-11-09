@@ -27,7 +27,7 @@ fn probe(client: &reqwest::blocking::Client, login: &wb_api::LoginInfo, method: 
         Ok(r) => {
             let code = r.status().as_u16();
             let body = r.text().unwrap_or_default();
-            let snip: String = body.chars().take(120).collect();
+            let snip: String = body.chars().take(4000).collect();
             (code, snip)
         }
         Err(e) => (0, format!("网络错误: {e}")),
@@ -144,5 +144,72 @@ fn probe_invite_and_usage() {
         let (code, snip) = probe(&client, &login, method, path, body);
         println!("{:<26} {:<4} {}", name, code, snit(&snip));
         std::thread::sleep(std::time::Duration::from_millis(300));
+    }
+}
+
+#[test]
+#[ignore]
+fn probe_growth_tasks() {
+    // 探成长任务的只读接口（任务列表/进度）——看能不能不做行为模拟也能"领奖励"
+    let home = std::env::var("HOME").unwrap_or_default();
+    let p = std::path::PathBuf::from(&home)
+        .join(".workbuddy-account-hub/vault/4c6af085-6a28-4c45-8025-099590dac28a/snapshot/auth.info");
+    let Some(login) = wb_api::login_from_file(&p) else { println!("快照不存在"); return; };
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(12)).build().unwrap();
+    for path in [
+        "/activity/growth/task", "/activity/growth/tasks", "/activity/growth/task/list",
+        "/activity/growth/mission", "/activity/growth/missions", "/activity/growth/quest",
+        "/activity/growth/task/status", "/activity/growth/reward", "/activity/growth/checkin",
+    ] {
+        let (code, snip) = probe(&client, &login, "GET", path, "");
+        println!("{:<34} {:<4} {}", path, code, snit(&snip));
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+}
+
+#[test]
+#[ignore]
+fn dump_growth_tasks() {
+    let home = std::env::var("HOME").unwrap_or_default();
+    let p = std::path::PathBuf::from(&home)
+        .join(".workbuddy-account-hub/vault/4c6af085-6a28-4c45-8025-099590dac28a/snapshot/auth.info");
+    let Some(login) = wb_api::login_from_file(&p) else { println!("快照不存在"); return; };
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(12)).build().unwrap();
+    let (code, body) = probe(&client, &login, "GET", "/activity/growth/tasks", "");
+    println!("status={code}");
+    // 打印前 3 个任务的完整字段，判断是否有 claim 能力
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(&body) {
+        if let Some(tasks) = v.get("data").and_then(|d| d.get("tasks")).and_then(|t| t.as_array()) {
+            println!("任务总数: {}", tasks.len());
+            for t in tasks.iter().take(3) {
+                println!("{}", serde_json::to_string_pretty(t).unwrap_or_default());
+            }
+        } else {
+            println!("原始: {}", &body[..body.len().min(800)]);
+        }
+    }
+}
+
+#[test]
+#[ignore]
+fn probe_task_claim() {
+    let home = std::env::var("HOME").unwrap_or_default();
+    let p = std::path::PathBuf::from(&home)
+        .join(".workbuddy-account-hub/vault/4c6af085-6a28-4c45-8025-099590dac28a/snapshot/auth.info");
+    let Some(login) = wb_api::login_from_file(&p) else { println!("快照不存在"); return; };
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(12)).build().unwrap();
+    // 只探测路由是否存在：用不存在的 task_id，真正领取由用户手动触发
+    for (m, path, body) in [
+        ("POST", "/activity/growth/tasks/claim", r#"{"task_id":0}"#),
+        ("POST", "/activity/growth/tasks/1/claim", r#"{}"#),
+        ("POST", "/activity/growth/task/claim", r#"{"task_id":0}"#),
+        ("POST", "/activity/growth/reward/claim", r#"{"task_id":0}"#),
+    ] {
+        let (code, snip) = probe(&client, &login, m, path, body);
+        println!("{:<38} {:<4} {}", path, code, snit(&snip));
+        std::thread::sleep(std::time::Duration::from_millis(250));
     }
 }

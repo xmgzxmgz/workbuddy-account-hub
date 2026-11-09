@@ -55,32 +55,59 @@ fn pid_alive(pid: u32) -> bool {
 }
 
 /// 确保单实例：若已被另一存活实例占用则退出；陈旧锁自动清理后占位。
+/// 锁文件「新鲜度」阈值：心跳每 10s 重写一次，超过 30s 没更新视为陈旧锁。
+/// 这是 v0.6.29 修的回归：只靠 pid + `kill -0` 判活会被 **PID 复用**骗过
+/// （旧实例退出后 pid 可能被别的进程占用），导致新实例以为自己"已在运行"而静默退出。
+const LOCK_STALE_SECS: u64 = 30;
+
+fn lock_recent(p: &std::path::Path) -> bool {
+    std::fs::metadata(p)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.elapsed().ok())
+        .map(|d| d.as_secs() < LOCK_STALE_SECS)
+        .unwrap_or(false)
+}
+
+fn write_lock(p: &std::path::Path) -> bool {
+    std::fs::write(p, std::process::id().to_string()).is_ok()
+}
+
+/// 心跳：运行期间每 10s 重写锁文件刷新 mtime（内容仍是本进程 pid）。
+/// 进程退出/崩溃后心跳停止，30s 后锁自动失效，不会再卡住下一次启动。
+fn spawn_lock_heartbeat(p: std::path::PathBuf) {
+    std::thread::spawn(move || loop {
+        std::thread::sleep(std::time::Duration::from_secs(10));
+        let mine = std::fs::read_to_string(&p)
+            .ok()
+            .map(|s| s.trim() == std::process::id().to_string())
+            .unwrap_or(false);
+        if mine { let _ = write_lock(&p); } else { break; }
+    });
+}
+
 fn ensure_single_instance() -> bool {
     let p = instance_lock_path();
     if let Some(parent) = p.parent() { let _ = std::fs::create_dir_all(parent); }
-    // v0.6.27：改用 create_new 原子创建——旧的「读 pid → 判存活 → 写入」三步在
-    // 两实例同时启动时存在 TOCTOU 竞态，可能双开。O_EXCL 让"抢锁"一步完成；
-    // 抢锁失败再读内容判断对方是否真活着（陈旧锁则接管）。
+    // 原子抢锁（create_new / O_EXCL）避免两实例同时启动的双开竞态
     match std::fs::OpenOptions::new().write(true).create_new(true).open(&p) {
         Ok(mut f) => {
             use std::io::Write;
             let _ = f.write_all(std::process::id().to_string().as_bytes());
+            drop(f);
+            spawn_lock_heartbeat(p);
             true
         }
         Err(_) => {
+            // 锁已存在：只有「进程活着 且 心跳新鲜」才算真的在运行
             let alive = std::fs::read_to_string(&p)
                 .ok()
                 .and_then(|s| s.trim().parse::<u32>().ok())
                 .map(pid_alive)
                 .unwrap_or(false);
-            if alive { return false; }
+            if alive && lock_recent(&p) { return false; }
             let _ = std::fs::remove_file(&p);
-            std::fs::OpenOptions::new().write(true).create_new(true).open(&p)
-                .and_then(|mut f| {
-                    use std::io::Write;
-                    f.write_all(std::process::id().to_string().as_bytes())
-                })
-                .is_ok()
+            if write_lock(&p) { spawn_lock_heartbeat(p); true } else { false }
         }
     }
 }
@@ -445,6 +472,208 @@ async fn checkin_all() -> Value {
 /// 查询所有「已保存登录态」账号的额度，按登记表原始顺序返回。
 /// v0.6.2 性能重写：async + spawn_blocking（不冻结 UI）+ 账号间并行请求
 /// （原串行 5 账号 × 每账号最多 15s → 现总耗时 = 最慢单账号，通常 1~3s）。
+// ===== v0.6.29：Roadmap 功能（webhook 通知 / 自动续期 / 会话复制）=====
+
+/// 通知 webhook：支持 Bark（GET {url}/{title}/{body}）与企业微信群机器人（POST JSON）。
+/// 只做「推一条文本」，不重试、不排队——失败由调用方提示，避免影响主流程。
+/// 成长任务列表（宠物 tab 展示；企业形态自动降级个人版快照）
+#[tauri::command]
+fn growth_tasks() -> Value {
+    let vault = ops::vault_dir();
+    let Some(key) = ops::current_account_key() else { return json!({ "ok": false, "error": "未找到本机登录态" }) };
+    match growth_login_for(&vault, &key) {
+        Some(l) => api::growth_tasks_as(&l),
+        None => json!({ "ok": false, "error": "登录态文件缺失或无效" }),
+    }
+}
+
+/// 领取单个已完成任务的奖励
+#[tauri::command]
+fn growth_task_claim(task_id: i64) -> Value {
+    let vault = ops::vault_dir();
+    let Some(key) = ops::current_account_key() else { return json!({ "ok": false, "error": "未找到本机登录态" }) };
+    match growth_login_for(&vault, &key) {
+        Some(l) => api::growth_task_claim_as(&l, task_id),
+        None => json!({ "ok": false, "error": "登录态文件缺失或无效" }),
+    }
+}
+
+#[tauri::command]
+fn send_webhook(kind: String, url: String, title: String, body: String) -> Value {
+    api::send_webhook(&kind, &url, &title, &body)
+}
+
+/// 自动续期守护：扫描所有账号快照，把「即将过期 / 已吊销」且非当前登录的账号自动续期。
+/// 返回逐账号结果。由前端定时（默认关闭，需在设置里开启）调用。
+#[tauri::command]
+fn auto_refresh_sweep(days: Option<i64>) -> Value {
+    let days = days.unwrap_or(7);
+    let vault = ops::vault_dir();
+    let cur = ops::current_account_key();
+    let accs = ops::list_accounts(&vault);
+    let mut out = Vec::new();
+    let mut refreshed = 0;
+    let mut failed = 0;
+    let mut skipped = 0;
+    for a in accs {
+        if cur.as_deref() == Some(a.key.as_str()) {
+            // 当前登录态的 token 由客户端自己续，Hub 不动它（避免与客户端抢 RT 轮换）
+            skipped += 1; continue;
+        }
+        if !a.has_snapshot { skipped += 1; continue; }
+        let snap = vault.join(&a.key).join("snapshot").join("auth.info");
+        let Ok(txt) = std::fs::read_to_string(&snap) else { skipped += 1; continue };
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(&txt) else { skipped += 1; continue };
+        let exp = v.get("auth").and_then(|x| x.get("expiresAt")).and_then(|x| x.as_i64()).unwrap_or(0);
+        let left_ms = exp - chrono_now_ms();
+        let need = exp == 0 || left_ms < days * 24 * 3600 * 1000;
+        if !need { skipped += 1; continue; }
+        match ops::refresh_account(&vault, &a.key) {
+            Ok(r) => {
+                refreshed += 1;
+                out.push(json!({ "key": a.key, "nickname": a.nickname, "ok": true, "at_days_after": r.at_days_after }));
+            }
+            Err(e) => {
+                failed += 1;
+                out.push(json!({ "key": a.key, "nickname": a.nickname, "ok": false, "error": e }));
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(400)); // 账号间限速，避免风控
+    }
+    json!({ "ok": true, "refreshed": refreshed, "failed": failed, "skipped": skipped, "results": out })
+}
+
+/// 会话复制（跨账号，源不受影响）：把 from 账号的本地会话**复制**一份给 to 账号。
+/// 与切换时的「搬移」不同——这里生成新 id 的副本，源账号照常可见。
+/// 注意：只处理本地 workbuddy.db；云端会话需客户端自行同步。
+#[tauri::command]
+fn copy_sessions(from_key: String, to_key: String) -> Value {
+    match ops::copy_sessions(&from_key, &to_key) {
+        Ok(v) => v,
+        Err(e) => json!({ "ok": false, "error": e }),
+    }
+}
+
+// ===== OpenAI 兼容网关（v0.6.29，自 workbuddy2api-hub 的思路，仅本机可用）=====
+//
+// 设计取舍：只监听 127.0.0.1（绝不 0.0.0.0），默认端口 8787。
+// 账号选择用请求头 `X-WB-Account`（账号键或 uid 前 8 位），缺省用当前登录态。
+// 上游仍是官方 /v2/chat/completions——Hub 只做协议转发，不伪造客户端身份、
+// 不做多账号轮询压榨额度（那才是风控高发区）。
+use std::sync::atomic::{AtomicBool, AtomicU16};
+
+static GW_RUNNING: AtomicBool = AtomicBool::new(false);
+static GW_PORT: AtomicU16 = AtomicU16::new(0);
+
+fn gw_pick_login(sel: &str) -> Option<wb_api::LoginInfo> {
+    let vault = ops::vault_dir();
+    if sel.trim().is_empty() {
+        return ops::current_account_key().and_then(|k| account_login(&vault, &k));
+    }
+    let accs = ops::list_accounts(&vault);
+    let key = accs.iter()
+        .find(|a| a.key == sel || a.uid == sel || a.uid.starts_with(sel))
+        .map(|a| a.key.clone())?;
+    account_login(&vault, &key)
+}
+
+async fn gw_models() -> axum::response::Response {
+    let vault = ops::vault_dir();
+    let accs = ops::list_accounts(&vault);
+    let data: Vec<serde_json::Value> = accs.iter().map(|a| json!({
+        "id": a.key,
+        "object": "model",
+        "owned_by": if a.form == "enterprise" { "enterprise" } else { "personal" },
+        "name": a.nickname,
+    })).collect();
+    axum::Json(json!({ "object": "list", "data": data })).into_response()
+}
+
+use axum::response::IntoResponse;
+
+async fn gw_chat(headers: axum::http::HeaderMap, body: axum::body::Bytes) -> axum::response::Response {
+    let sel = headers.get("x-wb-account").and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
+    let Some(login) = gw_pick_login(&sel) else {
+        return (axum::http::StatusCode::UNAUTHORIZED,
+            axum::Json(json!({ "error": { "message": "找不到可用账号（X-WB-Account 未匹配到已保存登录态）", "type": "invalid_request_error" } })))
+            .into_response();
+    };
+    let client = match reqwest::Client::builder().timeout(std::time::Duration::from_secs(300)).build() {
+        Ok(c) => c,
+        Err(e) => return (axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            axum::Json(json!({ "error": { "message": format!("client: {e}") } }))).into_response(),
+    };
+    let url = format!("{}/v2/chat/completions", wb_api::api_base(&login));
+    let resp = client.post(&url)
+        .header("Authorization", format!("Bearer {}", login.token))
+        .header("Content-Type", "application/json")
+        .header("X-User-Id", &login.uid)
+        .header("X-Product", "SaaS")
+        .body(body.to_vec())
+        .send().await;
+    match resp {
+        Ok(r) => {
+            let status = r.status();
+            // 流式透传：SSE 必须保持 chunked，不能整体缓冲
+            let stream = r.bytes_stream();
+            let mut out = axum::response::Response::new(axum::body::Body::from_stream(stream));
+            *out.status_mut() = status;
+            out.headers_mut().insert(
+                axum::http::header::CONTENT_TYPE,
+                axum::http::HeaderValue::from_static("text/event-stream"),
+            );
+            out
+        }
+        Err(e) => (axum::http::StatusCode::BAD_GATEWAY,
+            axum::Json(json!({ "error": { "message": format!("上游请求失败: {e}") } }))).into_response(),
+    }
+}
+
+#[tauri::command]
+async fn start_gateway(port: Option<u16>) -> Value {
+    if GW_RUNNING.load(Ordering::Relaxed) {
+        return json!({ "ok": true, "already": true, "port": GW_PORT.load(Ordering::Relaxed) });
+    }
+    let port = port.unwrap_or(8787);
+    let app = axum::Router::new()
+        .route("/v1/models", axum::routing::get(gw_models))
+        .route("/v1/chat/completions", axum::routing::post(gw_chat));
+    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+    let listener = match tokio::net::TcpListener::bind(addr).await {
+        Ok(l) => l,
+        Err(e) => return json!({ "ok": false, "error": format!("端口 {port} 绑定失败: {e}") }),
+    };
+    GW_RUNNING.store(true, Ordering::Relaxed);
+    GW_PORT.store(port, Ordering::Relaxed);
+    tauri::async_runtime::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+        GW_RUNNING.store(false, Ordering::Relaxed);
+    });
+    json!({ "ok": true, "port": port, "base_url": format!("http://127.0.0.1:{port}/v1") })
+}
+
+#[tauri::command]
+fn stop_gateway() -> Value {
+    // 没有优雅关闭句柄：置位后由前端停止调用；下次启动会重新绑定
+    GW_RUNNING.store(false, Ordering::Relaxed);
+    json!({ "ok": true, "note": "已停止接收新请求（监听 socket 将在进程退出时释放）" })
+}
+
+#[tauri::command]
+fn gateway_status() -> Value {
+    json!({
+        "running": GW_RUNNING.load(Ordering::Relaxed),
+        "port": GW_PORT.load(Ordering::Relaxed),
+    })
+}
+
+fn chrono_now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
 #[tauri::command]
 fn get_invite() -> Value {
     match ops::current_account_key().and_then(|k| account_login(&ops::vault_dir(), &k)) {
@@ -1109,6 +1338,14 @@ pub fn run() {
             get_quota,
             get_invite,
             enterprise_usage,
+            send_webhook,
+            growth_tasks,
+            growth_task_claim,
+            auto_refresh_sweep,
+            copy_sessions,
+            start_gateway,
+            stop_gateway,
+            gateway_status,
             get_checkin,
             get_memory,
             do_checkin,

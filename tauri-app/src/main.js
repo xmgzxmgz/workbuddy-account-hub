@@ -1173,6 +1173,140 @@ function confirmDismiss(v) {
   if (r) r(v);
 }
 
+// ===== 成长任务（v0.6.29）：展示进度 + 领取已完成任务的奖励 =====
+async function loadGrowthTasks() {
+  const box = $('gt-list'); if (!box) return;
+  box.textContent = '加载中…';
+  const r = await invoke('growth_tasks').catch(e => ({ ok: false, error: String(e) }));
+  if (!r || !r.ok) {
+    box.innerHTML = `<span class="empty">${escapeHtml((r && r.error) || '加载失败')}</span>`;
+    return;
+  }
+  const pg = $('gt-progress'); if (pg) pg.textContent = `${r.done}/${r.total} 已完成`;
+  box.innerHTML = (r.tasks || []).map(t => {
+    const done = t.status && t.status !== 'available';
+    const btn = done
+      ? `<button class="mini" onclick="claimGrowthTask(${Number(t.task_id) || 0})">领取</button>`
+      : '<span class="empty" style="font-size:10px;">待完成</span>';
+    return `<div class="item"><span class="k">${escapeHtml(t.title || '')}`
+      + (t.level_name ? ` <span style="color:var(--muted);font-size:10px;">· ${escapeHtml(t.level_name)}</span>` : '')
+      + `</span><span class="v">${btn}</span></div>`;
+  }).join('') || '<span class="empty">没有任务</span>';
+}
+
+async function claimGrowthTask(taskId) {
+  const r = await invoke('growth_task_claim', { taskId }).catch(e => ({ ok: false, error: String(e) }));
+  if (r && r.ok) { toast('奖励已领取', 'ok'); loadGrowthTasks(); }
+  else toast('领取失败: ' + ((r && r.error) || '未知'), 'err');
+}
+
+// ===== 高级工具面板（v0.6.29：webhook / 自动续期 / 会话复制 / OpenAI 网关）=====
+const TOOLS_KEY = 'acc_hub_tools_v1';
+function toolsCfg() { try { return JSON.parse(localStorage.getItem(TOOLS_KEY)) || {}; } catch (e) { return {}; } }
+function saveToolsCfg(patch) {
+  const c = Object.assign(toolsCfg(), patch);
+  try { localStorage.setItem(TOOLS_KEY, JSON.stringify(c)); } catch (e) {}
+  return c;
+}
+
+function renderToolsPanel() {
+  const c = toolsCfg();
+  const kind = $('wh-kind'), url = $('wh-url');
+  if (kind) kind.value = c.whKind || 'bark';
+  if (url && !url.value) url.value = c.whUrl || '';
+  const ar = $('ar-state'), arBtn = $('ar-btn');
+  if (ar) ar.textContent = c.autoRefresh ? '已开启（每 30 分钟扫描）' : '已关闭';
+  if (arBtn) arBtn.textContent = c.autoRefresh ? '关闭守护' : '开启守护';
+  const gwS = $('gw-state'), gwU = $('gw-url'), gwBtn = $('gw-btn');
+  if (gwS) gwS.textContent = c.gwRunning ? '运行中' : '未启动';
+  if (gwU) gwU.textContent = c.gwRunning ? `http://127.0.0.1:${c.gwPort || 8787}/v1` : '—';
+  if (gwBtn) gwBtn.textContent = c.gwRunning ? '停止网关' : '启动网关';
+  // 会话复制的账号下拉
+  for (const id of ['cp-from', 'cp-to']) {
+    const el = $(id); if (!el) continue;
+    const cur = el.value;
+    el.innerHTML = (accountsCache || []).map(a =>
+      `<option value="${escapeHtml(a.key || a.uid)}">${escapeHtml(acctLabel(a))}${a.form === 'enterprise' ? '（企业）' : ''}</option>`).join('');
+    if (cur) el.value = cur;
+  }
+}
+
+function saveWebhook() {
+  const url = ($('wh-url') || {}).value || '';
+  saveToolsCfg({ whKind: ($('wh-kind') || {}).value || 'bark', whUrl: url.trim() });
+  if ($('wh-state')) $('wh-state').textContent = '已保存';
+}
+
+async function pushWebhook(title, body) {
+  const c = toolsCfg();
+  if (!c.whUrl) return { ok: false, error: '未配置 webhook' };
+  return invoke('send_webhook', { kind: c.whKind || 'bark', url: c.whUrl, title, body }).catch(e => ({ ok: false, error: String(e) }));
+}
+
+async function testWebhook() {
+  saveWebhook();
+  const r = await pushWebhook('账户中枢测试', '如果你收到这条消息，说明 webhook 配置成功。');
+  if ($('wh-state')) $('wh-state').textContent = r && r.ok ? '✓ 已发送' : ('✗ ' + ((r && r.error) || '失败'));
+}
+
+let arTimer = null;
+function toggleAutoRefresh() {
+  const c = toolsCfg();
+  const on = !c.autoRefresh;
+  saveToolsCfg({ autoRefresh: on });
+  if (arTimer) { clearInterval(arTimer); arTimer = null; }
+  if (on) {
+    arTimer = setInterval(() => { runAutoRefresh(true); }, 30 * 60 * 1000);  // 30 分钟
+    NotifyCenter.push('自动续期守护已开启：每 30 分钟扫描一次，仅续期 7 天内过期且非当前登录的账号', 'ok');
+  } else {
+    NotifyCenter.push('自动续期守护已关闭', '');
+  }
+  renderToolsPanel();
+}
+
+async function runAutoRefresh(silent) {
+  const r = await invoke('auto_refresh_sweep', { days: 7 }).catch(e => ({ ok: false, error: String(e) }));
+  if (!r || r.ok === false) { if (!silent) toast('续期扫描失败: ' + ((r && r.error) || '未知')); return; }
+  const msg = `续期扫描：成功 ${r.refreshed} · 失败 ${r.failed} · 跳过 ${r.skipped}`;
+  if (!silent) toast(msg, r.failed ? 'err' : 'ok');
+  NotifyCenter.push(msg + ((r.results || []).filter(x => !x.ok && x.error).map(x => `\n✗ ${x.nickname || x.key}: ${x.error}`).join('')), r.failed ? 'err' : 'ok');
+  if (r.refreshed || r.failed) pushWebhook('账户中枢 · 续期结果', msg);
+  refreshAccounts();
+}
+
+async function doCopySessions() {
+  const from = ($('cp-from') || {}).value, to = ($('cp-to') || {}).value;
+  if (!from || !to) { toast('请选择源账号与目标账号'); return; }
+  if (from === to) { toast('源与目标不能相同'); return; }
+  const ok = await confirmModal('会为每个会话生成一个带「（副本）」标记的新会话，归到目标账号名下。\n源账号的会话不受影响。复制前会自动备份 workbuddy.db。', '确认复制会话？', '复制');
+  if (!ok) return;
+  const r = await invoke('copy_sessions', { fromKey: from, toKey: to }).catch(e => ({ ok: false, error: String(e) }));
+  if ($('cp-state')) $('cp-state').textContent = r && r.ok ? `✓ 已复制 ${r.copied} 条` : ('✗ ' + ((r && r.error) || '失败'));
+  toast(r && r.ok ? `已复制 ${r.copied} 条会话` : ('复制失败: ' + ((r && r.error) || '')), r && r.ok ? 'ok' : 'err');
+}
+
+async function toggleGateway() {
+  const c = toolsCfg();
+  if (c.gwRunning) {
+    await invoke('stop_gateway').catch(() => {});
+    saveToolsCfg({ gwRunning: false });
+    NotifyCenter.push('OpenAI 网关已停止（本进程内的监听会保持到退出，重启 Hub 彻底释放端口）', '');
+  } else {
+    const r = await invoke('start_gateway', { port: 8787 }).catch(e => ({ ok: false, error: String(e) }));
+    if (!r || !r.ok) { toast('网关启动失败: ' + ((r && r.error) || '')); return; }
+    saveToolsCfg({ gwRunning: true, gwPort: r.port });
+    NotifyCenter.push(`OpenAI 网关已启动：${r.base_url}\n账号选择用请求头 X-WB-Account（账号键或 uid 前缀）`, 'ok');
+  }
+  renderToolsPanel();
+}
+
+function copyGatewayUrl() {
+  const c = toolsCfg();
+  if (!c.gwRunning) { toast('网关未启动'); return; }
+  navigator.clipboard.writeText(`http://127.0.0.1:${c.gwPort || 8787}/v1`);
+  toast('已复制网关地址', 'ok');
+}
+
 // ===== 今日战报（v0.6.28，自 wokbuddy-demon「战报」启发）=====
 // 汇总：账号数 / 最早到期积分 / 临期告警 / 邀请码 → 推送通知中心 + 弹窗展示
 function buildDailyReport() {
@@ -1204,6 +1338,7 @@ function buildDailyReport() {
   NotifyCenter.push(msg, warns ? 'err' : 'ok');
   toast(warns ? `战报已生成：${warns} 条临期告警` : '战报已生成，见右上角 🔔', warns ? 'err' : 'ok');
   // 同时在报告弹窗展示（复用 raw-out 区域）
+  if (toolsCfg().whUrl) pushWebhook('账户中枢 · 今日战报', msg);
   const ro = $('raw-out');
   if (ro) ro.innerHTML = `<pre style="white-space:pre-wrap;font-size:12px;line-height:1.7;">${escapeHtml(msg)}</pre>`;
 }
@@ -1889,6 +2024,7 @@ async function loadAll() {
     const ro = $('raw-out'); if (ro) ro.textContent = '错误：' + e;
     throw e; // 让 bootBootstrap 的重试机制接管
   }  loadProfileExtras();
+  renderToolsPanel();
 }
 
 // 额度/签到/记忆分开独立拉取（后端各自带 15s 超时），
@@ -2184,7 +2320,7 @@ async function restartWB() {
 
 // 暴露给 inline onclick（安全：未定义的函数跳过，不影响其余，更不阻断 bootBootstrap）
 (function expose(){
-  const names = ['addModel','editModel','buildDailyReport','delModel','testModel','testCurrentForm','saveModel','closeModelModal','restartWB','loadAll','loadQuota','doCheckin','openReport','closeReport','copyReport','ensureSnapshot','backupAll','saveCurrentLogin','switchTo','openBackups','renderBackups','openBackupDetail','closeBackups','closeBackupDetail','loadBuddy','buddyDepart','buddyClaim','buddyDepartAll','buddyClaimAll','buddyDepartFor','buddyClaimFor','refreshBuddyAll','doCheckinAll','loadQuotaAll','qaCheckinFor','toggleAllKeys','refreshAll','uhRefresh','uhExportJson','uhExportCsv','loadMemoryAll','qaToggleRank','exportQuotaMd','applyQuotaAllFilters','toggleStar','openTagInput'];
+  const names = ['addModel','editModel','buildDailyReport','delModel','testModel','testCurrentForm','saveModel','closeModelModal','restartWB','loadAll','loadQuota','doCheckin','openReport','closeReport','copyReport','ensureSnapshot','backupAll','saveCurrentLogin','switchTo','openBackups','renderBackups','openBackupDetail','closeBackups','closeBackupDetail','loadBuddy','buddyDepart','buddyClaim','buddyDepartAll','buddyClaimAll','buddyDepartFor','buddyClaimFor','refreshBuddyAll','doCheckinAll','loadQuotaAll','qaCheckinFor','toggleAllKeys','refreshAll','uhRefresh','uhExportJson','uhExportCsv','loadMemoryAll','qaToggleRank','exportQuotaMd','applyQuotaAllFilters','toggleStar','openTagInput','saveWebhook','testWebhook','toggleAutoRefresh','runAutoRefresh','doCopySessions','toggleGateway','copyGatewayUrl','loadGrowthTasks','claimGrowthTask'];
   for (const n of names) {
     try {
       const fn = eval(n);
@@ -2422,9 +2558,11 @@ function guessTab(text) {
   if (t.includes('签到')) return 'checkin';
   if (t.includes('额度')) return 'quota';
   if (t.includes('登录态健康')) return 'health';
-  if (t.includes('宠物') || t.includes('盲盒')) return 'pet';
+  if (t.includes('宠物') || t.includes('盲盒') || t.includes('成长任务')) return 'pet';
+  if (t.includes('工具') || t.includes('自动化')) return 'tools';
   if (t.includes('记忆')) return 'memory';
   if (t.includes('API') || t.includes('用量')) return 'tools';
+  if (t.includes('工具') || t.includes('自动化')) return 'tools';
   return 'account';
 }
 function showTab(tab) {
@@ -2452,6 +2590,7 @@ function showTab(tab) {
 bootLog('脚本末尾：bootBootstrap 已调用');
 
 showTab('account');
+if (toolsCfg().autoRefresh) { arTimer = setInterval(() => { runAutoRefresh(true); }, 30 * 60 * 1000); }
 // ===== B 方案：低频区块默认折叠（v0.6.27）=====
 // 首屏只保留核心（账户信息 / 签到 / 额度趋势 / 登录态健康），
 // 批量与长尾功能（全部账号*、宠物、AI 记忆、API、用量）默认收起，点击标题展开。

@@ -783,6 +783,71 @@
       </div>
     </div>
 
+    <div class="section-title">成长任务 🎯</div>
+    <div class="grid">
+      <div class="panel">
+        <h2>成长任务 <span class="tag" id="gt-progress">—</span> <span style="flex:1"></span>
+          <button class="mini" onclick="loadGrowthTasks()">加载任务</button></h2>
+        <div id="gt-list" style="font-size:11.5px;line-height:1.9;max-height:280px;overflow:auto;">
+          <span class="empty">点击「加载任务」查看进度。任务完成由官方按真实使用行为判定（对话/装技能/链微信等），Hub 只能展示进度并领取已完成任务的奖励。</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="section-title">高级工具 · 自动化 🧰</div>
+    <div class="grid" id="tools-grid">
+      <div class="panel">
+        <h2>通知 Webhook <span class="tag">Bark / 企业微信</span></h2>
+        <div class="kv" style="font-size:11.5px;line-height:1.7;">
+          <div class="item"><span class="k">类型</span><span class="v">
+            <select id="wh-kind" style="background:var(--bg-2);border:1px solid var(--line);border-radius:6px;color:var(--fg);padding:3px 6px;">
+              <option value="bark">Bark（iOS 推送）</option>
+              <option value="wecom">企业微信群机器人</option>
+            </select></span></div>
+          <div class="item"><span class="k">地址</span><span class="v"><input id="wh-url" placeholder="https://api.day.app/xxxx 或 企微 webhook" style="width:100%;background:var(--bg-2);border:1px solid var(--line);border-radius:6px;color:var(--fg);padding:4px 6px;font-size:11.5px;"></span></div>
+        </div>
+        <div style="display:flex;gap:8px;margin-top:8px;">
+          <button class="mini" onclick="saveWebhook()">保存</button>
+          <button class="mini" onclick="testWebhook()">发送测试</button>
+          <span class="empty" id="wh-state" style="font-size:10.5px;"></span>
+        </div>
+      </div>
+      <div class="panel">
+        <h2>自动续期守护 <span class="tag">RT 会轮换，默认关闭</span></h2>
+        <div class="kv" style="font-size:11.5px;line-height:1.7;">
+          <div class="item"><span class="k">状态</span><span class="v" id="ar-state">已关闭</span></div>
+          <div class="item"><span class="k">阈值</span><span class="v">剩余 &lt; 7 天的账号自动续期（跳过当前登录态）</span></div>
+        </div>
+        <div style="display:flex;gap:8px;margin-top:8px;">
+          <button class="mini" onclick="toggleAutoRefresh()" id="ar-btn">开启守护</button>
+          <button class="mini" onclick="runAutoRefresh()">立即扫描</button>
+        </div>
+      </div>
+      <div class="panel">
+        <h2>会话复制 <span class="tag">源账号不受影响</span></h2>
+        <div class="kv" style="font-size:11.5px;line-height:1.7;">
+          <div class="item"><span class="k">从</span><span class="v"><select id="cp-from" style="background:var(--bg-2);border:1px solid var(--line);border-radius:6px;color:var(--fg);padding:3px 6px;max-width:200px;"></select></span></div>
+          <div class="item"><span class="k">到</span><span class="v"><select id="cp-to" style="background:var(--bg-2);border:1px solid var(--line);border-radius:6px;color:var(--fg);padding:3px 6px;max-width:200px;"></select></span></div>
+        </div>
+        <div style="display:flex;gap:8px;margin-top:8px;">
+          <button class="mini" onclick="doCopySessions()">复制会话</button>
+          <span class="empty" id="cp-state" style="font-size:10.5px;"></span>
+        </div>
+      </div>
+      <div class="panel">
+        <h2>OpenAI 兼容网关 <span class="tag">仅 127.0.0.1</span></h2>
+        <div class="kv" style="font-size:11.5px;line-height:1.7;">
+          <div class="item"><span class="k">状态</span><span class="v" id="gw-state">未启动</span></div>
+          <div class="item"><span class="k">Base URL</span><span class="v" id="gw-url">—</span></div>
+          <div class="item"><span class="k">账号选择</span><span class="v">请求头 <code>X-WB-Account</code>（账号键或 uid 前缀），缺省用当前登录态</span></div>
+        </div>
+        <div style="display:flex;gap:8px;margin-top:8px;">
+          <button class="mini" onclick="toggleGateway()" id="gw-btn">启动网关</button>
+          <button class="mini" onclick="copyGatewayUrl()">复制地址</button>
+        </div>
+      </div>
+    </div>
+
     <div class="section-title">API 管理</div>
 
     <div class="panel" style="margin-top:12px;">
