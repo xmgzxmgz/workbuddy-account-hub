@@ -13,11 +13,11 @@
 - **两个原因叠加**：
   1. **v0.6.24 埋的隐患（本次修复）**：`switch_account` 的参数变成账号键（企业版形如
      `<uid>@<eid>`），若直接用它改写 `sessions.user_id`，客户端按纯 uid 查询会一条都找不到。
-  2. 该账号本身本地会话为 0（实测 `a1b2c3d4` 名下 0 条，`b2c3d4e5` 名下 336 条）。
+  2. 该账号本身本地会话为 0（实测 A 账号名下 0 条，B 账号名下 336 条）。
 - **修法（key 与 uid 严格分离）**：
   - vault 路径、`switch_auth_to` 用 **key**
   - `workbuddy.db` 的 `sessions.user_id`、`local_storage` 合并、置顶状态迁移用**纯 uid**
-  - 搬移判断改用纯 uid 比较：**跨账号切换照样搬**（b2c3d4e5 → a1b2c3d4，会话跟着过去），
+  - 搬移判断改用纯 uid 比较：**跨账号切换照样搬**（B 账号 → A 账号，会话跟着过去），
     而**同一账号的个人版 ⇄ 企业版互相切换不搬**（同 uid，本来就共用同一批对话）
 - **语义确认**：切换仍是「搬」不是「复制」——搬走后源账号看不到这些对话，回滚用
   `vault/<cid>/history/<ts>/workbuddy.db.bak`。
@@ -70,7 +70,7 @@
 
 ## v0.6.23（2026-11-04）— 📐 修复侧栏账号行被操作按钮挤爆
 
-- **现象**：账号行里昵称只剩「138****...」、`某账号` 被压成「星黎」+ 换行、UID 只剩「4c6a...8a」。
+- **现象**：账号行里昵称被压成两行、UID 只剩「xxxx...」、手机号被截断显示。
 - **根因**：行内并排了 4 个 `flex-shrink:0` 元素（dot 27 + 切换按钮 48 + ★/🏷/🗑 共 74 + gap），
   把 `.info` 压到只剩 **66px**；而手机号掩码本身就要 ~70px，必然溢出成省略号。
 - **修法**：把 ★ / 🏷 / 🗑 收进一个「⋯」浮动菜单，行内只留「切换 + ⋯」，
@@ -187,9 +187,9 @@
   - `account_ops::refresh_account` 四道保险：① 续期前把快照 `auth.info` 备份到 `history/<ts>/`；② 目标是当前登录账号且客户端在跑时**直接拒绝**（避免和客户端抢同一个 RT 把客户端踢下线）；③ 只覆盖服务端确实返回的字段（响应未带 refreshToken 时保留旧值，绝不把 RT 清空）；④ 重新封信封 + 原子写，写失败明确告知「需重新登录」。
   - 新增 ♻️「批量续期」：只处理 `expiring`/`revoked` 且非当前登录的账号，串行 + 800ms 间隔防风控。
 - **验证（真实账号，macOS 5.8.3）**
-  - 三态预检：5 个账号 → `{ok:4, revoked:1}`，`c3d4e5f6`（某账号）确认为「JWT 被吊销」型 401。
-  - 续期：`b2c3d4e5` 实测成功，AT 29.9 → 30.0 天，RT 60.0 天，`rotated=true`，快照回写后 token 仍是 `$wbEncrypted` 信封、无明文残留。
-  - 反例：`c3d4e5f6` 续期失败 `invalid_grant: Session doesn't have required client` —— 该账号的 session 已被服务端连 RT 一起清理，**只能重新登录**，这印证了「401 账号未必能靠续期自救」。
+  - 三态预检：5 个账号 → `{ok:4, revoked:1}`，其中之一确认为「JWT 被吊销」型 401。
+  - 续期：另一账号实测成功，AT 29.9 → 30.0 天，RT 60.0 天，`rotated=true`，快照回写后 token 仍是 `$wbEncrypted` 信封、无明文残留。
+  - 反例：该账号续期失败 `invalid_grant: Session doesn't have required client` —— 该账号的 session 已被服务端连 RT 一起清理，**只能重新登录**，这印证了「401 账号未必能靠续期自救」。
 - **新增测试**：`account_ops/tests/preflight_real.rs`（三态分布，纯只读）、`account_ops/tests/refresh_real.rs`（`REFRESH_UID` 指定目标，未设置则跳过）。
 - bump 0.6.16 → 0.6.17
 

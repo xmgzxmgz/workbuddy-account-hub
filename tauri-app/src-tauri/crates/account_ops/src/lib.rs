@@ -140,7 +140,7 @@ pub fn current_uid() -> Option<String> {
 // 背景（v0.6.24）：同一个 OneID 账号可以同时拥有个人版与企业版身份，
 // 两者 **uid 完全相同**，只差 `account.type`（personal / ultimate）与
 // `account.enterpriseId`。此前 vault 以 uid 作目录名，两种形态共用同一个槽位，
-// 结果是「切一次覆盖一份」——实测 a1b2c3d4 的 history 里能看到 ultimate 与
+// 结果是「切一次覆盖一份」——实测同一账号的 history 里能看到 ultimate 与
 // personal 反复互相顶掉。
 //
 // 现在目录名改用 accountKey：
@@ -2249,7 +2249,7 @@ pub fn restore_deleted_session(id: &str) -> Result<(), String> {
 ///
 /// 用途：当用户手动取消置顶、或希望把某个会话重新置顶时，无需打开主应用 UI，
 /// 由账号中枢直接改写渲染层 leveldb 即可（与 `migrate_renderer_pin_state` 共用同一套
-/// 已验证兼容的 Rust leveldb 读写逻辑）。本次即用于把 `d4e5f6a7` 重新加回 `a1b2c3d4` 置顶。
+/// 已验证兼容的 Rust leveldb 读写逻辑）。本次即用于把某个会话重新加回某账号置顶。
 ///
 /// ⚠️ 必须在 WorkBuddy 已退出（leveldb 锁释放）后调用，否则打开会失败。
 ///
