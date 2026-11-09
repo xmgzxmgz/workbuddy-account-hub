@@ -15,11 +15,6 @@ use std::path::Path;
 pub mod models;
 pub mod wb_enc;
 
-/// @deprecated 不再直接拼 URL —— 一律走 `api_base(login)` 按账号域名推导，
-/// 否则海外版账号会被打到国内网关（issue #4）。保留常量仅作默认值说明。
-const API_BASE: &str = "https://copilot.tencent.com";
-#[allow(dead_code)]
-fn _api_base_default() -> &'static str { API_BASE }
 const BILLING_METER: &str = "/billing/meter";
 const V2_METER: &str = "/v2/billing/meter";
 
@@ -514,7 +509,7 @@ pub fn save_manual_exe(path: &str) -> Result<(), String> {
 /// 候选列表（顺序即优先级；调用方自行过滤 is_file）
 fn wb_exe_candidates() -> Vec<std::path::PathBuf> {
     let mut v: Vec<std::path::PathBuf> = Vec::new();
-    let mut push = |p: Option<std::path::PathBuf>, v: &mut Vec<std::path::PathBuf>| {
+    let push = |p: Option<std::path::PathBuf>, v: &mut Vec<std::path::PathBuf>| {
         if let Some(p) = p { if !v.contains(&p) { v.push(p); } }
     };
     // ①自动：正在运行的客户端
@@ -1802,11 +1797,10 @@ pub fn get_quota_as(login: &LoginInfo) -> Value {
     let mut accounts: Vec<Value> = Vec::new();
     let mut permission_denied = false;
     let mut token_expired = false;
-    let mut last_err = String::new();
 
     // 1) summary（聚合，无业务参数）
     if let Err(e) = fetch_accounts(login, &format!("{}{}/get-user-resource-summary", api_base(login), BILLING_METER), "{}", &mut accounts) {
-        if is_permission_err(&e) { permission_denied = true; } else if is_token_expired(&e) { token_expired = true; } last_err = e;
+        if is_permission_err(&e) { permission_denied = true; } else if is_token_expired(&e) { token_expired = true; }
     }
     // 2) paid-packages
     let paid_body = json!({
@@ -1817,7 +1811,7 @@ pub fn get_quota_as(login: &LoginInfo) -> Value {
         "IsDisplayTotalInfo": true
     }).to_string();
     if let Err(e) = fetch_accounts(login, &format!("{}{}/get-user-resource-paid-packages", api_base(login), BILLING_METER), &paid_body, &mut accounts) {
-        if is_permission_err(&e) { permission_denied = true; } else if is_token_expired(&e) { token_expired = true; } last_err = e;
+        if is_permission_err(&e) { permission_denied = true; } else if is_token_expired(&e) { token_expired = true; }
     }
     // 3) free-packages
     let free_body = json!({
@@ -1829,7 +1823,7 @@ pub fn get_quota_as(login: &LoginInfo) -> Value {
         "IsDisplayTotalInfo": true
     }).to_string();
     if let Err(e) = fetch_accounts(login, &format!("{}{}/get-user-resource-free-packages", api_base(login), BILLING_METER), &free_body, &mut accounts) {
-        if is_permission_err(&e) { permission_denied = true; } else if is_token_expired(&e) { token_expired = true; } last_err = e;
+        if is_permission_err(&e) { permission_denied = true; } else if is_token_expired(&e) { token_expired = true; }
     }
 
     if token_expired {

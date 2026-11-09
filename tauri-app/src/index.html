@@ -106,6 +106,12 @@
     .acc .info .n{font-size:12px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
     .acc .info .s{font-size:10px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:1px;}
     .acc .cur{font-size:9px;color:var(--green);border:1px solid rgba(61,220,151,.45);border-radius:5px;padding:1px 5px;background:rgba(61,220,151,.08);}
+    /* v0.6.27 B 方案：低频区块标题可折叠、默认收起（用户反馈"太多太杂"）。
+       只改视觉层级，不动任何渲染逻辑——面板内容按需照常填充。 */
+    .section-title.foldable{cursor:pointer;user-select:none;}
+    .section-title.foldable::after{content:"▾";float:right;color:var(--muted);font-size:10px;transition:transform .15s;}
+    .section-title.foldable.collapsed::after{content:"▸";}
+    .section-title.foldable:hover{color:var(--fg);}
     /* 企业版徽标：同一账号的个人版/企业版在列表里并存，必须一眼可分 */
     .acc .badge.ent{font-size:8.5px;padding:0 5px;border-radius:5px;color:#9cc4ff;background:rgba(90,162,255,.15);border:1px solid rgba(90,162,255,.4);margin-left:5px;vertical-align:middle;font-weight:600;}
     .acc .mini{padding:3px 9px;border:0;border-radius:7px;background:var(--accent-grad);color:#fff;cursor:pointer;font-size:10.5px;font-weight:600;flex-shrink:0;box-shadow:0 2px 8px rgba(109,92,255,.3);}
@@ -815,6 +821,18 @@
       <pre id="raw-out">点击「刷新全部」…</pre>
     </div>
   </main>
+
+  <!-- 通用确认对话框（v0.6.27）：confirmModal() 使用 -->
+  <div class="modal" id="confirm-modal">
+    <div class="modal-box" style="width:460px;max-width:92vw;">
+      <div class="modal-head"><span id="confirm-title">请确认</span><button onclick="confirmDismiss(false)">×</button></div>
+      <div id="confirm-body" style="padding:14px 16px;font-size:12.5px;line-height:1.75;white-space:pre-line;color:var(--fg);"></div>
+      <div style="display:flex;gap:8px;justify-content:flex-end;padding:0 16px 16px;">
+        <button class="secondary" onclick="confirmDismiss(false)">取消</button>
+        <button id="confirm-ok" onclick="confirmDismiss(true)">确定</button>
+      </div>
+    </div>
+  </div>
 
   <!-- 设置弹窗（v0.6.13）：WorkBuddy.exe 路径 -->
   <div class="modal" id="settings-modal">

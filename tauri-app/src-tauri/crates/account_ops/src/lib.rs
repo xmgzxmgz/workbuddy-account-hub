@@ -431,9 +431,59 @@ fn restore_personal_slot(vault: &Path, uid: &str, ent_dir: &Path) {
     }
 }
 
+/// vault 保洁：每个账号键的 history 只保留最近 `KEEP` 份，回收站超 30 天的清掉。
+/// 之前没有任何上限——每次切换/保存都追加，`list_backups` 会越来越慢、磁盘缓慢膨胀。
+/// 在 `list_accounts` 里顺带触发，幂等、失败静默（清理失败不影响功能）。
+pub fn cleanup_vault(vault: &Path) {
+    const KEEP: usize = 20;
+    const TRASH_MAX_AGE_MS: u128 = 30 * 24 * 3600 * 1000;
+    let Ok(rd) = std::fs::read_dir(vault) else { return; };
+    for e in rd.flatten() {
+        let p = e.path();
+        if !p.is_dir() { continue; }
+        let Some(name) = p.file_name().and_then(|s| s.to_str()) else { continue };
+        if name.starts_with('.') { continue; }
+        let hist = p.join("history");
+        let Ok(hrd) = std::fs::read_dir(&hist) else { continue };
+        // 目录名是毫秒时间戳，按数值排序，最大的（最新的）保留 KEEP 份
+        let mut entries: Vec<(u64, std::path::PathBuf)> = hrd
+            .flatten()
+            .filter_map(|d| {
+                // DirEntry::file_name() 直接返回 OsString（非 Option），此处只有一个 ?
+                let n = d.file_name().to_str()?.to_string();
+                let ts: u64 = n.parse().ok()?;
+                Some((ts, d.path()))
+            })
+            .collect();
+        if entries.len() > KEEP {
+            entries.sort_by_key(|(ts, _)| *ts);
+            let excess = entries.len() - KEEP;
+            for (_, dir) in entries.into_iter().take(excess) {
+                let _ = std::fs::remove_dir_all(dir);
+            }
+        }
+    }
+    // 回收站：`vault/.trash/<uid>.<ms-ts>/`，超 30 天整个删掉
+    let trash = vault.join(".trash");
+    let now = now_ms_i64() as u128;
+    if let Ok(trd) = std::fs::read_dir(&trash) {
+        for d in trd.flatten() {
+            let dir = d.path();
+            let Some(n) = dir.file_name().and_then(|s| s.to_str()) else { continue };
+            let Some((_uid, ts)) = n.rsplit_once('.') else { continue };
+            let Ok(ts) = ts.parse::<u128>() else { continue };
+            if now.saturating_sub(ts) > TRASH_MAX_AGE_MS {
+                let _ = std::fs::remove_dir_all(&dir);
+            }
+        }
+    }
+}
+
 pub fn list_accounts(vault: &Path) -> Vec<AccountInfo> {
     // 先把历史遗留的「裸 uid 目录装着企业版快照」改名，否则会被误判为个人版并互相覆盖
     migrate_legacy_snapshots(vault);
+    // 顺带保洁（幂等）：history 只留最近 20 份、回收站清 30 天前的
+    cleanup_vault(vault);
     let cur_key = current_account_key();
     let mut order: Vec<String> = Vec::new();                 // 账号键
     let mut seen = std::collections::HashSet::new();
@@ -490,9 +540,11 @@ pub fn list_accounts(vault: &Path) -> Vec<AccountInfo> {
     // （Windows 下合并为一次官方 exe worker 调用，避免逐账号起进程）
     let vault_nicks = nicknames_bulk(vault, &order);
 
-    // 用户主动删除/隐藏的账号不再出现（删除只移走快照，另外两处来源仍会吐出 uid）
+    // 用户主动删除/隐藏的账号不再出现。v0.6.27 修正：只按账号键判断——
+    // 之前还会把纯 uid 一并比对，等于删除企业版会连带隐藏同账号的个人版，
+    // 与「删除针对具体形态」的语义矛盾。
     let ignored = ignored_uids();
-    order.retain(|k| !ignored.contains(k) && !ignored.contains(parse_key(k).0));
+    order.retain(|k| !ignored.contains(k));
 
     order
         .into_iter()

@@ -57,15 +57,32 @@ fn pid_alive(pid: u32) -> bool {
 /// 确保单实例：若已被另一存活实例占用则退出；陈旧锁自动清理后占位。
 fn ensure_single_instance() -> bool {
     let p = instance_lock_path();
-    if let Ok(s) = std::fs::read_to_string(&p) {
-        if let Ok(pid) = s.trim().parse::<u32>() {
-            if pid_alive(pid) { return false; }   // 另一实例仍在运行
-        }
-        let _ = std::fs::remove_file(&p);          // 陈旧锁
-    }
     if let Some(parent) = p.parent() { let _ = std::fs::create_dir_all(parent); }
-    let _ = std::fs::write(&p, std::process::id().to_string());
-    true
+    // v0.6.27：改用 create_new 原子创建——旧的「读 pid → 判存活 → 写入」三步在
+    // 两实例同时启动时存在 TOCTOU 竞态，可能双开。O_EXCL 让"抢锁"一步完成；
+    // 抢锁失败再读内容判断对方是否真活着（陈旧锁则接管）。
+    match std::fs::OpenOptions::new().write(true).create_new(true).open(&p) {
+        Ok(mut f) => {
+            use std::io::Write;
+            let _ = f.write_all(std::process::id().to_string().as_bytes());
+            true
+        }
+        Err(_) => {
+            let alive = std::fs::read_to_string(&p)
+                .ok()
+                .and_then(|s| s.trim().parse::<u32>().ok())
+                .map(pid_alive)
+                .unwrap_or(false);
+            if alive { return false; }
+            let _ = std::fs::remove_file(&p);
+            std::fs::OpenOptions::new().write(true).create_new(true).open(&p)
+                .and_then(|mut f| {
+                    use std::io::Write;
+                    f.write_all(std::process::id().to_string().as_bytes())
+                })
+                .is_ok()
+        }
+    }
 }
 
 /// 签到错误分类 → （类型, 建议冷却秒数）（#16 冷却状态机）
@@ -341,17 +358,19 @@ async fn checkin_all() -> Value {
         let order: Vec<usize> = if n > 0 { (0..n).map(|i| (i + rotate) % n).collect() } else { Vec::new() };
         let mut results = Vec::new();
         let mut ok = 0u32; let mut fail = 0u32; let mut skipped = 0u32;
-        // #23：账号列表去重（同一 uid 只签到一次）+ 上限保护，避免异常重复触发风暴
+        // #23：账号列表去重 + 上限保护，避免异常重复触发风暴。
+        // v0.6.27：去重键从 uid 改为账号键——同一账号的个人版与企业版是两个独立
+        // 登录态（不同 token），应各签一次；用 uid 去重会把其中一个整个吞掉。
         let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
         for idx in order {
             let a = &accs[idx];
             if seen.len() >= 100 { break; }              // #23 总量上限
-            if !seen.insert(a.uid.clone()) { continue; }  // #23 去重
+            if !seen.insert(a.key.clone()) { continue; }  // #23 去重
             if !a.has_snapshot {
                 results.push(json!({"uid": a.uid, "nickname": a.nickname, "ok": false, "skipped": true, "error": "无登录态快照"}));
                 skipped += 1; continue;
             }
-            let Some(login) = account_login(&vault, &a.uid) else {
+            let Some(login) = account_login(&vault, &a.key) else {
                 results.push(json!({"uid": a.uid, "nickname": a.nickname, "ok": false, "skipped": true, "error": "登录态文件缺失或无效"}));
                 skipped += 1; continue;
             };
@@ -432,29 +451,36 @@ async fn quota_all() -> Value {
         let vault = ops::vault_dir();
         let accs = ops::list_accounts(&vault);
         // 有快照的账号并行拉取（std::thread::scope 逐账号一线程，结果按登记顺序收集）
-        let fetched: Vec<(String, String, Value)> =         std::thread::scope(|s| {
-            // vault shadow 成共享引用：多线程各自捕获 &Path（Copy），避免重复 move
-            let vault: &std::path::Path = vault.as_path();
-            let handles: Vec<_> = accs
-                .iter()
-                .filter(|a| a.has_snapshot)
-                .map(|a| {
-                    let uid = a.uid.clone();
-                    let nick = a.nickname.clone().unwrap_or_default();
-                    s.spawn(move || {
-                        let r = match account_login(&vault, &uid) {
-                            Some(login) => api::get_quota_as(&login),
-                            None => Value::Null, // 登录态文件缺失 → 上层记 skipped
-                        };
-                        (uid, nick, r)
+        // v0.6.27：限并发——每批最多 3 个线程同时打网关，与签到侧的风控策略对齐。
+        // （原实现 N 账号 = N 并发，14 个账号会瞬间打出 14 个请求，容易触发网关限流，
+        //  历史上「6/14 账号 401」疑似与此相关。）
+        // 元组第一元素统一装账号键 key（企业版是 <uid>@<eid>，用纯 uid 会拿错快照）。
+        let snap: Vec<_> = accs.iter().filter(|a| a.has_snapshot).collect();
+        let mut fetched: Vec<(String, String, Value)> = Vec::new();
+        for chunk in snap.chunks(3) {
+            let part: Vec<(String, String, Value)> = std::thread::scope(|s| {
+                // vault shadow 成共享引用：多线程各自捕获 &Path（Copy），避免重复 move
+                let vault: &std::path::Path = vault.as_path();
+                let hs: Vec<_> = chunk
+                    .iter()
+                    .map(|a| {
+                        let key = a.key.clone();
+                        let nick = a.nickname.clone().unwrap_or_default();
+                        s.spawn(move || {
+                            let r = match account_login(&vault, &key) {
+                                Some(login) => api::get_quota_as(&login),
+                                None => Value::Null, // 登录态文件缺失 → 上层记 skipped
+                            };
+                            (key, nick, r)
+                        })
                     })
-                })
-                .collect();
-            handles
-                .into_iter()
-                .map(|h| h.join().unwrap_or_else(|_| (String::new(), String::new(), Value::Null)))
-                .collect()
-        });
+                    .collect();
+                hs.into_iter()
+                    .map(|h| h.join().unwrap_or_else(|_| (String::new(), String::new(), Value::Null)))
+                    .collect()
+            });
+            fetched.extend(part);
+        }
         let mut results = Vec::new();
         let mut ok = 0u32; let mut fail = 0u32; let mut skipped = 0u32; let mut denied = 0u32;
         let mut fi = 0usize;
@@ -525,7 +551,7 @@ async fn memory_all() -> Value {
                 results.push(json!({"uid": a.uid, "nickname": a.nickname, "ok": false, "skipped": true, "error": "无登录态快照"}));
                 skipped += 1; continue;
             }
-            let Some(login) = account_login(&vault, &a.uid) else {
+            let Some(login) = account_login(&vault, &a.key) else {
                 results.push(json!({"uid": a.uid, "nickname": a.nickname, "ok": false, "skipped": true, "error": "登录态文件缺失或无效"}));
                 skipped += 1; continue;
             };
@@ -578,29 +604,36 @@ async fn buddy_all_status() -> Value {
                 "arrive_at": arrive_at, "daily_limit_reached": daily
             })
         };
-        let fetched: Vec<(String, String, Value)> =         std::thread::scope(|s| {
-            // vault shadow 成共享引用：多线程各自捕获 &Path（Copy），避免重复 move
-            let vault: &std::path::Path = vault.as_path();
-            let handles: Vec<_> = accs
-                .iter()
-                .filter(|a| a.has_snapshot)
-                .map(|a| {
-                    let uid = a.uid.clone();
-                    let nick = a.nickname.clone().unwrap_or_default();
-                    s.spawn(move || {
-                        let r = match account_login(&vault, &uid) {
-                            Some(login) => api::buddy_status_as(&login),
-                            None => Value::Null,
-                        };
-                        (uid, nick, r)
+        // v0.6.27：限并发——每批最多 3 个线程同时打网关，与签到侧的风控策略对齐。
+        // （原实现 N 账号 = N 并发，14 个账号会瞬间打出 14 个请求，容易触发网关限流，
+        //  历史上「6/14 账号 401」疑似与此相关。）
+        // 元组第一元素统一装账号键 key（企业版是 <uid>@<eid>，用纯 uid 会拿错快照）。
+        let snap: Vec<_> = accs.iter().filter(|a| a.has_snapshot).collect();
+        let mut fetched: Vec<(String, String, Value)> = Vec::new();
+        for chunk in snap.chunks(3) {
+            let part: Vec<(String, String, Value)> = std::thread::scope(|s| {
+                // vault shadow 成共享引用：多线程各自捕获 &Path（Copy），避免重复 move
+                let vault: &std::path::Path = vault.as_path();
+                let hs: Vec<_> = chunk
+                    .iter()
+                    .map(|a| {
+                        let key = a.key.clone();
+                        let nick = a.nickname.clone().unwrap_or_default();
+                        s.spawn(move || {
+                            let r = match account_login(&vault, &key) {
+                                Some(login) => api::buddy_status_as(&login),
+                                None => Value::Null,
+                            };
+                            (key, nick, r)
+                        })
                     })
-                })
-                .collect();
-            handles
-                .into_iter()
-                .map(|h| h.join().unwrap_or_else(|_| (String::new(), String::new(), Value::Null)))
-                .collect()
-        });
+                    .collect();
+                hs.into_iter()
+                    .map(|h| h.join().unwrap_or_else(|_| (String::new(), String::new(), Value::Null)))
+                    .collect()
+            });
+            fetched.extend(part);
+        }
         let mut accounts = Vec::new();
         let mut fi = 0usize;
         for a in &accs {
@@ -707,11 +740,11 @@ async fn buddy_all_depart(location_id: String) -> Value {
                 results.push(json!({"uid": a.uid, "nickname": a.nickname, "ok": false, "skipped": true, "reason": "无登录态快照"}));
                 skipped += 1; continue;
             }
-            let Some(login) = account_login(&vault, &a.uid) else {
+            let Some(login) = account_login(&vault, &a.key) else {
                 results.push(json!({"uid": a.uid, "nickname": a.nickname, "ok": false, "skipped": true, "reason": "登录态文件缺失或无效"}));
                 skipped += 1; continue;
             };
-            let res = depart_one(&login, &location_id, &a.uid, a.nickname.as_deref().unwrap_or(""));
+            let res = depart_one(&login, &location_id, &a.key, a.nickname.as_deref().unwrap_or(""));
             let okf = res.get("ok").and_then(|x| x.as_bool()).unwrap_or(false);
             let skf = res.get("skipped").and_then(|x| x.as_bool()).unwrap_or(false);
             if okf { ok += 1; } else if skf { skipped += 1; } else { fail += 1; }
@@ -756,11 +789,11 @@ async fn buddy_all_claim() -> Value {
                 results.push(json!({"uid": a.uid, "nickname": a.nickname, "ok": false, "skipped": true, "reason": "无登录态快照"}));
                 skipped += 1; continue;
             }
-            let Some(login) = account_login(&vault, &a.uid) else {
+            let Some(login) = account_login(&vault, &a.key) else {
                 results.push(json!({"uid": a.uid, "nickname": a.nickname, "ok": false, "skipped": true, "reason": "登录态文件缺失或无效"}));
                 skipped += 1; continue;
             };
-            let res = claim_one(&login, &a.uid, a.nickname.as_deref().unwrap_or(""));
+            let res = claim_one(&login, &a.key, a.nickname.as_deref().unwrap_or(""));
             let okf = res.get("ok").and_then(|x| x.as_bool()).unwrap_or(false);
             let skf = res.get("skipped").and_then(|x| x.as_bool()).unwrap_or(false);
             if okf { ok += 1; } else if skf { skipped += 1; } else { fail += 1; }
@@ -804,29 +837,36 @@ async fn pet_energy_all() -> Value {
     offload(move || {
         let vault = ops::vault_dir();
         let accs = ops::list_accounts(&vault);
-        let fetched: Vec<(String, String, Value)> =         std::thread::scope(|s| {
-            // vault shadow 成共享引用：多线程各自捕获 &Path（Copy），避免重复 move
-            let vault: &std::path::Path = vault.as_path();
-            let handles: Vec<_> = accs
-                .iter()
-                .filter(|a| a.has_snapshot)
-                .map(|a| {
-                    let uid = a.uid.clone();
-                    let nick = a.nickname.clone().unwrap_or_default();
-                    s.spawn(move || {
-                        let r = match account_login(&vault, &uid) {
-                            Some(login) => api::pet_energy_as(&login),
-                            None => Value::Null,
-                        };
-                        (uid, nick, r)
+        // v0.6.27：限并发——每批最多 3 个线程同时打网关，与签到侧的风控策略对齐。
+        // （原实现 N 账号 = N 并发，14 个账号会瞬间打出 14 个请求，容易触发网关限流，
+        //  历史上「6/14 账号 401」疑似与此相关。）
+        // 元组第一元素统一装账号键 key（企业版是 <uid>@<eid>，用纯 uid 会拿错快照）。
+        let snap: Vec<_> = accs.iter().filter(|a| a.has_snapshot).collect();
+        let mut fetched: Vec<(String, String, Value)> = Vec::new();
+        for chunk in snap.chunks(3) {
+            let part: Vec<(String, String, Value)> = std::thread::scope(|s| {
+                // vault shadow 成共享引用：多线程各自捕获 &Path（Copy），避免重复 move
+                let vault: &std::path::Path = vault.as_path();
+                let hs: Vec<_> = chunk
+                    .iter()
+                    .map(|a| {
+                        let key = a.key.clone();
+                        let nick = a.nickname.clone().unwrap_or_default();
+                        s.spawn(move || {
+                            let r = match account_login(&vault, &key) {
+                                Some(login) => api::pet_energy_as(&login),
+                                None => Value::Null,
+                            };
+                            (key, nick, r)
+                        })
                     })
-                })
-                .collect();
-            handles
-                .into_iter()
-                .map(|h| h.join().unwrap_or_else(|_| (String::new(), String::new(), Value::Null)))
-                .collect()
-        });
+                    .collect();
+                hs.into_iter()
+                    .map(|h| h.join().unwrap_or_else(|_| (String::new(), String::new(), Value::Null)))
+                    .collect()
+            });
+            fetched.extend(part);
+        }
         let mut accounts = Vec::new();
         let mut fi = 0usize;
         for a in &accs {

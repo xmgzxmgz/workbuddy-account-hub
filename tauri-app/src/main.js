@@ -155,7 +155,7 @@ function daysLeft(ms) {
   const d = new Date(t); if (isNaN(d)) return null;
   return Math.ceil((d - Date.now()) / 86400000);
 }
-function escapeHtml(s) { return String(s).replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c])); }
+function escapeHtml(s) { return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }  // v0.6.27 补引号：内联 onclick/title 属性的注入面
 
 // ===== 全局隐私分段工具 =====
 // 把敏感值拆成 前缀(清晰) + 中段(默认模糊) + 后缀(清晰)，统一由全局眼睛控制。
@@ -1059,11 +1059,11 @@ function pfRender(rows) {
     const cur = r.current ? ' <span class="badge cur">当前</span>' : '';
     // 当前登录账号不提供一键续期：客户端在跑时会和它抢同一个 refreshToken
     const canFix = (r.state === 'revoked' || r.state === 'expiring' || r.state === 'expired') && !r.current;
-    const act = canFix ? `<button class="mini" onclick="refreshOneToken('${r.uid}')">续期</button>` : '';
+    const act = canFix ? `<button class="mini" onclick="refreshOneToken('${r.key || r.uid}')">续期</button>` : '';
     const label = r.label && r.label !== st.text ? ` <span style="opacity:.7;">${escapeHtml(r.label)}</span>` : '';
     // 区域标识（issue #4）：海外版账号走国际网关、额度体系独立，标出来避免误判
     const region = r.region === 'global'
-      ? ' <span class="badge" style="background:rgba(90,162,255,.13);color:#9cc4ff;border-color:rgba(90,162,255,.35);">国际版</span>'
+      ? ' <span class="badge ent">国际版</span>'
       : '';
     return `<tr><td>${escapeHtml(r.nickname || (r.uid || '').slice(0, 8))}${cur}${region}</td>`
       + `<td style="color:${st.color};font-weight:700;">${st.text}${label}</td>`
@@ -1082,14 +1082,14 @@ async function loadPreflight() {
   toast(`预检完成：正常 ${s.ok || 0} · 将过期 ${s.expiring || 0} · 需重登 ${bad}`);
 }
 async function refreshOneToken(uid) {
-  if (!confirm('续期会用该账号的 refreshToken 换新 token。\n\n⚠ 服务端会立刻轮换 refreshToken（旧 RT 作废），Hub 已自动备份快照，写回失败时该账号需重新登录。\n\n继续？')) return;
+  if (!await confirmModal('续期会用该账号的 refreshToken 换新 token。\n\n⚠ 服务端会立刻轮换 refreshToken（旧 RT 作废），Hub 已自动备份快照，写回失败时该账号需重新登录。', '确认续期', '续期')) return;
   toast('续期中…');
   const j = await invoke('refresh_account', { uid }).catch(e => ({ ok: false, error: String(e) }));
   if (j && j.ok) { toast(j.result.message, 'ok'); loadPreflight(); }
   else toast('续期失败: ' + ((j && j.error) || '未知错误'), 'err');
 }
 async function refreshAllTokens() {
-  if (!confirm('批量续期只处理「即将过期 / 已被吊销」且非当前登录的账号。\n\n⚠ 每个账号的 refreshToken 都会被轮换（旧 RT 作废），Hub 会先备份快照。\n\n继续？')) return;
+  if (!await confirmModal('批量续期只处理「即将过期 / 已被吊销」且非当前登录的账号。\n\n⚠ 每个账号的 refreshToken 都会被轮换（旧 RT 作废），Hub 会先备份快照。', '批量续期', '开始续期')) return;
   toast('批量续期中，请稍候…');
   const j = await invoke('refresh_all_accounts').catch(e => ({ ok: false, error: String(e) }));
   if (!j || !j.ok) { toast('批量续期失败: ' + ((j && j.error) || '未知错误')); return; }
@@ -1128,17 +1128,36 @@ function openAccMenu(ev, key) {
 }
 document.addEventListener('click', () => closeAccMenu());
 
+// ===== 通用确认对话框（v0.6.27）：替换 5 处原生 confirm()——
+// 系统对话框与深色卡片风格脱节，且多行后果说明靠 \n 硬凑 ====
+let __confirmResolve = null;
+function confirmModal(msg, title = '请确认', okText = '确定') {
+  return new Promise(resolve => {
+    // 防重入：上一个还没答就又来一个，先把旧的当「取消」处理
+    if (__confirmResolve) __confirmResolve(false);
+    __confirmResolve = resolve;
+    $('confirm-title').textContent = title;
+    $('confirm-body').textContent = msg;   // textContent：内容不需要 HTML，也杜绝注入
+    $('confirm-ok').textContent = okText;
+    $('confirm-modal').classList.add('show');
+  });
+}
+function confirmDismiss(v) {
+  $('confirm-modal').classList.remove('show');
+  const r = __confirmResolve; __confirmResolve = null;
+  if (r) r(v);
+}
+
 // ===== 删除 / 恢复账号（失效账号清理）=====
 async function deleteAccount(uid) {
   const a = (accountsCache || []).find(x => x.uid === uid) || { uid };
   const name = a.nickname || uid.slice(0, 8);
-  const ok = confirm(
-    `删除账号「${name}」？\n\n` +
-    `· 登录态快照与历史备份会被移到回收站（vault/.trash），不是永久删除\n` +
-    `· 删除后它不再出现在 Hub 列表里，但不会退出 WorkBuddy、不影响客户端本身\n` +
-    `· 需要时可以还原：⚙ 设置 →「已删除账号」\n` +
-    `· 当前登录的账号不能删（需先切换）`
-  );
+  const ok = await confirmModal(
+    `· 登录态快照与历史备份会移到回收站（vault/.trash），不是永久删除\n` +
+    `· 删除后它不再出现在 Hub 列表里，但不会退出 WorkBuddy、不影响客户端\n` +
+    `· 需要时可还原：⚙ 设置 →「已删除账号」\n` +
+    `· 当前登录的账号不能删（需先切换）`,
+    `删除账号「${name}」？`, '删除');
   if (!ok) return;
   const r = await invoke('delete_account', { uid }).catch(e => ({ error: String(e) }));
   if (r && r.error) { toast('删除失败: ' + r.error, 'err'); return; }
@@ -2025,9 +2044,9 @@ function editModel(id) {
   $('mf-reason').checked = m.supportsReasoning === true;
   openModelModal('编辑：' + m.name);
 }
-function delModel(id) {
+async function delModel(id) {
   const m = customModelsCache.find(x => x.id === id);
-  if (!confirm('确认删除自定义 API「' + (m ? m.name : id) + '」？\n（WorkBuddy 重启后该模型将不可用）')) return;
+  if (!await confirmModal('WorkBuddy 重启后该模型将不可用。', `删除自定义 API「${m ? m.name : id}」？`, '删除')) return;
   invoke('delete_custom_model', { id }).then(r => {
     toast(r.ok ? '已删除' : '删除失败');
     loadModels();
@@ -2091,7 +2110,7 @@ async function saveModel() {
   } catch (e) { err.textContent = String(e); err.style.display = 'block'; }
 }
 async function restartWB() {
-  if (!confirm('重启 WorkBuddy 使模型配置生效？（会关闭当前 WorkBuddy 窗口再启动）')) return;
+  if (!await confirmModal('会关闭当前 WorkBuddy 窗口再启动。', '重启 WorkBuddy 使模型配置生效？', '重启')) return;
   try { await invoke('restart_workbuddy'); toast('已发送重启 WorkBuddy'); }
   catch (e) { toast('重启失败: ' + e); }
 }
@@ -2328,10 +2347,44 @@ bootLog('脚本末尾：准备调用 bootBootstrap');
 bootBootstrap();
 bootLog('脚本末尾：bootBootstrap 已调用');
 
+// ===== B 方案：低频区块默认折叠（v0.6.27）=====
+// 首屏只保留核心（账户信息 / 签到 / 额度趋势 / 登录态健康），
+// 批量与长尾功能（全部账号*、宠物、AI 记忆、API、用量）默认收起，点击标题展开。
+// 不改任何渲染逻辑：面板照常填充，仅切换 display，展开后数据即刻可见。
+(function setupFoldableSections() {
+  const DEFAULT_FOLD = ['全部账号签到', '全部账号额度', '全部账号宠物', '宠物能量',
+    'AI 记忆', 'API 管理', '用量与对话历史'];
+  document.querySelectorAll('.section-title').forEach(t => {
+    const txt = t.textContent || '';
+    if (!DEFAULT_FOLD.some(k => txt.includes(k))) return;
+    // 收集该标题到下一个 section-title 之间的所有元素（panel / grid / 操作栏都算）——
+    // 不同区块的紧邻结构不一样：有的直接跟 .panel，有的裹在 .grid 里，有的是匿名 div，
+    // 只认 .panel 会漏掉大半区块（实测 7 个只折了 2 个）。
+    let el = t.nextElementSibling; const group = [];
+    while (el && !(el.classList && el.classList.contains('section-title'))) {
+      group.push(el);
+      el = el.nextElementSibling;
+    }
+    if (!group.length) return;
+    t.classList.add('foldable');
+    t.addEventListener('click', () => {
+      t.classList.toggle('collapsed');
+      group.forEach(g => g.style.display = t.classList.contains('collapsed') ? 'none' : '');
+    });
+    // 默认收起
+    t.classList.add('collapsed');
+    group.forEach(g => g.style.display = 'none');
+  });
+})();
+
 // 登录态形态定时兜底（v0.6.25）
 // ensure_snapshot 只在启动时调用一次；如果用户在客户端里登录了另一个身份
 // （典型：个人版 → 企业版），之后又切换走，那份登录态就从没被保存过，等于白登录一场。
 // 这里每 30 秒轻量检查一次：只有「当前账号键还没有快照」时才会真正写盘，幂等且开销极小。
-setInterval(() => { ensureSnapshot(); }, 30000);
+setInterval(() => {
+  // v0.6.27：切换进行中（WB 已被杀、auth 半写）暂停轮询，避免把中间态存成快照
+  if (switchingUid) return;
+  ensureSnapshot();
+}, 30000);
 
 function esc(s){ const d=document.createElement('div'); d.textContent=String(s==null?'':s); return d.innerHTML; }

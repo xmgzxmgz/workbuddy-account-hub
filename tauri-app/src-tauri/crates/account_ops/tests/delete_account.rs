@@ -96,9 +96,11 @@ fn deleting_current_account_is_rejected() {
     let _serial = serial();
     let _guard = IgnoredGuard::new();
     let tmp = setup_tmp("cur");
-    // 当前登录账号（本机真实登录态）必须拒绝，且不能留下任何改动
-    if let Some(cur) = account_ops::current_uid() {
-        let err = delete_account(&tmp, &cur).expect_err("当前账号应被拒绝");
+    // 当前登录「形态」必须拒绝删除。注意用 current_account_key 而非 current_uid：
+    // 企业版会话下当前键是 <uid>@<eid>，此时删除个人版形态（纯 uid）是合法的——
+    // 保护只针对正在使用的那一份登录态（v0.6.27 语义）。
+    if let Some(cur) = account_ops::current_account_key() {
+        let err = delete_account(&tmp, &cur).expect_err("当前账号键应被拒绝");
         assert!(err.contains("当前登录账号"), "错误信息应说明原因，实际: {err}");
     }
     let _ = std::fs::remove_dir_all(&tmp);
