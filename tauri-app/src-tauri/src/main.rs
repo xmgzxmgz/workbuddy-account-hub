@@ -319,28 +319,45 @@ async fn do_checkin() -> Value {
 #[tauri::command]
 async fn buddy_status() -> Value {
     offload(move || {
-        api::buddy_status()
+        // v0.6.30：成长系统仅个人版——当前登录态是企业形态时降级用个人版快照
+        let vault = ops::vault_dir();
+        match ops::current_account_key().and_then(|k| growth_login_for(&vault, &k)) {
+            Some(l) => api::buddy_status_as(&l),
+            None => api::buddy_status(),
+        }
     }).await
 }
 
 #[tauri::command]
 async fn buddy_config() -> Value {
     offload(move || {
-        api::buddy_config()
+        let vault = ops::vault_dir();
+        match ops::current_account_key().and_then(|k| growth_login_for(&vault, &k)) {
+            Some(l) => api::buddy_config_as(&l),
+            None => api::buddy_config(),
+        }
     }).await
 }
 
 #[tauri::command]
 async fn buddy_depart(location_id: String) -> Value {
     offload(move || {
-        api::buddy_depart(&location_id)
+        let vault = ops::vault_dir();
+        match ops::current_account_key().and_then(|k| growth_login_for(&vault, &k)) {
+            Some(l) => api::buddy_depart_as(&l, &location_id),
+            None => api::buddy_depart(&location_id),
+        }
     }).await
 }
 
 #[tauri::command]
 async fn buddy_claim() -> Value {
     offload(move || {
-        api::buddy_claim()
+        let vault = ops::vault_dir();
+        match ops::current_account_key().and_then(|k| growth_login_for(&vault, &k)) {
+            Some(l) => api::buddy_claim_as(&l),
+            None => api::buddy_claim(),
+        }
     }).await
 }
 

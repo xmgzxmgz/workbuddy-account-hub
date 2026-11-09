@@ -1175,7 +1175,22 @@ pub fn call_api_as(login: &LoginInfo, endpoint: &str, method: &str, body: &str) 
         let text = resp.text().unwrap_or_default();
         // 鉴权/限流类错误立即失败（不重试，避免无意义重复）
         if status == 401 { return Err("登录身份过期，请重新登录 WorkBuddy 客户端".to_string()); }
-        if status == 403 { return Err("无权限访问该接口（HTTP 403）".to_string()); }
+        if status == 403 {
+            // 把服务端原始 msg 附上：成长系统对企业版身份的固定拒绝是
+            // "growth system is only available for personal users"，
+            // 只报「无权限访问」用户根本不知道该怎么办（v0.6.30）。
+            let server_msg = serde_json::from_str::<Value>(&text).ok()
+                .and_then(|v| v.get("msg").and_then(|m| m.as_str()).map(|m| m.to_string()))
+                .unwrap_or_default();
+            let hint = if server_msg.contains("only available for personal users") {
+                "：宠物/成长系统仅个人版可用（该账号当前是企业版身份）"
+            } else { "" };
+            return Err(if hint.is_empty() {
+                format!("无权限访问该接口（HTTP 403）{server_msg}")
+            } else {
+                hint.trim_start_matches('：').to_string()
+            });
+        }
         if status == 429 { return Err("请求过于频繁，请稍后再试（HTTP 429）".to_string()); }
         if status >= 500 {
             last_msg = format!("服务器繁忙（HTTP {}），请稍后重试", status);

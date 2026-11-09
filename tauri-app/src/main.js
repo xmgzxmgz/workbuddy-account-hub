@@ -915,6 +915,15 @@ function buddyCountdownTick() {
 }
 
 async function loadBuddy() {
+  // v0.6.30：企业形态下成长系统 403，后端已自动降级用个人版快照——
+  // 在标题上标明数据来源，避免用户以为企业版也有宠物
+  try {
+    const cur = (accountsCache || []).find(a => (a.key || a.uid) === window.__currentKey);
+    const tag = document.querySelector('#buddy-panel-tag');
+    if (tag) tag.textContent = (cur && cur.form === 'enterprise')
+      ? '/activity/growth/buddy/travel · 企业形态，显示个人版宠物'
+      : '/activity/growth/buddy/travel';
+  } catch (e) {}
   let ok = false;
   try {
     const [st, cfg] = await Promise.all([
