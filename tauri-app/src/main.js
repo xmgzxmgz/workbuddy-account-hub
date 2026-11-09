@@ -235,6 +235,31 @@ function renderSidebar(j) {
   });
 }
 
+// ===== v0.6.28 调研同类项目引入：账户档案增强（邀请码 + 企业信用额度）=====
+async function loadProfileExtras() {
+  try {
+    const inv = await invoke('get_invite').catch(() => null);
+    const usg = await invoke('enterprise_usage').catch(() => null);
+    const kv = $('kv-account'); if (!kv) return;
+    let extra = '';
+    if (inv && inv.ok && inv.invite_code) {
+      extra += `<div class="item"><span class="k">邀请码</span><span class="v"><code>${escapeHtml(inv.invite_code)}</code> · 已邀 ${Number(inv.invited_count) || 0} 人
+        <button class="mini" onclick="navigator.clipboard.writeText('${escapeHtml(inv.invite_code)}');toast('邀请码已复制','ok')">复制</button></span></div>`;
+    }
+    const j = window.__login || {};
+    if (j.type === 'ultimate') {
+      const d = usg && usg.body && usg.body.data;
+      if (d && d.credit != null) {
+        extra += `<div class="item"><span class="k">企业信用</span><span class="v">剩余 ${Number(d.credit).toFixed(1)} · 已用 ${Number(d.used || 0).toFixed(1)}</span></div>`;
+      }
+    }
+    if (extra && !kv.dataset.extrasDone) {
+      kv.dataset.extrasDone = '1';   // 档案每次重绘都置空，避免重复追加
+      kv.insertAdjacentHTML('beforeend', extra);
+    }
+  } catch (e) { /* 静默：附加信息失败不影响主档案 */ }
+}
+
 let selectedDir = null;
 function selectAccount(a, all) {
   document.querySelectorAll('#acc-list .acc').forEach(el => {
@@ -1148,6 +1173,41 @@ function confirmDismiss(v) {
   if (r) r(v);
 }
 
+// ===== 今日战报（v0.6.28，自 wokbuddy-demon「战报」启发）=====
+// 汇总：账号数 / 最早到期积分 / 临期告警 / 邀请码 → 推送通知中心 + 弹窗展示
+function buildDailyReport() {
+  const accs = accountsCache || [];
+  const L = [];
+  L.push(`📅 ${new Date().toLocaleDateString('zh-CN')} 今日战报`);
+  L.push(`━━━━━━━━━━━━━━`);
+  L.push(`👤 账号：共 ${accs.length} 个（当前登录：${acctLabel(window.__login || {}) || '—'}）`);
+  let ok = 0, snap = 0;
+  accs.forEach(a => { if (a.has_snapshot) snap++; });
+  L.push(`💾 已保存登录态：${snap} 个`);
+  const rec = (typeof pickExpiryFirst === 'function') ? pickExpiryFirst(lastQuotaAllResults) : null;
+  if (rec) {
+    L.push(`⏰ 最早到期积分：${rec.nick} · ${new Date(rec.ms).toLocaleDateString('zh-CN')}（余 ${rec.remain}）`);
+  } else {
+    L.push(`⏰ 积分到期：暂无数据（点「查询全部额度」后更新）`);
+  }
+  // 临期扫描：3 天内到期的积分包
+  let warns = 0;
+  for (const r of (lastQuotaAllResults || [])) {
+    const e = (typeof acctEarliest === 'function') ? acctEarliest(r) : null;
+    if (e && e.ms - Date.now() < 3 * 24 * 3600 * 1000) {
+      L.push(`⚠️ 临期告警：${acctLabel(r)} 的积分 ${new Date(e.ms).toLocaleDateString('zh-CN')} 到期（余 ${e.remain}）`);
+      warns++;
+    }
+  }
+  if (lastQuotaAllResults && lastQuotaAllResults.length && !warns) L.push(`✅ 临期扫描：3 天内无到期积分包`);
+  const msg = L.join('\n');
+  NotifyCenter.push(msg, warns ? 'err' : 'ok');
+  toast(warns ? `战报已生成：${warns} 条临期告警` : '战报已生成，见右上角 🔔', warns ? 'err' : 'ok');
+  // 同时在报告弹窗展示（复用 raw-out 区域）
+  const ro = $('raw-out');
+  if (ro) ro.innerHTML = `<pre style="white-space:pre-wrap;font-size:12px;line-height:1.7;">${escapeHtml(msg)}</pre>`;
+}
+
 // ===== 删除 / 恢复账号（失效账号清理）=====
 async function deleteAccount(uid) {
   const a = (accountsCache || []).find(x => x.uid === uid) || { uid };
@@ -1246,6 +1306,13 @@ async function loadQuotaAll() {
     renderQuotaAll(r.results || []);
     const s = r.summary || {};
     toast(`全部额度查询：成功 ${s.ok || 0} · 跳过 ${s.skipped || 0} · 失败 ${s.fail || 0}`);
+    // v0.6.28 临期通知：3 天内到期的积分包写入通知中心（页内 qa-suggest 只在推荐切换时出现）
+    for (const row of (r.results || [])) {
+      const e = acctEarliest(row);
+      if (e && e.ms - Date.now() < 3 * 24 * 3600 * 1000) {
+        NotifyCenter.push(`⚠️ ${acctLabel(row)} 的积分包 ${new Date(e.ms).toLocaleDateString('zh-CN')} 到期（余 ${e.remain}），用完再切可减少浪费`, 'err');
+      }
+    }
   } catch (e) { toast('查询全部额度失败: ' + e); }
 }
 
@@ -1821,7 +1888,7 @@ async function loadAll() {
     bootLog('启动加载失败：' + e, 'err');
     const ro = $('raw-out'); if (ro) ro.textContent = '错误：' + e;
     throw e; // 让 bootBootstrap 的重试机制接管
-  }
+  }  loadProfileExtras();
 }
 
 // 额度/签到/记忆分开独立拉取（后端各自带 15s 超时），
@@ -2117,7 +2184,7 @@ async function restartWB() {
 
 // 暴露给 inline onclick（安全：未定义的函数跳过，不影响其余，更不阻断 bootBootstrap）
 (function expose(){
-  const names = ['addModel','editModel','delModel','testModel','testCurrentForm','saveModel','closeModelModal','restartWB','loadAll','loadQuota','doCheckin','openReport','closeReport','copyReport','ensureSnapshot','backupAll','saveCurrentLogin','switchTo','openBackups','renderBackups','openBackupDetail','closeBackups','closeBackupDetail','loadBuddy','buddyDepart','buddyClaim','buddyDepartAll','buddyClaimAll','buddyDepartFor','buddyClaimFor','refreshBuddyAll','doCheckinAll','loadQuotaAll','qaCheckinFor','toggleAllKeys','refreshAll','uhRefresh','uhExportJson','uhExportCsv','loadMemoryAll','qaToggleRank','exportQuotaMd','applyQuotaAllFilters','toggleStar','openTagInput'];
+  const names = ['addModel','editModel','buildDailyReport','delModel','testModel','testCurrentForm','saveModel','closeModelModal','restartWB','loadAll','loadQuota','doCheckin','openReport','closeReport','copyReport','ensureSnapshot','backupAll','saveCurrentLogin','switchTo','openBackups','renderBackups','openBackupDetail','closeBackups','closeBackupDetail','loadBuddy','buddyDepart','buddyClaim','buddyDepartAll','buddyClaimAll','buddyDepartFor','buddyClaimFor','refreshBuddyAll','doCheckinAll','loadQuotaAll','qaCheckinFor','toggleAllKeys','refreshAll','uhRefresh','uhExportJson','uhExportCsv','loadMemoryAll','qaToggleRank','exportQuotaMd','applyQuotaAllFilters','toggleStar','openTagInput'];
   for (const n of names) {
     try {
       const fn = eval(n);
@@ -2347,6 +2414,44 @@ bootLog('脚本末尾：准备调用 bootBootstrap');
 bootBootstrap();
 bootLog('脚本末尾：bootBootstrap 已调用');
 
+// ===== 顶栏功能 tab（v0.6.28）：替代上下滚动找功能 =====
+// 点击只显示对应分组的区块。折叠状态被尊重：tab 切换不会展开被折叠的区块。
+function guessTab(text) {
+  const t = (text || '').replace(/[\s🌐🩺🐾🎁·]/g, '');
+  if (t.includes('账户信息')) return 'account';
+  if (t.includes('签到')) return 'checkin';
+  if (t.includes('额度')) return 'quota';
+  if (t.includes('登录态健康')) return 'health';
+  if (t.includes('宠物') || t.includes('盲盒')) return 'pet';
+  if (t.includes('记忆')) return 'memory';
+  if (t.includes('API') || t.includes('用量')) return 'tools';
+  return 'account';
+}
+function showTab(tab) {
+  document.querySelectorAll('.section-title').forEach(t => {
+    if (!t.dataset.tab) t.dataset.tab = guessTab(t.textContent);
+    // 嵌套在 panel 里的子标题（可选地点/操作日志）随父区块显隐，不单独处理
+    if (!t.parentElement || t.parentElement.classList.contains('panel')) return;
+    const show = t.dataset.tab === tab;
+    t.style.display = show ? '' : 'none';
+    const folded = t.classList.contains('foldable') && t.classList.contains('collapsed');
+    let el = t.nextElementSibling;
+    while (el && !(el.classList && el.classList.contains('section-title'))) {
+      el.style.display = (!show || folded) ? 'none' : '';
+      el = el.nextElementSibling;
+    }
+  });
+  // 顶部概览卡（权益/登录态剩余）归「账户」tab：其他 tab 下不占首屏
+  const ov = document.getElementById('overview');
+  if (ov) ov.style.display = tab === 'account' ? '' : 'none';
+  document.querySelectorAll('.tabs-bar .tab-btn').forEach(b =>
+    b.classList.toggle('active', b.dataset.tab === tab));
+  window.scrollTo(0, 0);
+}
+
+bootLog('脚本末尾：bootBootstrap 已调用');
+
+showTab('account');
 // ===== B 方案：低频区块默认折叠（v0.6.27）=====
 // 首屏只保留核心（账户信息 / 签到 / 额度趋势 / 登录态健康），
 // 批量与长尾功能（全部账号*、宠物、AI 记忆、API、用量）默认收起，点击标题展开。

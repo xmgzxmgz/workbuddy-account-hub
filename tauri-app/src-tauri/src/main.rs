@@ -446,6 +446,22 @@ async fn checkin_all() -> Value {
 /// v0.6.2 性能重写：async + spawn_blocking（不冻结 UI）+ 账号间并行请求
 /// （原串行 5 账号 × 每账号最多 15s → 现总耗时 = 最慢单账号，通常 1~3s）。
 #[tauri::command]
+fn get_invite() -> Value {
+    match ops::current_account_key().and_then(|k| account_login(&ops::vault_dir(), &k)) {
+        Some(l) => api::get_invite_as(&l),
+        None => json!({ "ok": false, "error": "未找到本机登录态" }),
+    }
+}
+
+#[tauri::command]
+fn enterprise_usage() -> Value {
+    match ops::current_account_key().and_then(|k| account_login(&ops::vault_dir(), &k)) {
+        Some(l) => api::enterprise_usage_as(&l),
+        None => json!({ "error": "未找到本机登录态" }),
+    }
+}
+
+#[tauri::command]
 async fn quota_all() -> Value {
     offload(move || {
         let vault = ops::vault_dir();
@@ -465,9 +481,18 @@ async fn quota_all() -> Value {
                     .iter()
                     .map(|a| {
                         let key = a.key.clone();
+                        let uid_only = a.uid.clone();
+                        let form = a.form.clone();
                         let nick = a.nickname.clone().unwrap_or_default();
                         s.spawn(move || {
-                            let r = match account_login(&vault, &key) {
+                            // 成长系统仅个人版（实测 5.9.3）：企业形态自动改用同账号的
+                            // 个人版快照 token；没有个人版快照则按登录态缺失跳过。
+                            let login = if form == "enterprise" {
+                                account_login(&vault, &uid_only)
+                            } else {
+                                account_login(&vault, &key)
+                            };
+                            let r = match login {
                                 Some(login) => api::get_quota_as(&login),
                                 None => Value::Null, // 登录态文件缺失 → 上层记 skipped
                             };
@@ -618,9 +643,18 @@ async fn buddy_all_status() -> Value {
                     .iter()
                     .map(|a| {
                         let key = a.key.clone();
+                        let uid_only = a.uid.clone();
+                        let form = a.form.clone();
                         let nick = a.nickname.clone().unwrap_or_default();
                         s.spawn(move || {
-                            let r = match account_login(&vault, &key) {
+                            // 成长系统仅个人版（实测 5.9.3）：企业形态自动改用同账号的
+                            // 个人版快照 token；没有个人版快照则按登录态缺失跳过。
+                            let login = if form == "enterprise" {
+                                account_login(&vault, &uid_only)
+                            } else {
+                                account_login(&vault, &key)
+                            };
+                            let r = match login {
                                 Some(login) => api::buddy_status_as(&login),
                                 None => Value::Null,
                             };
@@ -740,8 +774,10 @@ async fn buddy_all_depart(location_id: String) -> Value {
                 results.push(json!({"uid": a.uid, "nickname": a.nickname, "ok": false, "skipped": true, "reason": "无登录态快照"}));
                 skipped += 1; continue;
             }
-            let Some(login) = account_login(&vault, &a.key) else {
-                results.push(json!({"uid": a.uid, "nickname": a.nickname, "ok": false, "skipped": true, "reason": "登录态文件缺失或无效"}));
+            // 成长系统仅个人版：企业形态降级用个人版快照（见 buddy_all_status 同款注释）
+            let login = if a.form == "enterprise" { account_login(&vault, &a.uid) } else { account_login(&vault, &a.key) };
+            let Some(login) = login else {
+                results.push(json!({"uid": a.uid, "nickname": a.nickname, "ok": false, "skipped": true, "reason": "登录态文件缺失或无效（企业形态且无个人版快照）"}));
                 skipped += 1; continue;
             };
             let res = depart_one(&login, &location_id, &a.key, a.nickname.as_deref().unwrap_or(""));
@@ -789,8 +825,10 @@ async fn buddy_all_claim() -> Value {
                 results.push(json!({"uid": a.uid, "nickname": a.nickname, "ok": false, "skipped": true, "reason": "无登录态快照"}));
                 skipped += 1; continue;
             }
-            let Some(login) = account_login(&vault, &a.key) else {
-                results.push(json!({"uid": a.uid, "nickname": a.nickname, "ok": false, "skipped": true, "reason": "登录态文件缺失或无效"}));
+            // 成长系统仅个人版：企业形态降级用个人版快照（见 buddy_all_status 同款注释）
+            let login = if a.form == "enterprise" { account_login(&vault, &a.uid) } else { account_login(&vault, &a.key) };
+            let Some(login) = login else {
+                results.push(json!({"uid": a.uid, "nickname": a.nickname, "ok": false, "skipped": true, "reason": "登录态文件缺失或无效（企业形态且无个人版快照）"}));
                 skipped += 1; continue;
             };
             let res = claim_one(&login, &a.key, a.nickname.as_deref().unwrap_or(""));
@@ -808,7 +846,8 @@ async fn buddy_all_claim() -> Value {
 async fn buddy_depart_for(uid: String, location_id: String) -> Value {
     offload(move || {
         let vault = ops::vault_dir();
-        let Some(login) = account_login(&vault, &uid) else {
+        let login = growth_login_for(&vault, &uid);
+        let Some(login) = login else {
             return json!({"uid": uid, "ok": false, "skipped": false, "error": "登录态文件缺失或无效"});
         };
         depart_one(&login, &location_id, &uid, "")
@@ -820,7 +859,8 @@ async fn buddy_depart_for(uid: String, location_id: String) -> Value {
 async fn buddy_claim_for(uid: String) -> Value {
     offload(move || {
         let vault = ops::vault_dir();
-        let Some(login) = account_login(&vault, &uid) else {
+        let login = growth_login_for(&vault, &uid);
+        let Some(login) = login else {
             return json!({"uid": uid, "ok": false, "skipped": false, "error": "登录态文件缺失或无效"});
         };
         claim_one(&login, &uid, "")
@@ -851,9 +891,18 @@ async fn pet_energy_all() -> Value {
                     .iter()
                     .map(|a| {
                         let key = a.key.clone();
+                        let uid_only = a.uid.clone();
+                        let form = a.form.clone();
                         let nick = a.nickname.clone().unwrap_or_default();
                         s.spawn(move || {
-                            let r = match account_login(&vault, &key) {
+                            // 成长系统仅个人版（实测 5.9.3）：企业形态自动改用同账号的
+                            // 个人版快照 token；没有个人版快照则按登录态缺失跳过。
+                            let login = if form == "enterprise" {
+                                account_login(&vault, &uid_only)
+                            } else {
+                                account_login(&vault, &key)
+                            };
+                            let r = match login {
                                 Some(login) => api::pet_energy_as(&login),
                                 None => Value::Null,
                             };
@@ -900,6 +949,17 @@ async fn pet_energy_all() -> Value {
         }
         json!({ "ok": true, "accounts": accounts })
     }).await
+}
+
+/// 宠物/成长类命令的登录态选择（v0.6.28）：
+/// 成长系统仅个人版可用——key 是企业形态时自动降级用同账号的个人版快照。
+fn growth_login_for(vault: &std::path::Path, key: &str) -> Option<wb_api::LoginInfo> {
+    let (uid_only, eid) = ops::parse_key(key);
+    if eid.is_some() {
+        account_login(vault, uid_only).or_else(|| account_login(vault, key))
+    } else {
+        account_login(vault, key)
+    }
 }
 
 /// 单个账号：抽盲盒（用其 vault 快照登录态 token 发请求）。
@@ -1047,6 +1107,8 @@ pub fn run() {
             save_exe_setting,
             pick_workbuddy_exe,
             get_quota,
+            get_invite,
+            enterprise_usage,
             get_checkin,
             get_memory,
             do_checkin,

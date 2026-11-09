@@ -7,6 +7,43 @@
 
 ---
 
+## v0.6.28（2026-11-09）— 🔌 全接口实测修复 + 顶栏功能 tab + 调研引入新功能
+
+**1）全接口实测（14 个只读接口真实探针，5.9.3 客户端）**
+- 结论：**接口一个都没被换掉**。此前"功能不可用"的观感来自两个真实原因：
+  a) **当前登录态是企业版身份，成长系统（宠物）仅个人版开放 → 全部 403**；
+  b) v0.6.24–0.6.26 的账号键漏改 bug（v0.6.27 已修）。
+- **宠物接口修复**：批量宠物功能（签到外的成长类）对企业形态账号**自动降级用同账号的个人版快照 token**；
+  无个人版快照则明确跳过。单账号 *_for 命令走 `growth_login_for()` 同样降级。
+- **403 翻译**：`growth_post()` 把服务端 "growth system is only available for personal users"
+  翻译成「宠物/成长系统仅个人版可用（该账号当前是企业版身份）」，带 `personal_only` 标记，
+  不再显示"能量接口 HTTP 403"这类天书。
+- 探针留档：`tests/probe_all_apis.rs`（ignore）覆盖全部接口 + 个人版身份对照。
+
+**2）顶栏功能 tab（替代上下滚动找功能）**
+- 顶栏下新增 7 个 tab：👤 账户 / ✅ 签到 / 📊 额度 / 🩺 健康 / 🐾 宠物 / 🧠 记忆 / 🧰 工具。
+- 点击只显示对应分组区块，尊重折叠状态；顶部概览卡归「账户」tab。
+- 经 headless DOM 断言与截图验证：切「宠物」tab 时仅宠物区块可见、tab 高亮正确。
+
+**3）调研 7 个同类项目后引入的功能**（88lin/workbuddy-auto-signin、Javis603/token-monitor、
+   changexbc/workbuddy-switch、BegoniaHe/wokbuddy-demon、ardeyouxipianyi/workbuddy2api-hub、
+   jlcodes99/cockpit-tools、Xxx91n/jiahao）
+- **邀请码与邀请人数**（GET my-code / invite-records，实测 200）：账户档案新增「邀请码」行，一键复制。
+- **企业信用用量**（POST get-enterprise-user-usage，实测 200）：企业版形态在账户档案显示
+  「企业信用：剩余 X · 已用 Y」。
+- **今日战报**（启发自 wokbuddy-demon）：顶栏「📊 战报」按钮一键汇总账号数/登录态/最早到期积分/
+  临期告警，推送通知中心并展示。
+- **临期通知**：额度查询后 3 天内到期的积分包自动写入通知中心（此前只有页内切换推荐条）。
+- 排查确认 Hub 已有同类功能不再重复开发：积分排行榜（rank 模式）、积分池智能调度（workbuddy-switch 同款）、多账号并行管理。
+- 评估后**不引入**：成长任务自动完成（wokbuddy-demon 是重度模拟用户行为，风控高危）、
+  网关转 OpenAI 协议（workbuddy2api-hub 明示上游收紧、账号风险自负）、应用多开（与切换器定位冲突）。
+- Roadmap（后续版本）：会话复制（workbuddy-switch 王牌功能）、通知渠道 webhook（bark/企微）、
+  Qoder CN 签到、自动续期守护。
+
+- bump 0.6.27 → 0.6.28
+
+---
+
 ## v0.6.27（2026-11-09）— 🛡 全面体检修复：正确性 × 安全 × 风控 × 体验（审计 Top 10 落地）
 
 6 维度审计（安全/逻辑/交互/视觉/性能/代码质量）挖出的 10 项问题全部修复：

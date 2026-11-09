@@ -1899,8 +1899,8 @@ const BUDDY_TRAVEL: &str = "/activity/growth/buddy/travel";
 
 /// 查询宠物当前状态（idle / traveling / arrived）—— 指定登录态
 pub fn buddy_status_as(login: &LoginInfo) -> Value {
-    call_api_as(login, &format!("{}{}/status", api_base(login), BUDDY_TRAVEL), "GET", "")
-        .unwrap_or_else(|e| json!({ "error": e }))
+    growth_post(call_api_as(login, &format!("{}{}/status", api_base(login), BUDDY_TRAVEL), "GET", "")
+        .unwrap_or_else(|e| json!({ "error": e })))
 }
 /// 查询宠物当前状态（当前本机登录态）
 pub fn buddy_status() -> Value {
@@ -1912,8 +1912,8 @@ pub fn buddy_status() -> Value {
 
 /// 查询可派出地点列表 —— 指定登录态
 pub fn buddy_config_as(login: &LoginInfo) -> Value {
-    call_api_as(login, &format!("{}{}/config", api_base(login), BUDDY_TRAVEL), "GET", "")
-        .unwrap_or_else(|e| json!({ "error": e }))
+    growth_post(call_api_as(login, &format!("{}{}/config", api_base(login), BUDDY_TRAVEL), "GET", "")
+        .unwrap_or_else(|e| json!({ "error": e })))
 }
 /// 查询可派出地点列表（当前本机登录态）
 pub fn buddy_config() -> Value {
@@ -1946,8 +1946,8 @@ pub fn buddy_depart(location_id: &str) -> Value {
 
 /// 领取已归来宠物的奖励 —— 指定登录态
 pub fn buddy_claim_as(login: &LoginInfo) -> Value {
-    call_api_as(login, &format!("{}{}/claim", api_base(login), BUDDY_TRAVEL), "POST", "{}")
-        .unwrap_or_else(|e| json!({ "error": e }))
+    growth_post(call_api_as(login, &format!("{}{}/claim", api_base(login), BUDDY_TRAVEL), "POST", "{}")
+        .unwrap_or_else(|e| json!({ "error": e })))
 }
 /// 领取已归来宠物的奖励（当前本机登录态）
 pub fn buddy_claim() -> Value {
@@ -1955,6 +1955,36 @@ pub fn buddy_claim() -> Value {
         Some(l) => buddy_claim_as(&l),
         None => json!({ "error": "未找到本机 WorkBuddy 登录态" }),
     }
+}
+
+// ===== 邀请码 / 企业用量（v0.6.28，调研同类项目引入的新功能） =====
+
+/// 邀请码与邀请人数（GET my-code + invite-records，两接口 5.9.3 实测 200）。
+/// 返回 { ok, invite_code, invited_count }
+pub fn get_invite_as(login: &LoginInfo) -> Value {
+    let c = call_api_as(login, &format!("{}/activity/workbuddy/invitation/v2/my-code", api_base(login)), "GET", "");
+    let r = call_api_as(login, &format!("{}/activity/workbuddy/invitation/v2/invite-records?page=1&size=100", api_base(login)), "GET", "");
+    let (cv, rv) = match (c, r) {
+        (Ok(a), Ok(b)) => (a, b),
+        (Err(e), _) | (_, Err(e)) => return json!({ "ok": false, "error": e }),
+    };
+    let code = cv.get("body").and_then(|b| b.get("data")).and_then(|d| d.get("invite_code"))
+        .and_then(|x| x.as_str()).unwrap_or("").to_string();
+    let friends = rv.get("body").and_then(|b| b.get("data")).and_then(|d| d.get("friends"))
+        .and_then(|f| f.as_array()).map(|a| a.len()).unwrap_or(0);
+    if code.is_empty() && friends == 0 {
+        return json!({ "ok": false, "error": format!("邀请接口 HTTP {} / {}", 
+            cv.get("status").and_then(|x| x.as_u64()).unwrap_or(0),
+            rv.get("status").and_then(|x| x.as_u64()).unwrap_or(0)) });
+    }
+    json!({ "ok": true, "invite_code": code, "invited_count": friends })
+}
+
+/// 企业版信用额度与用量（POST get-enterprise-user-usage，5.9.3 实测 200，
+/// 数据形如 {"credit":3位小数,"used":...}）。个人版账号调它会返回业务错误，前端按形态分流。
+pub fn enterprise_usage_as(login: &LoginInfo) -> Value {
+    call_api_as(login, &format!("{}/v2/billing/meter/get-enterprise-user-usage", api_base(login)), "POST", "{}")
+        .unwrap_or_else(|e| json!({ "error": e }))
 }
 
 // ===== 宠物能量 / 盲盒抽奖（growth center） =====
@@ -1971,6 +2001,25 @@ const PET_ENERGY: &str = "/activity/growth/energy";
 const PET_QUOTA: &str = "/activity/growth/buddy/quota";
 const PET_OPEN: &str = "/activity/growth/buddy/open";
 
+/// 成长系统响应后处理（v0.6.28）：
+/// 企业版身份调宠物/成长接口时，服务端固定返回 403 + "growth system is only available
+/// for personal users"（实测 5.9.3）。此前这条会被当成普通 HTTP 错误层层上抛，
+/// 用户看到的是"能量接口 HTTP 403"这种天书。这里注入 personal_only 标记与人话错误。
+fn growth_post(r: Value) -> Value {
+    let status = r.get("status").and_then(|x| x.as_u64()).unwrap_or(0);
+    if status == 403 {
+        let body = r.get("body").cloned().unwrap_or(Value::Null);
+        let msg = body.get("msg").and_then(|x| x.as_str()).unwrap_or("");
+        if msg.contains("only available for personal users") {
+            let mut out = r;
+            out["personal_only"] = json!(true);
+            out["error"] = json!("宠物/成长系统仅个人版可用（该账号当前是企业版身份）");
+            return out;
+        }
+    }
+    r
+}
+
 /// 解析成长中心接口包裹体 {code,msg,data}，返回 (业务码, 文案, data)
 fn growth_unwrap(body: &Value) -> (i64, String, Value) {
     let code = body.get("code").and_then(|x| x.as_i64()).unwrap_or(-1);
@@ -1985,11 +2034,16 @@ fn growth_unwrap(body: &Value) -> (i64, String, Value) {
 pub fn pet_energy_as(login: &LoginInfo) -> Value {
     let e = call_api_as(login, &format!("{}{}", api_base(login), PET_ENERGY), "GET", "");
     let q = call_api_as(login, &format!("{}{}", api_base(login), PET_QUOTA), "GET", "");
-    let ev = match e { Ok(v) => v, Err(err) => return json!({ "ok": false, "error": err }) };
-    let qv = match q { Ok(v) => v, Err(err) => return json!({ "ok": false, "error": err }) };
+    let ev = match e { Ok(v) => growth_post(v), Err(err) => return json!({ "ok": false, "error": err }) };
+    let qv = match q { Ok(v) => growth_post(v), Err(err) => return json!({ "ok": false, "error": err }) };
     let e_status = ev.get("status").and_then(|x| x.as_u64()).unwrap_or(0);
     let q_status = qv.get("status").and_then(|x| x.as_u64()).unwrap_or(0);
     if e_status != 200 || q_status != 200 {
+        // 企业版身份调成长系统的固定响应（见 growth_post）
+        if ev.get("personal_only").is_some() || qv.get("personal_only").is_some() {
+            return json!({ "ok": false, "personal_only": true,
+                "error": "宠物/成长系统仅个人版可用（该账号当前是企业版身份）" });
+        }
         return json!({ "ok": false, "error": format!("能量接口 HTTP {} / 额度接口 HTTP {}", e_status, q_status) });
     }
     let e_body = ev.get("body").cloned().unwrap_or(Value::Null);
@@ -2034,6 +2088,11 @@ pub fn pet_draw_as(login: &LoginInfo, count: u64) -> Value {
     let r = call_api_as(login, &format!("{}{}", api_base(login), PET_OPEN), "POST", &body);
     match r {
         Ok(v) => {
+            let v = growth_post(v);
+            if v.get("personal_only").is_some() {
+                return json!({ "ok": false, "status": 403, "personal_only": true,
+                    "error": v.get("error").cloned().unwrap_or(json!("宠物仅个人版可用")) });
+            }
             let status = v.get("status").and_then(|x| x.as_u64()).unwrap_or(0);
             let b = v.get("body").cloned().unwrap_or(Value::Null);
             let (code, msg, data) = growth_unwrap(&b);

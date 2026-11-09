@@ -106,6 +106,11 @@
     .acc .info .n{font-size:12px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
     .acc .info .s{font-size:10px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:1px;}
     .acc .cur{font-size:9px;color:var(--green);border:1px solid rgba(61,220,151,.45);border-radius:5px;padding:1px 5px;background:rgba(61,220,151,.08);}
+    /* v0.6.28 顶栏功能 tab：替代上下滚动找功能。点击只显示对应分组区块。 */
+    .tabs-bar{display:flex;gap:6px;margin:-6px 0 16px;flex-wrap:wrap;}
+    .tab-btn{padding:6px 14px;border-radius:9px;border:1px solid var(--line);background:rgba(255,255,255,.04);color:var(--muted);font-size:12px;cursor:pointer;transition:.15s;font-weight:500;}
+    .tab-btn:hover{color:var(--fg);border-color:var(--line-strong);}
+    .tab-btn.active{background:var(--accent-grad);color:#fff;border-color:transparent;font-weight:600;box-shadow:0 2px 10px rgba(109,92,255,.35);}
     /* v0.6.27 B 方案：低频区块标题可折叠、默认收起（用户反馈"太多太杂"）。
        只改视觉层级，不动任何渲染逻辑——面板内容按需照常填充。 */
     .section-title.foldable{cursor:pointer;user-select:none;}
@@ -525,6 +530,15 @@
 
   <!-- 主区 -->
   <main class="main">
+    <div class="tabs-bar" id="tabs-bar">
+      <button class="tab-btn active" data-tab="account" onclick="showTab('account')">👤 账户</button>
+      <button class="tab-btn" data-tab="checkin" onclick="showTab('checkin')">✅ 签到</button>
+      <button class="tab-btn" data-tab="quota" onclick="showTab('quota')">📊 额度</button>
+      <button class="tab-btn" data-tab="health" onclick="showTab('health')">🩺 健康</button>
+      <button class="tab-btn" data-tab="pet" onclick="showTab('pet')">🐾 宠物</button>
+      <button class="tab-btn" data-tab="memory" onclick="showTab('memory')">🧠 记忆</button>
+      <button class="tab-btn" data-tab="tools" onclick="showTab('tools')">🧰 工具</button>
+    </div>
     <div class="topbar">
       <div>
         <h1>WorkBuddy 账户中枢</h1>
@@ -533,6 +547,7 @@
       <div class="spacer"></div>
       <button onclick="refreshAll()">刷新全部</button>
       <button class="secondary" onclick="doCheckinAll()">一键签到</button>
+      <button class="secondary" onclick="buildDailyReport()">📊 战报</button>
       <div class="notify-wrap" id="more-wrap">
         <button class="secondary" id="more-btn" title="更多操作" onclick="toggleMore()">⋯</button>
         <div class="notify-dropdown more-dropdown" id="more-dropdown">
