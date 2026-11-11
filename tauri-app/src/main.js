@@ -2601,6 +2601,9 @@ function showTab(tab) {
     // 嵌套在 panel 里的子标题（可选地点/操作日志）随父区块显隐，不单独处理
     if (!t.parentElement || t.parentElement.classList.contains('panel')) return;
     const show = t.dataset.tab === tab;
+    // v0.6.32：主动进入某个 tab 时，自动展开其下被折叠的区块——
+    // 否则「额度」「记忆」「工具」等 tab 只剩一个标题，整片区域是黑的（用户实录）。
+    if (show && t.classList.contains('collapsed')) t.classList.remove('collapsed');
     t.style.display = show ? '' : 'none';
     const folded = t.classList.contains('foldable') && t.classList.contains('collapsed');
     let el = t.nextElementSibling;
