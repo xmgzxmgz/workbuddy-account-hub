@@ -2054,15 +2054,26 @@ function autoCheckin() {
 function loadNetworkParts() {
   // 回调可能同步返回 false（如无登录态时），必须包一层 Promise.resolve 再 .then，
   // 否则 false.then 抛 TypeError 并沿同步链炸掉整个启动加载（他人机器无登录态必现）
-  const retry = (fn, tries) => {
+  const retry = (fn, tries, onFail) => {
     Promise.resolve(fn()).then(ok => {
-      if (!ok && tries < 4) setTimeout(() => retry(fn, tries + 1), 800 * (tries + 1));
+      if (!ok) {
+        if (tries < 4) setTimeout(() => retry(fn, tries + 1, onFail), 800 * (tries + 1));
+        else if (onFail) onFail();
+      }
     });
+  };
+  const quotaFail = (msg) => {
+    // 4 次重试都失败 → 必须让用户看到原因，否则就是"额度一片空白"（v0.6.31）
+    const tb = $('pkg-body');
+    if (tb) tb.innerHTML = `<tr><td colspan="8" class="perm-denied">额度加载失败：${escapeHtml(msg)}<br>点右上角「刷新全部」重试，或到 🩺 健康 tab 做一次预检看具体原因</td></tr>`;
+    const en = $('expire-note'); if (en) en.innerHTML = '⚠ 额度加载失败：' + escapeHtml(msg);
+    bootLog('额度加载失败：' + msg, 'err');
   };
   retry(() => invoke('get_quota').then(j => {
     if (j && (j.status === 200 || j.permission_denied)) { renderQuota(j); return true; }
-    return false;   // 静默失败，交给重试兜底，避免启动时反复弹 toast
-  }).catch(e => { console.warn('quota err', e); return false; }), 0);
+    if (j && j.error) window.__quotaErr = j.error;
+    return false;   // 静默重试，避免启动时反复弹 toast
+  }).catch(e => { window.__quotaErr = String(e); return false; }), 0, () => quotaFail(window.__quotaErr || '接口无响应'));
 
   retry(() => invoke('get_checkin').then(j => {
     if (j && j.status === 200) { window.__checkin = j.body || {}; renderCheckin(parseBody(j.body)); return true; }
@@ -2574,6 +2585,16 @@ function guessTab(text) {
   if (t.includes('工具') || t.includes('自动化')) return 'tools';
   return 'account';
 }
+// tab 懒加载（v0.6.31）：这三个 tab 的数据原本只在点按钮时才拉，
+// 用户切过去看到的是空表，误以为"没数据/坏了"。改成首次进入自动加载。
+const __tabLoaded = {};
+const TAB_LOADERS = {
+  quota: () => loadQuotaAll(),
+  health: () => loadPreflight(),
+  memory: () => loadMemoryAll(),
+  pet: () => loadBuddy(),
+  tools: () => { try { loadModels(); } catch (e) {} },
+};
 function showTab(tab) {
   document.querySelectorAll('.section-title').forEach(t => {
     if (!t.dataset.tab) t.dataset.tab = guessTab(t.textContent);
@@ -2594,6 +2615,12 @@ function showTab(tab) {
   document.querySelectorAll('.tabs-bar .tab-btn').forEach(b =>
     b.classList.toggle('active', b.dataset.tab === tab));
   window.scrollTo(0, 0);
+  // 首次进入该 tab → 自动拉一次数据（延后 60ms 让显隐先完成，避免在隐藏容器里渲染）
+  if (!__tabLoaded[tab]) {
+    __tabLoaded[tab] = 1;
+    const fn = TAB_LOADERS[tab];
+    if (fn) setTimeout(() => { try { fn(); } catch (e) { console.warn('tab load', tab, e); } }, 60);
+  }
 }
 
 bootLog('脚本末尾：bootBootstrap 已调用');
