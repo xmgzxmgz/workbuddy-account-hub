@@ -1182,6 +1182,21 @@ function confirmDismiss(v) {
   if (r) r(v);
 }
 
+// ===== 分组空间修复（v0.6.33，issue #6）=====
+// 官方 5.11.2 切账号只归并 sessions.user_id，spaces 不跟随 → 「选择分组」下拉为空。
+// 切换流程已自动修，这里给手动入口（换客户端版本/历史数据可重跑）。
+async function repairSpaces() {
+  const el = $('sp-state');
+  if (el) el.textContent = '修复中…';
+  const r = await invoke('repair_spaces_now').catch(e => ({ ok: false, error: String(e) }));
+  if (!r || !r.ok) { if (el) el.textContent = '✗ ' + ((r && r.error) || '失败'); return; }
+  if (r.skipped) { if (el) el.textContent = r.reason || '当前客户端无需修复'; return; }
+  const msg = `归属 ${r.aligned} · 合并重名 ${r.dup_merged} · 重定向会话 ${r.session_redirected} · 补文件夹 ${r.primary_filled}（共 ${r.spaces_total} 个分组）`;
+  if (el) el.textContent = '✓ ' + msg;
+  NotifyCenter.push('分组空间修复：' + msg, 'ok');
+  toast('分组空间已修复，重启客户端后「选择分组」应恢复', 'ok');
+}
+
 // ===== 成长任务（v0.6.29）：展示进度 + 领取已完成任务的奖励 =====
 async function loadGrowthTasks() {
   const box = $('gt-list'); if (!box) return;
@@ -2340,7 +2355,7 @@ async function restartWB() {
 
 // 暴露给 inline onclick（安全：未定义的函数跳过，不影响其余，更不阻断 bootBootstrap）
 (function expose(){
-  const names = ['addModel','editModel','buildDailyReport','delModel','testModel','testCurrentForm','saveModel','closeModelModal','restartWB','loadAll','loadQuota','doCheckin','openReport','closeReport','copyReport','ensureSnapshot','backupAll','saveCurrentLogin','switchTo','openBackups','renderBackups','openBackupDetail','closeBackups','closeBackupDetail','loadBuddy','buddyDepart','buddyClaim','buddyDepartAll','buddyClaimAll','buddyDepartFor','buddyClaimFor','refreshBuddyAll','doCheckinAll','loadQuotaAll','qaCheckinFor','toggleAllKeys','refreshAll','uhRefresh','uhExportJson','uhExportCsv','loadMemoryAll','qaToggleRank','exportQuotaMd','applyQuotaAllFilters','toggleStar','openTagInput','saveWebhook','testWebhook','toggleAutoRefresh','runAutoRefresh','doCopySessions','toggleGateway','copyGatewayUrl','loadGrowthTasks','claimGrowthTask'];
+  const names = ['addModel','editModel','buildDailyReport','delModel','testModel','testCurrentForm','saveModel','closeModelModal','restartWB','loadAll','loadQuota','doCheckin','openReport','closeReport','copyReport','ensureSnapshot','backupAll','saveCurrentLogin','switchTo','openBackups','renderBackups','openBackupDetail','closeBackups','closeBackupDetail','loadBuddy','buddyDepart','buddyClaim','buddyDepartAll','buddyClaimAll','buddyDepartFor','buddyClaimFor','refreshBuddyAll','doCheckinAll','loadQuotaAll','qaCheckinFor','toggleAllKeys','refreshAll','uhRefresh','uhExportJson','uhExportCsv','loadMemoryAll','qaToggleRank','exportQuotaMd','applyQuotaAllFilters','toggleStar','openTagInput','saveWebhook','testWebhook','toggleAutoRefresh','runAutoRefresh','doCopySessions','toggleGateway','copyGatewayUrl','loadGrowthTasks','claimGrowthTask','repairSpaces'];
   for (const n of names) {
     try {
       const fn = eval(n);

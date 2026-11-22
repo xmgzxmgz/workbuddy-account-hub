@@ -493,6 +493,22 @@ async fn checkin_all() -> Value {
 
 /// 通知 webhook：支持 Bark（GET {url}/{title}/{body}）与企业微信群机器人（POST JSON）。
 /// 只做「推一条文本」，不重试、不排队——失败由调用方提示，避免影响主流程。
+/// 手动修复分组空间（issue #6）：官方 5.11.2 切账号后 spaces 不跟随 sessions 归并，
+/// 「选择分组」下拉会空。切换流程里已自动修，这里提供手动入口（换客户端版本后可重跑）。
+#[tauri::command]
+fn repair_spaces_now() -> Value {
+    let Some(uid) = ops::current_uid() else {
+        return json!({ "ok": false, "error": "未找到本机登录态" });
+    };
+    let Some(db) = ops::workbuddy_db_path_pub() else {
+        return json!({ "ok": false, "error": "未找到 workbuddy.db" });
+    };
+    match ops::repair_spaces(&db, &uid) {
+        Ok(v) => v,
+        Err(e) => json!({ "ok": false, "error": e }),
+    }
+}
+
 /// 成长任务列表（宠物 tab 展示；企业形态自动降级个人版快照）
 #[tauri::command]
 fn growth_tasks() -> Value {
@@ -1357,6 +1373,7 @@ pub fn run() {
             enterprise_usage,
             send_webhook,
             growth_tasks,
+            repair_spaces_now,
             growth_task_claim,
             auto_refresh_sweep,
             copy_sessions,

@@ -846,6 +846,18 @@
         </div>
       </div>
       <div class="panel">
+        <h2>分组空间修复 <span class="tag">issue #6 · 官方 5.11.2</span></h2>
+        <div class="kv" style="font-size:11.5px;line-height:1.7;">
+          <div class="item"><span class="k">症状</span><span class="v">切账号后「选择分组」下拉变空、同名分组重复</span></div>
+          <div class="item"><span class="k">原因</span><span class="v">官方只归并 sessions.user_id，spaces 不跟随</span></div>
+          <div class="item"><span class="k">修复</span><span class="v">对齐归属 · 合并同名 · 补 primary_folder_path</span></div>
+        </div>
+        <div style="display:flex;gap:8px;margin-top:8px;align-items:center;">
+          <button class="mini" onclick="repairSpaces()">立即修复</button>
+          <span class="empty" id="sp-state" style="font-size:10.5px;">切换账号时会自动修复</span>
+        </div>
+      </div>
+      <div class="panel">
         <h2>OpenAI 兼容网关 <span class="tag">仅 127.0.0.1</span></h2>
         <div class="kv" style="font-size:11.5px;line-height:1.7;">
           <div class="item"><span class="k">状态</span><span class="v" id="gw-state">未启动</span></div>

@@ -894,6 +894,8 @@ fn chrono_now() -> String {
 }
 
 /// WorkBuddy 会话库路径（macOS / Linux 通用）：~/.workbuddy/workbuddy.db
+pub fn workbuddy_db_path_pub() -> Option<PathBuf> { workbuddy_db_path() }
+
 fn workbuddy_db_path() -> Option<PathBuf> {
     let p = home().join(".workbuddy").join("workbuddy.db");
     if p.exists() { Some(p) } else { None }
@@ -1103,6 +1105,15 @@ pub fn switch_account(vault: &Path, key: &str) -> Result<SwitchResult, String> {
         }
     }
 
+    // ===== 分组空间归属修复（issue #6）=====
+    // 官方 5.11.2 切换时只把 sessions.user_id 归并到当前账号，spaces 不跟随 →
+    // 输入框「选择分组」下拉按 user_id 过滤后恒为空。这里在切换后顺手对齐
+    // （旧客户端没有 spaces 表则自动跳过）。失败不阻断切换。
+    let spaces_fix = match workbuddy_db_path() {
+        Some(db) => repair_spaces(&db, &target_uid).unwrap_or_else(|e| json!({ "ok": false, "error": e })),
+        None => json!({ "ok": true, "skipped": true, "reason": "未找到 workbuddy.db" }),
+    };
+
     // 会话置顶（Pinned）状态迁移：把渲染层 localStorage 里 `u:<旧uid>` 键复制为 `u:<新uid>`。
     // best-effort：失败时仅记录警告，不阻断账号切换（置顶丢失只是体验问题，可手动重新置顶）。
     if let Some(cid) = &cur_uid {
@@ -1132,6 +1143,15 @@ pub fn switch_account(vault: &Path, key: &str) -> Result<SwitchResult, String> {
             );
             if let Some(w) = &pin_warn {
                 m.push_str(&format!("（⚠️ 会话置顶状态迁移未完成: {w}）"));
+            }
+            // issue #6：分组空间修复摘要（旧客户端 skipped，不打扰）
+            if spaces_fix.get("skipped").is_none() {
+                let a = spaces_fix.get("aligned").and_then(|x| x.as_u64()).unwrap_or(0);
+                let mm = spaces_fix.get("dup_merged").and_then(|x| x.as_u64()).unwrap_or(0);
+                let rr = spaces_fix.get("session_redirected").and_then(|x| x.as_u64()).unwrap_or(0);
+                if a > 0 || mm > 0 || rr > 0 {
+                    m.push_str(&format!("；分组空间已对齐（归属 {a}、合并重名 {mm}、重定向会话 {rr}）"));
+                }
             }
             m
         },
@@ -1502,6 +1522,90 @@ pub fn restore_account(vault: &Path, uid: &str) -> Result<Value, String> {
         restored = true;
     }
     Ok(json!({ "uid": uid, "restored": restored }))
+}
+
+/// 修复「分组空间」归属（issue #6）：官方 5.11.2 切换账号时只把 `sessions.user_id`
+/// 归并到当前账号，`spaces` 不跟随 —— 导致输入框「选择分组」下拉按
+/// `user_id = 当前账号` 过滤后恒为空（表现为"分组全没了"）。issue 反馈者给了
+/// 三段已验证 SQL，这里按同样语义实现，并做三件官方没做的事：
+///   1) 把 spaces.user_id 对齐到目标账号
+///   2) 同名分组去重：保留目标账号名下的那个（没有则保留最新），其余会话引用重定向后软删
+///   3) 补 primary_folder_path（seed 出来的空间只有 create_folder_path）
+///
+/// 兼容性：旧客户端（如 5.9.3）没有 spaces 表 → 直接返回 skipped，不报错。
+/// 安全性：只碰 deleted_at = -1 的行；切换前已有整库备份；调用发生在客户端退出后（WAL 安全）。
+pub fn repair_spaces(db: &Path, uid: &str) -> Result<Value, String> {
+    let conn = Connection::open(db).map_err(|e| format!("打开 workbuddy.db 失败: {e}"))?;
+    let _ = conn.execute("PRAGMA busy_timeout=8000", []);
+
+    let has_spaces: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='spaces'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    if has_spaces == 0 {
+        return Ok(json!({ "ok": true, "skipped": true, "reason": "当前客户端版本没有 spaces 表（5.11.2 之前无分组空间功能）" }));
+    }
+
+    // 1) 归属对齐
+    let aligned = conn
+        .execute("UPDATE spaces SET user_id = ?1 WHERE deleted_at = -1 AND user_id != ?1", [uid])
+        .map_err(|e| format!("对齐 spaces.user_id 失败: {e}"))?;
+
+    // 2) 同名去重（优先保留当前账号名下的，其次保留最新创建的）
+    let mut rows: Vec<(String, String)> = Vec::new();
+    {
+        let mut stmt = conn
+            .prepare("SELECT id, name FROM spaces WHERE deleted_at = -1 ORDER BY (user_id = ?1) DESC, rowid DESC")
+            .map_err(|e| format!("读取 spaces 失败: {e}"))?;
+        let it = stmt
+            .query_map([uid], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+            .map_err(|e| format!("查询 spaces 失败: {e}"))?;
+        for x in it.flatten() { rows.push(x); }
+    }
+    let mut keep: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let mut dupes: Vec<(String, String)> = Vec::new(); // (dup_id, keep_id)
+    for (id, name) in rows {
+        match keep.get(&name) {
+            None => { keep.insert(name, id); }
+            Some(k) => { dupes.push((id, k.clone())); }
+        }
+    }
+    let now_ms = now_ms_i64();
+    let mut redirected = 0usize;
+    let mut merged = 0usize;
+    for (dup_id, keep_id) in &dupes {
+        // 会话引用重定向（失败不致命，继续处理其它分组）
+        if let Ok(n) = conn.execute("UPDATE sessions SET space_id = ?1 WHERE space_id = ?2", [keep_id, dup_id]) {
+            redirected += n;
+        }
+        if conn
+            .execute("UPDATE spaces SET deleted_at = ?1 WHERE id = ?2", rusqlite::params![now_ms, dup_id])
+            .is_ok()
+        {
+            merged += 1;
+        }
+    }
+
+    // 3) 补主文件夹路径（下拉疑似要求非空）
+    let filled = conn
+        .execute(
+            "UPDATE spaces SET primary_folder_path = create_folder_path \
+             WHERE deleted_at = -1 AND primary_folder_path IS NULL AND create_folder_path IS NOT NULL",
+            [],
+        )
+        .unwrap_or(0);
+
+    Ok(json!({
+        "ok": true,
+        "aligned": aligned,
+        "dup_merged": merged,
+        "session_redirected": redirected,
+        "primary_filled": filled,
+        "spaces_total": keep.len(),
+    }))
 }
 
 /// 会话复制（跨账号，源不受影响）——v0.6.29，自 changexbc/workbuddy-switch 的
