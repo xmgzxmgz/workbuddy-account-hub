@@ -112,3 +112,58 @@ jobs:
           tag_name: ${{ github.ref_name }}
           files: "WorkBuddy-Account-Hub_${{ github.ref_name }}_portable-x64.zip"
           draft: false
+
+  # ---------- 收口 ----------
+  # 为什么单独一个 job 而不在两个 build job 里各自填 releaseBody：
+  # tauri-action 在创建/更新 release 时会带上 releaseBody（默认空串），
+  # 两个平台都会去调 updateRelease，谁后跑谁说了算 —— 结果就是正文被空串覆盖，
+  # 这正是此前 30+ 个版本正文全空的成因。所以正文只在一个地方写，且写在最后。
+  finalize-release:
+    needs: [build-macos, build-windows]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # 即使某个平台的构建失败，也要把正文写上并提示，别留下空 release
+    if: always() && needs.build-macos.result != 'cancelled' && needs.build-windows.result != 'cancelled'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Generate release notes from CHANGELOG
+        id: notes
+        run: |
+          set -euo pipefail
+          OUT=".release-notes.md"
+          if python3 scripts/changelog_notes.py --tag "${GITHUB_REF_NAME}" --out "$OUT"; then
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+            {
+              echo "**${GITHUB_REF_NAME}**"
+              echo
+              echo "> 本次发布未在 CHANGELOG.md 找到对应条目。"
+              echo "> 维护者请补写 CHANGELOG 后手动编辑本 Release 正文。"
+              echo
+              echo "### 下载"
+              echo "- Windows：\`..._x64-setup.exe\`（安装版）/ \`..._portable-x64.zip\`（免安装）"
+              echo "- macOS：\`..._aarch64.dmg\`"
+            } > "$OUT"
+          fi
+          echo "----- 生成的正文 -----"
+          cat "$OUT"
+
+      - name: Apply release notes
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          # 两个平台都构建失败时 release 根本不存在，此时 gh release edit 会硬失败，
+          # 把一个"构建失败"变成两个失败，反而看不清主因。这里降级为一条 warning。
+          if ! gh release view "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            echo "::warning title=Release 不存在::${GITHUB_REF_NAME} 没有创建 release（构建可能全部失败），跳过正文写入。"
+            exit 0
+          fi
+          gh release edit "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" --notes-file .release-notes.md
+
+      - name: Warn if CHANGELOG entry missing
+        if: steps.notes.outputs.ok == 'false'
+        run: |
+          echo "::warning title=CHANGELOG 缺条目::${GITHUB_REF_NAME} 没有在 CHANGELOG.md 中写条目，已用兜底正文。"
